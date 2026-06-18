@@ -1,0 +1,94 @@
+name: 'Full-site link & image check'
+description: >-
+  Curl-based broken-link / image / outbound crawl of a WordPress site,
+  driven by its Rank Math sitemap. A broken internal link/image or a dead
+  outbound (404/410) fails the step; flaky externals are non-fatal. Can
+  open and auto-close a GitHub issue with the broken-link report.
+
+inputs:
+  sitemap-url:
+    description: 'Rank Math sitemap_index.xml URL to expand into the page list.'
+    required: true
+  host:
+    description: 'Internal host. Links to this host + its subdomains are fatal if broken.'
+    required: true
+  verify-token:
+    description: 'X-Verify-Source WAF-bypass token. Sent ONLY to the internal host.'
+    required: false
+    default: ''
+  allow-file:
+    description: 'Path (relative to the caller checkout) to a baselined-URL allow-list.'
+    required: false
+    default: 'scripts/linkcheck-allow.txt'
+  workers:
+    description: 'Concurrent curl workers.'
+    required: false
+    default: '10'
+  manage-issue:
+    description: 'Open/auto-close a GitHub issue on failure/clean. Needs `issues: write`.'
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Expand sitemap → page list
+      shell: bash
+      env:
+        VERIFY_HOMEPAGE_TOKEN: ${{ inputs.verify-token }}
+      run: |
+        python3 "${{ github.action_path }}/scripts/sitemap-urls.py" "${{ inputs.sitemap-url }}" > pages.txt
+        N=$(grep -c . pages.txt || true)
+        echo "Collected $N page URLs across the sitemap"
+        [ "$N" -gt 0 ] || { echo "::error::sitemap expansion produced no URLs (sitemap down?)"; exit 1; }
+
+    - name: Crawl + check every link & image
+      shell: bash
+      env:
+        LINKCHECK_HOST: ${{ inputs.host }}
+        LINKCHECK_WORKERS: ${{ inputs.workers }}
+        LINKCHECK_ALLOW: ${{ github.workspace }}/${{ inputs.allow-file }}
+        VERIFY_HOMEPAGE_TOKEN: ${{ inputs.verify-token }}
+      run: |
+        set -o pipefail
+        python3 "${{ github.action_path }}/scripts/linkcheck.py" - < pages.txt | tee linkcheck-report.txt
+        rc=${PIPESTATUS[0]}
+        { echo '## Weekly full-site link & image check'; echo; echo '```'; cat linkcheck-report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        exit "$rc"
+
+    - name: Open / update the broken-links issue
+      if: ${{ failure() && inputs.manage-issue == 'true' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        SERVER_URL: ${{ github.server_url }}
+        RUN_ID: ${{ github.run_id }}
+      run: |
+        TITLE="Weekly link check: broken links found"
+        run_url="${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
+        report="$(awk '/^=== link check/{p=1} p' linkcheck-report.txt 2>/dev/null)"
+        [ -n "$report" ] || report="(report unavailable — open the run log)"
+        body="$(printf 'The weekly full-site check found broken links on **%s**.\n\nRun: %s\n\nThis issue auto-closes when the next run is clean.\n\n```\n%s\n```\n' "$(date -u +%Y-%m-%d)" "$run_url" "$report")"
+        num="$(gh issue list -R "$REPO" --state open --search "$TITLE in:title" --json number,title --jq ".[] | select(.title==\"$TITLE\") | .number" | head -1)"
+        if [ -n "$num" ]; then
+          gh issue comment "$num" -R "$REPO" --body "$body" && echo "Commented on issue #$num"
+        else
+          gh issue create -R "$REPO" --title "$TITLE" --body "$body"
+        fi
+
+    - name: Close the broken-links issue when clean
+      if: ${{ success() && inputs.manage-issue == 'true' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+      run: |
+        TITLE="Weekly link check: broken links found"
+        num="$(gh issue list -R "$REPO" --state open --search "$TITLE in:title" --json number,title --jq ".[] | select(.title==\"$TITLE\") | .number" | head -1)"
+        if [ -n "$num" ]; then
+          gh issue comment "$num" -R "$REPO" --body "Resolved — the weekly full-site check is clean (0 broken) as of $(date -u +%Y-%m-%d)."
+          gh issue close "$num" -R "$REPO" && echo "Closed issue #$num"
+        fi

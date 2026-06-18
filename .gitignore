@@ -1,0 +1,5 @@
+# runtime artifacts produced by the action when run locally
+__pycache__/
+*.pyc
+pages.txt
+linkcheck-report.txt

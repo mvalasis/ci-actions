@@ -1,0 +1,33 @@
+name: linkcheck self-test
+
+# Manually validate the linkcheck action end-to-end against any site,
+# without touching a site repo. Issue management is forced off so this
+# never opens issues in ci-actions itself.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sitemap-url:
+        description: 'Rank Math sitemap_index.xml to crawl'
+        required: true
+        default: 'https://www.hlektrologos-vlaves.gr/sitemap_index.xml'
+      host:
+        description: 'Internal host'
+        required: true
+        default: 'hlektrologos-vlaves.gr'
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./linkcheck
+        with:
+          sitemap-url: ${{ inputs.sitemap-url }}
+          host: ${{ inputs.host }}
+          verify-token: ${{ secrets.VERIFY_HOMEPAGE_TOKEN }}
+          manage-issue: 'false'
