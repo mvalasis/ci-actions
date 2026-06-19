@@ -121,11 +121,11 @@ def status(url):
         except (ValueError, AttributeError):
             return 0
     code = one(["-I"])
-    if code in (0, 403, 405, 501):  # hosts that dislike HEAD — confirm with GET
+    if code in (0, 403, 405, 500, 501):  # HEAD-hostile (incl. flaky CF 500-on-HEAD) — confirm with GET
         g = one([])
         if g:
             code = g
-    if code in (0, 502, 503, 504):  # one retry for transient
+    if code in (0, 500, 502, 503, 504):  # one re-check for transient 5xx (CF/Kinsta edge)
         r = one(["-I"]) or one([])
         if r:
             code = r
