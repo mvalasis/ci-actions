@@ -33,8 +33,9 @@ Policy (tuned so external rot never cries wolf on a weekly cron):
   OK = 2xx/3xx, or an "alive but blocking" code (401/403/429/503/999).
 
 Excludes (never checked): WP internals (xmlrpc/wp-admin/wp-login/wp-json),
-Woo action URLs (add-to-cart / cart / checkout / logout), and bot-hostile
-social domains that 403/429/999 crawlers.
+the Cloudflare /cdn-cgi/ email-obfuscation shim, Woo action URLs
+(add-to-cart / cart / checkout / logout), and bot-hostile social domains
+that 403/429/999 crawlers.
 """
 import concurrent.futures
 import os
@@ -61,6 +62,9 @@ if os.path.exists(_allow):
 
 EXCLUDE = re.compile("|".join([
     r"xmlrpc\.php", r"/wp-login\.php", r"/wp-admin", r"/wp-json",
+    # Cloudflare email-obfuscation shim injected into scraped HTML, not a real
+    # content link — 404s on CF-proxied zones when Scrape Shield is off.
+    r"/cdn-cgi/",
     r"add-to-cart=", r"/cart/?(\?|$)", r"/checkout/?(\?|$)", r"\blogout\b",
     # Bot-hostile social domains — they 403/429/999 crawlers; never fatal
     # anyway (they're outbound), so skip them to keep the report quiet.
