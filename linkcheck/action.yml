@@ -56,6 +56,15 @@ runs:
         { echo '## Weekly full-site link & image check'; echo; echo '```'; cat linkcheck-report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
         exit "$rc"
 
+    - name: Upload the REVIEW queue (WAF-fronted URLs to verify out-of-band)
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: linkcheck-review
+        path: linkcheck-review.txt
+        if-no-files-found: ignore
+        retention-days: 14
+
     - name: Open / update the broken-links issue
       if: ${{ failure() && inputs.manage-issue == 'true' }}
       continue-on-error: true

@@ -30,7 +30,13 @@ Policy (tuned so external rot never cries wolf on a weekly cron):
   * INTERNAL link/image not OK            -> FATAL (our own site must work)
   * EXTERNAL link returning 404 or 410    -> FATAL (clearly dead outbound)
   * EXTERNAL anything else not OK         -> WARN  (timeout / 5xx / no-conn)
+  * ANY response with a WAF fingerprint   -> REVIEW (status untrusted: a block
+                                                    or challenge, not a verdict)
   OK = 2xx/3xx, or an "alive but blocking" code (401/403/429/503/999).
+
+REVIEW URLs (WAF-fronted, status unknowable from a datacenter IP) are written
+to linkcheck-review.txt and are NON-fatal — an out-of-band browser verifier on
+a residential IP gives the real verdict.
 
 Excludes (never checked): WP internals (xmlrpc/wp-admin/wp-login/wp-json),
 the Cloudflare /cdn-cgi/ email-obfuscation shim, Woo action URLs
@@ -75,6 +81,22 @@ IMG_RE = re.compile(r'<img\b[^>]*\bsrc="([^"]+)"', re.I)
 SCRIPT_STYLE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.I | re.S)
 ACCEPT = {401, 403, 429, 503, 999}  # non-2xx/3xx but the host is alive
 
+# Response-header fingerprint of an anti-bot WAF / CDN edge that served a
+# bot-block or JS-challenge instead of the origin's real answer. When present,
+# the HTTP status is UNTRUSTWORTHY from CI — a 404 may be a block, a 202/200 a
+# challenge masking a dead page — identically for LIVE and DEAD URLs. Such URLs
+# are routed to REVIEW (verified out-of-band by a real browser on a residential
+# IP), never silently failed or passed. BEHAVIOURAL, not a domain allowlist:
+# any WAF-fronted host trips it. Verified 2026-06-22 from a datacenter IP —
+# eur-lex.europa.eu (AWS WAF behind CloudFront) returns x-amzn-waf-action +
+# `X-Cache: Error from cloudfront`.
+WAF_BLOCK_RE = re.compile(
+    r"^x-amzn-waf-action:"                       # AWS WAF (challenge/captcha/block)
+    r"|^cf-mitigated:|^cf-chl-bypass:"           # Cloudflare challenge
+    r"|^x-cache:\s*error from cloudfront",       # CloudFront edge error (WAF/block)
+    re.I | re.M,
+)
+
 
 def is_internal(url):
     h = (urlsplit(url).hostname or "").lower()
@@ -113,28 +135,37 @@ def extract(page_url, page_html):
 
 
 def status(url):
-    """HTTP status code (int) for url, 0 if no response. HEAD, GET fallback."""
+    """(code, blocked) for url. code = HTTP status (0 = no response); blocked =
+    the response carried an anti-bot WAF fingerprint, so the status is untrusted.
+    HEAD first, GET fallback for HEAD-hostile codes."""
     def one(method):
-        r = curl(["-o", "/dev/null", "-w", "%{http_code}", "-L"] + method, url)
-        try:
-            return int(r.stdout.decode().strip()[:3])
-        except (ValueError, AttributeError):
-            return 0
-    code = one(["-I"])
+        # -D - dumps response headers to stdout; sentinel-tagged code goes last.
+        r = curl(["-o", "/dev/null", "-D", "-", "-L", "-w", "\n__CODE__%{http_code}"] + method, url)
+        out = r.stdout.decode("utf-8", "ignore")
+        m = re.search(r"__CODE__(\d{3})\s*$", out)
+        return (int(m.group(1)) if m else 0), out
+    code, hdrs = one(["-I"])
     if code in (0, 403, 405, 500, 501):  # HEAD-hostile (incl. flaky CF 500-on-HEAD) — confirm with GET
-        g = one([])
-        if g:
-            code = g
+        g_code, g_hdrs = one([])
+        if g_code:
+            code, hdrs = g_code, g_hdrs
     if code in (0, 500, 502, 503, 504):  # one re-check for transient 5xx (CF/Kinsta edge)
-        r = one(["-I"]) or one([])
-        if r:
-            code = r
-    return code
+        r_code, r_hdrs = one(["-I"])
+        if not r_code:
+            r_code, r_hdrs = one([])
+        if r_code:
+            code, hdrs = r_code, r_hdrs
+    return code, bool(WAF_BLOCK_RE.search(hdrs))
 
 
-def verdict(url, code):
+def verdict(url, code, blocked):
     if url in ALLOW:
         return "ok"
+    # A WAF fingerprint means the status is untrustworthy (a block wearing a 404,
+    # or a challenge wearing a 2xx) — for our own host too. Route to REVIEW for
+    # out-of-band browser verification rather than guess fatal/ok.
+    if blocked:
+        return "review"
     if 200 <= code < 400 or code in ACCEPT:
         return "ok"
     if is_internal(url):
@@ -160,15 +191,17 @@ def main():
     print(f"Checking {len(targets)} unique links/images...", file=sys.stderr)
 
     with concurrent.futures.ThreadPoolExecutor(WORKERS) as ex:
-        codes = dict(zip(targets, ex.map(status, targets)))
+        results = dict(zip(targets, ex.map(status, targets)))  # url -> (code, blocked)
 
-    fatal, warn = [], []
-    for url, code in sorted(codes.items()):
-        v = verdict(url, code)
+    fatal, warn, review = [], [], []
+    for url, (code, blocked) in sorted(results.items()):
+        v = verdict(url, code, blocked)
         if v == "fatal":
             fatal.append((url, code))
         elif v == "warn":
             warn.append((url, code))
+        elif v == "review":
+            review.append((url, code))
 
     def show(title, rows):
         print(f"\n{title} ({len(rows)})")
@@ -178,15 +211,24 @@ def main():
             where = f"{src}" + (f" (+{n - 1} more)" if n > 1 else "")
             print(f"  [{code or 'conn-fail'}] {url}\n      on: {where}")
 
+    # REVIEW queue: URLs whose CI status can't be trusted (WAF-fronted). Written
+    # for the out-of-band browser verifier (residential IP); NON-fatal so the
+    # weekly cron stays green on WAF noise alone.
+    if review:
+        with open("linkcheck-review.txt", "w", encoding="utf-8") as f:
+            f.write("\n".join(url for url, _ in review) + "\n")
+
     print(f"\n=== link check: {len(targets)} checked | "
-          f"{len(fatal)} fatal | {len(warn)} warn ===")
+          f"{len(fatal)} fatal | {len(warn)} warn | {len(review)} review ===")
     if warn:
         show("WARN (external, non-fatal)", warn)
+    if review:
+        show("REVIEW (WAF status untrusted — verify in a browser)", review)
     if fatal:
         show("FATAL (broken)", fatal)
         print("\nlink check: FAIL")
         sys.exit(1)
-    print("\nlink check: PASS")
+    print(f"\nlink check: PASS{f' — {len(review)} queued for browser review' if review else ''}")
 
 
 if __name__ == "__main__":
