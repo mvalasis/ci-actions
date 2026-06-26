@@ -31,23 +31,25 @@ if [ -z "$urls" ]; then note "- no URLs to audit — skipped"; exit 0; fi
 count=$(printf '%s\n' "$urls" | wc -l | tr -d ' ')
 note "- standard: \`$STANDARD\` · runners: \`$RUNNER\` · URLs: $count"
 
-# Generate the pa11y-ci config (JSON). Inject the WAF-bypass header when present.
+# Generate the pa11y-ci config (JSON).
 runners_json=$(printf '"%s",' $RUNNER | sed 's/,$//')
 urls_json=$(printf '%s\n' "$urls" | sed 's#.*#"&"#' | paste -sd, -)
-headers_json=""
-[ -n "${VERIFY_TOKEN:-}" ] && headers_json='"headers": { "X-Verify-Source": "'"$VERIFY_TOKEN"'" }, '
+# headers: a dummy `_lscache_vary` cookie makes LiteSpeed "Guest Mode" SKIP its
+# first-visit JS reload — the client only reloads when that cookie is absent, and
+# on a cookie-less CI runner the reload navigates mid-audit and throws "Execution
+# context was destroyed", failing the gate on a compliant page (wait alone loses
+# the race; the cookie removes the reload deterministically). Harmless without
+# Guest Mode. X-Verify-Source is added when a token is set (WAF/CF bypass).
+hdr_pairs='"Cookie": "_lscache_vary=1"'
+[ -n "${VERIFY_TOKEN:-}" ] && hdr_pairs="$hdr_pairs, \"X-Verify-Source\": \"$VERIFY_TOKEN\""
+headers_json="\"headers\": { $hdr_pairs }, "
 # levelCapWhenNeedsReview: cap axe "incomplete" (needsFurtherReview) findings
 # to a warning. axe emits these when it CAN'T determine pass/fail automatically
 # (e.g. text over a position:fixed overlay, gradients, bg images) — they are
 # judgment items, not confirmed violations, so a hard gate must not BLOCK on
 # them (DISCIPLINES.md: mechanical → gate, judgment → advisory). Confirmed
 # axe violations + htmlcs errors still report as errors and block.
-#
-# wait: settle 3s before running the runners. LiteSpeed "Guest Mode" (and similar
-# first-visit JS) reloads the page once for cookie-less visitors; that navigation
-# mid-audit otherwise throws "Execution context was destroyed" and fails the gate
-# on a fresh CI runner even when the page is compliant. The wait lets the reload
-# (and any entrance animation) finish first. Harmless on sites without it.
+# wait: a short settle so any post-load entrance animation finishes first.
 cat > /tmp/pa11y-ci.json <<EOF
 { "defaults": { ${headers_json}"standard": "$STANDARD", "runners": [$runners_json], "timeout": 60000,
     "wait": 3000,
