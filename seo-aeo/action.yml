@@ -1,0 +1,36 @@
+name: 'SEO + AEO/GEO checks'
+description: >-
+  Technical SEO + AEO checks over live URLs from a JS-disabled (raw curl) fetch —
+  the crawler's-eye view. Title + h1 are crawlability-critical (BLOCK when
+  fail-on-critical); meta description, canonical, JSON-LD, and the AEO artifacts
+  (llms.txt) are WARN. Suits server-rendered WP and prerendered Astro.
+
+inputs:
+  urls:
+    description: 'Space/newline-separated URLs to check (this OR sitemap-url).'
+    required: false
+    default: ''
+  sitemap-url:
+    description: 'Sitemap to expand into the URL list.'
+    required: false
+    default: ''
+  fail-on-critical:
+    description: 'true = BLOCK when a page is missing title or h1; false = report-only.'
+    required: false
+    default: 'false'
+  max-urls:
+    description: 'Cap the number of URLs checked.'
+    required: false
+    default: '15'
+
+runs:
+  using: composite
+  steps:
+    - name: Check
+      shell: bash
+      env:
+        URLS: ${{ inputs.urls }}
+        SITEMAP_URL: ${{ inputs.sitemap-url }}
+        FAIL_ON_CRITICAL: ${{ inputs.fail-on-critical }}
+        MAX_URLS: ${{ inputs.max-urls }}
+      run: bash "${{ github.action_path }}/scripts/check.sh"

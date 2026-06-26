@@ -1,0 +1,49 @@
+name: 'Accessibility audit (pa11y-ci)'
+description: >-
+  WCAG 2.2 AA audit of live URLs with pa11y-ci (axe-core + HTML_CodeSniffer
+  runners). Report-mode by default; flip fail-on-violations to BLOCK once the
+  page's a11y backlog is clean. Audits the rendered live page, so it suits
+  server-rendered WP and deployed Astro alike.
+
+inputs:
+  urls:
+    description: 'Space/newline-separated URLs to audit (this OR sitemap-url).'
+    required: false
+    default: ''
+  sitemap-url:
+    description: 'Sitemap to expand into the URL list.'
+    required: false
+    default: ''
+  standard:
+    description: 'pa11y standard (WCAG2AA | WCAG2AAA).'
+    required: false
+    default: 'WCAG2AA'
+  runner:
+    description: 'pa11y runners, space-separated (axe htmlcs).'
+    required: false
+    default: 'axe htmlcs'
+  fail-on-violations:
+    description: 'true = BLOCK on any WCAG error; false = report-only (WARN).'
+    required: false
+    default: 'false'
+  max-urls:
+    description: 'Cap the number of URLs audited.'
+    required: false
+    default: '25'
+
+runs:
+  using: composite
+  steps:
+    - name: Install pa11y-ci
+      shell: bash
+      run: npm install -g pa11y-ci@3
+    - name: Audit
+      shell: bash
+      env:
+        URLS: ${{ inputs.urls }}
+        SITEMAP_URL: ${{ inputs.sitemap-url }}
+        STANDARD: ${{ inputs.standard }}
+        RUNNER: ${{ inputs.runner }}
+        FAIL_ON_VIOLATIONS: ${{ inputs.fail-on-violations }}
+        MAX_URLS: ${{ inputs.max-urls }}
+      run: bash "${{ github.action_path }}/scripts/audit.sh"
