@@ -30,6 +30,10 @@ inputs:
     description: 'Cap the number of URLs audited.'
     required: false
     default: '25'
+  verify-token:
+    description: 'Optional WAF/CF-bypass token, sent as the X-Verify-Source header to the audited host (Cloudflare-tunnel / WAF-fronted origins).'
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -46,4 +50,5 @@ runs:
         RUNNER: ${{ inputs.runner }}
         FAIL_ON_VIOLATIONS: ${{ inputs.fail-on-violations }}
         MAX_URLS: ${{ inputs.max-urls }}
+        VERIFY_TOKEN: ${{ inputs.verify-token }}
       run: bash "${{ github.action_path }}/scripts/audit.sh"

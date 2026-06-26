@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # seo-aeo: technical SEO + AEO checks over live URLs (JS-disabled / raw curl).
 # title + h1 are crawlability-critical; meta-desc / canonical / JSON-LD / llms.txt are WARN.
+# VERIFY_TOKEN (optional) → X-Verify-Source header, to clear a WAF/CF bot-challenge.
 set -uo pipefail
 
 FAIL_ON_CRITICAL="${FAIL_ON_CRITICAL:-false}"
@@ -9,9 +10,12 @@ MAX_URLS="${MAX_URLS:-15}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 note() { printf '%s\n' "$*" >>"$summary"; }
 
+hdr=()
+[ -n "${VERIFY_TOKEN:-}" ] && hdr=(-H "X-Verify-Source: $VERIFY_TOKEN")
+
 urls=""
 if [ -n "${SITEMAP_URL:-}" ]; then
-  urls=$(curl -fsS --max-time 30 "$SITEMAP_URL" 2>/dev/null | grep -oE '<loc>[^<]+</loc>' | sed 's#</\?loc>##g')
+  urls=$(curl -fsS --max-time 30 "${hdr[@]}" "$SITEMAP_URL" 2>/dev/null | grep -oE '<loc>[^<]+</loc>' | sed 's#</\?loc>##g')
 fi
 if [ -n "${URLS:-}" ]; then
   urls=$(printf '%s\n%s\n' "$urls" "$URLS")
@@ -25,7 +29,7 @@ crit=0
 warn=0
 while IFS= read -r url; do
   [ -z "$url" ] && continue
-  html=$(curl -fsSL --max-time 25 "$url" 2>/dev/null || true)
+  html=$(curl -fsSL --max-time 25 "${hdr[@]}" "$url" 2>/dev/null || true)
   if [ -z "$html" ]; then note "- ⚠️ $url — fetch failed"; warn=$((warn + 1)); continue; fi
   title=$(printf '%s' "$html" | grep -ioE '<title[^>]*>[^<]+</title>' | head -1)
   desc=$(printf '%s' "$html"  | grep -ioE '<meta[^>]+name=["'\'']?description["'\'']?[^>]*>' | head -1)
@@ -46,7 +50,7 @@ EOF
 # AEO: llms.txt at the host root (first URL's origin).
 host=$(printf '%s\n' "$urls" | head -1 | sed -E 's#(https?://[^/]+).*#\1#')
 if [ -n "$host" ]; then
-  if curl -fsS --max-time 15 "$host/llms.txt" >/dev/null 2>&1; then
+  if curl -fsS --max-time 15 "${hdr[@]}" "$host/llms.txt" >/dev/null 2>&1; then
     note "- ✅ llms.txt present"
   else
     note "- ⚠️ llms.txt missing ($host/llms.txt) — AEO artifact"
