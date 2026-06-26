@@ -40,7 +40,12 @@ runs:
   steps:
     - name: Install pa11y-ci
       shell: bash
-      run: npm install -g pa11y-ci@3
+      # pa11y-ci@4 → pa11y@9 → puppeteer 24 (modern Chromium). pa11y-ci@3's
+      # bundled Chromium 91 predates CSS cascade layers (@layer, Chrome 99+),
+      # so Tailwind v4 utilities were silently dropped → bogus contrast fails
+      # on any layered stylesheet. The modern engine renders the page as real
+      # users see it.
+      run: npm install -g pa11y-ci@4
     - name: Audit
       shell: bash
       env:
