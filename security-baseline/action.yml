@@ -1,0 +1,63 @@
+name: 'Security baseline (SAST + secrets)'
+description: >-
+  Air-gapped security gate: semgrep SAST (community rules, telemetry OFF) +
+  gitleaks secret scan. Nothing leaves the runner — no US-SaaS egress, so it is
+  sovereignty-safe on any runner. Fails the step on semgrep findings at/above the
+  severity threshold or any detected secret.
+
+inputs:
+  semgrep-config:
+    description: 'Semgrep ruleset(s): a public registry id (p/security-audit) or a local path. Vendor a local rules file for a full air-gap (no registry fetch).'
+    required: false
+    default: 'p/security-audit'
+  semgrep-severity:
+    description: 'Minimum severity that BLOCKS (ERROR | WARNING | INFO). ERROR = lowest noise.'
+    required: false
+    default: 'ERROR'
+  scan-scope:
+    description: 'diff (changed files vs base-ref — fast, PR-friendly) or full (whole tree).'
+    required: false
+    default: 'diff'
+  base-ref:
+    description: 'Base git ref for diff scope. Auto-detected (PR base, else HEAD~1) when empty.'
+    required: false
+    default: ''
+  fail-on-secrets:
+    description: 'Fail on any gitleaks-detected secret.'
+    required: false
+    default: 'true'
+  gitleaks-version:
+    description: 'Pinned gitleaks release to download (no "v" prefix).'
+    required: false
+    default: '8.18.4'
+  semgrep-version:
+    description: 'Pinned semgrep version (empty = latest).'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install semgrep (telemetry off)
+      shell: bash
+      run: |
+        spec="semgrep"
+        [ -n "${{ inputs.semgrep-version }}" ] && spec="semgrep==${{ inputs.semgrep-version }}"
+        python3 -m pip install --quiet --disable-pip-version-check "$spec"
+    - name: Install gitleaks (pinned)
+      shell: bash
+      run: |
+        v="${{ inputs.gitleaks-version }}"
+        curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_linux_x64.tar.gz" | tar -xz gitleaks
+        sudo install gitleaks /usr/local/bin/gitleaks
+        rm -f gitleaks
+    - name: Scan (semgrep + gitleaks)
+      shell: bash
+      env:
+        SEMGREP_CONFIG: ${{ inputs.semgrep-config }}
+        SEMGREP_SEVERITY: ${{ inputs.semgrep-severity }}
+        SCAN_SCOPE: ${{ inputs.scan-scope }}
+        BASE_REF: ${{ inputs.base-ref }}
+        FAIL_ON_SECRETS: ${{ inputs.fail-on-secrets }}
+        SEMGREP_SEND_METRICS: 'off'
+      run: bash "${{ github.action_path }}/scripts/scan.sh"
