@@ -36,8 +36,15 @@ runners_json=$(printf '"%s",' $RUNNER | sed 's/,$//')
 urls_json=$(printf '%s\n' "$urls" | sed 's#.*#"&"#' | paste -sd, -)
 headers_json=""
 [ -n "${VERIFY_TOKEN:-}" ] && headers_json='"headers": { "X-Verify-Source": "'"$VERIFY_TOKEN"'" }, '
+# levelCapWhenNeedsReview: cap axe "incomplete" (needsFurtherReview) findings
+# to a warning. axe emits these when it CAN'T determine pass/fail automatically
+# (e.g. text over a position:fixed overlay, gradients, bg images) — they are
+# judgment items, not confirmed violations, so a hard gate must not BLOCK on
+# them (DISCIPLINES.md: mechanical → gate, judgment → advisory). Confirmed
+# axe violations + htmlcs errors still report as errors and block.
 cat > /tmp/pa11y-ci.json <<EOF
 { "defaults": { ${headers_json}"standard": "$STANDARD", "runners": [$runners_json], "timeout": 60000,
+    "levelCapWhenNeedsReview": "warning",
     "chromeLaunchConfig": { "args": ["--no-sandbox", "--disable-dev-shm-usage"] } },
   "urls": [ $urls_json ] }
 EOF
