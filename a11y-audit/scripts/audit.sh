@@ -42,8 +42,15 @@ headers_json=""
 # judgment items, not confirmed violations, so a hard gate must not BLOCK on
 # them (DISCIPLINES.md: mechanical → gate, judgment → advisory). Confirmed
 # axe violations + htmlcs errors still report as errors and block.
+#
+# wait: settle 3s before running the runners. LiteSpeed "Guest Mode" (and similar
+# first-visit JS) reloads the page once for cookie-less visitors; that navigation
+# mid-audit otherwise throws "Execution context was destroyed" and fails the gate
+# on a fresh CI runner even when the page is compliant. The wait lets the reload
+# (and any entrance animation) finish first. Harmless on sites without it.
 cat > /tmp/pa11y-ci.json <<EOF
 { "defaults": { ${headers_json}"standard": "$STANDARD", "runners": [$runners_json], "timeout": 60000,
+    "wait": 3000,
     "levelCapWhenNeedsReview": "warning",
     "chromeLaunchConfig": { "args": ["--no-sandbox", "--disable-dev-shm-usage"] } },
   "urls": [ $urls_json ] }
