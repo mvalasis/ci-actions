@@ -47,3 +47,13 @@ Rollout: start `fail-on-violations: false` (surface the backlog), fix it, then f
   gate, judgment → advisory.
 - **Desktop viewport only** (pa11y default 1280×1024). Elements hidden at desktop width
   (e.g. a `md:hidden` mobile nav) are not exercised; audit a mobile URL separately if needed.
+- **Reload-on-load resilience.** Pages that navigate a beat after first load — **LiteSpeed
+  Guest Mode** (`window.location.reload`), splash/intro overlays — can race pa11y's runner
+  injection and throw `Execution context was destroyed, most likely because of a navigation`
+  → a flaky *Failed to run*. Primary guard is deterministic: a dummy `_lscache_vary` cookie
+  makes Guest Mode skip the reload entirely (plus a 3 s settle `wait`). As defense-in-depth,
+  a **single retry** kicks in only on a *run* error and only when **no** URL reported real
+  violations — so the retry can never mask a WCAG failure. The decision is keyed off pa11y's
+  per-URL summary lines (`> <url> - …`, ANSI-stripped), not the page's own HTML, so page
+  content can't spoof it. A URL that still *Fails to run* after the retry stays non-zero and
+  blocks in enforce mode.
