@@ -45,6 +45,15 @@ Rollout: start `fail-on-violations: false` (surface the backlog), fix it, then f
   images) are capped to *warning* (`levelCapWhenNeedsReview`), so they don't BLOCK. Confirmed
   axe violations + HTML_CodeSniffer errors still block. Per DISCIPLINES.md: mechanical → hard
   gate, judgment → advisory.
+- **`verify-token` scope.** The token (`X-Verify-Source`) is injected via pa11y-ci's
+  `defaults.headers`, which pa11y@9 applies with **first-request-only** Puppeteer request
+  interception — *not* `setExtraHTTPHeaders`. So it rides only the **navigation request** to
+  each audited URL (and the sitemap fetch, which uses no `-L`), never a cross-origin
+  subresource (fonts/CDNs/analytics) or a cross-origin redirect target. It's still a secret
+  sent to the audited origin: point the action only at first-party origins you trust, and
+  prefer an origin-bound / IP-allowlisted WAF rule over a portable bearer token. The
+  no-broadcast guarantee is a property of pa11y@9's interception code, so the `pa11y-ci@4`
+  pin is a security control — re-audit before a major bump.
 - **Desktop viewport only** (pa11y default 1280×1024). Elements hidden at desktop width
   (e.g. a `md:hidden` mobile nav) are not exercised; audit a mobile URL separately if needed.
 - **Reload-on-load resilience.** Pages that navigate a beat after first load — **LiteSpeed

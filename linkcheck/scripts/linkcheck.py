@@ -48,6 +48,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from urllib.parse import urldefrag, urljoin, urlsplit
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -103,16 +104,64 @@ def is_internal(url):
     return h == INTERNAL or h.endswith("." + INTERNAL)
 
 
-def curl(extra, url):
-    cmd = ["curl", "-sS", "-A", UA, "--max-time", "25"]
-    if TOKEN and is_internal(url):
-        cmd += ["-H", f"X-Verify-Source: {TOKEN}"]
-    return subprocess.run(cmd + extra + [url], capture_output=True)
+# Manual redirect following with PER-HOP token re-scoping. `curl -L` re-sends a
+# custom -H header to a cross-host redirect target — it strips only Cookie and
+# Authorization on a cross-origin hop, never an arbitrary X-* header (verified:
+# curl 8.7.1 forwarded X-Verify-Source across a localhost->127.0.0.1 301 while
+# dropping Cookie/Authorization). So following with -L would carry the WAF token
+# off our origin to whatever an internal page redirects to. Instead we follow
+# hop-by-hop and attach the token only when the CURRENT hop is internal — it
+# never leaves our host, exactly as the seo-aeo gate scopes it.
+MAX_HOPS = 10
+
+
+def _token_args(url):
+    """['-H', 'X-Verify-Source: …'] only when url is on our host, else []."""
+    return ["-H", f"X-Verify-Source: {TOKEN}"] if (TOKEN and is_internal(url)) else []
+
+
+def _hop(url, method, body_path=None):
+    """One curl request, redirects NOT followed. Token attached iff `url` is
+    internal. `method` is [] (GET) or ["-I"] (HEAD). When `body_path` is set the
+    response body is written there (each hop overwrites it, so after the chain it
+    holds the FINAL page). Returns (http_code:int, next_url:str, header_text:str);
+    http_code 0 = no response. `next_url` is curl's resolved absolute redirect
+    target (handles relative Location), empty on a non-redirect."""
+    out = "/dev/null" if body_path is None else body_path
+    cmd = ["curl", "-sS", "-A", UA, "--max-time", "25", "-o", out, "-D", "-",
+           "-w", "\n__LC__%{http_code} %{redirect_url}"]
+    if body_path is not None:
+        cmd.append("--compressed")   # decode Content-Encoding for the body we keep (fetch_html)
+    cmd += _token_args(url) + method + [url]
+    out_s = subprocess.run(cmd, capture_output=True).stdout.decode("utf-8", "ignore")
+    m = re.search(r"__LC__(\d{3}) (\S*)\s*$", out_s)
+    return (int(m.group(1)) if m else 0), (m.group(2) if (m and m.group(2)) else ""), out_s
+
+
+def _follow(start_url, method, body_path=None):
+    """Follow redirects manually, re-scoping the token at each hop. Returns
+    (final_http_code, concatenated header text of every hop) — the all-hops
+    concat preserves the prior `-L -D -` behaviour the WAF fingerprint keys on.
+    Exhausting MAX_HOPS while still on a 3xx (a redirect loop) returns code 0, so
+    a loop is treated as no-final-answer exactly like the old `-L --max-redirs`."""
+    url, hdrs = start_url, []
+    for _ in range(MAX_HOPS):
+        code, nxt, out_s = _hop(url, method, body_path)
+        hdrs.append(out_s)
+        if 300 <= code < 400 and nxt:
+            url = nxt
+            continue
+        return code, "\n".join(hdrs)
+    return 0, "\n".join(hdrs)
 
 
 def fetch_html(url):
-    r = curl(["-L", "--compressed"], url)
-    return r.stdout.decode("utf-8", "ignore") if r.returncode == 0 else ""
+    with tempfile.NamedTemporaryFile(suffix=".html") as tf:
+        code, _ = _follow(url, [], body_path=tf.name)
+        if not code:                       # transport failure, no HTTP response
+            return ""
+        tf.seek(0)
+        return tf.read().decode("utf-8", "ignore")
 
 
 def extract(page_url, page_html):
@@ -135,24 +184,21 @@ def extract(page_url, page_html):
 
 
 def status(url):
-    """(code, blocked) for url. code = HTTP status (0 = no response); blocked =
-    the response carried an anti-bot WAF fingerprint, so the status is untrusted.
-    HEAD first, GET fallback for HEAD-hostile codes."""
-    def one(method):
-        # -D - dumps response headers to stdout; sentinel-tagged code goes last.
-        r = curl(["-o", "/dev/null", "-D", "-", "-L", "-w", "\n__CODE__%{http_code}"] + method, url)
-        out = r.stdout.decode("utf-8", "ignore")
-        m = re.search(r"__CODE__(\d{3})\s*$", out)
-        return (int(m.group(1)) if m else 0), out
-    code, hdrs = one(["-I"])
+    """(code, blocked) for url. code = final HTTP status after the redirect chain
+    (0 = no response); blocked = the response carried an anti-bot WAF fingerprint,
+    so the status is untrusted. HEAD first, GET fallback for HEAD-hostile codes.
+    Redirects are followed manually (_follow), so the token never rides a cross-
+    host hop, and `hdrs` accumulates EVERY hop's headers — the WAF fingerprint
+    still fires on a block emitted at any hop, as the old `-L -D -` dump did."""
+    code, hdrs = _follow(url, ["-I"])
     if code in (0, 403, 405, 500, 501):  # HEAD-hostile (incl. flaky CF 500-on-HEAD) — confirm with GET
-        g_code, g_hdrs = one([])
+        g_code, g_hdrs = _follow(url, [])
         if g_code:
             code, hdrs = g_code, g_hdrs
     if code in (0, 500, 502, 503, 504):  # one re-check for transient 5xx (CF/Kinsta edge)
-        r_code, r_hdrs = one(["-I"])
+        r_code, r_hdrs = _follow(url, ["-I"])
         if not r_code:
-            r_code, r_hdrs = one([])
+            r_code, r_hdrs = _follow(url, [])
         if r_code:
             code, hdrs = r_code, r_hdrs
     return code, bool(WAF_BLOCK_RE.search(hdrs))

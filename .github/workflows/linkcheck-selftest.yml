@@ -1,0 +1,24 @@
+name: linkcheck engine self-test
+
+# Offline regression guard for the verify-token scoping fix: spins up two
+# loopback servers on different hostnames and asserts the WAF-bypass token is
+# never carried to a cross-origin host across a redirect chain. No network, no
+# secrets — deterministic. (The live end-to-end run stays in selftest.yml.)
+
+on:
+  push:
+    paths:
+      - 'linkcheck/**'
+      - '.github/workflows/linkcheck-selftest.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  engine-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Offline token-scoping self-test
+        run: python3 linkcheck/scripts/selftest.py

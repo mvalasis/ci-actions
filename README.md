@@ -39,9 +39,18 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`) pins `@v1`; current line is **v1.2.0** (seo-aeo rebuilt as a
-parsed Node+cheerio gate — T0/T1/T2 severity + the additive `critical-checks`
-input; backward-compatible, no-regression on the enforcing callers).
+`linkcheck`) pins `@v1`; current line is **v1.2.1** — a verify-token
+cross-origin **leak fix**: `linkcheck` (linkcheck.py + sitemap-urls.py) now
+follows redirects manually and re-scopes `X-Verify-Source` per hop, so the
+WAF-bypass token never rides a cross-host redirect (curl `-L` re-sends a custom
+`-H` across hosts — it strips only Cookie/Authorization), and `sitemap-urls.py`
+is host-gated like the crawler instead of sending the token unconditionally.
+`a11y-audit` was audited and is NOT affected (pa11y@9 confines the token to the
+first/navigation request via interception, not `setExtraHTTPHeaders`) —
+documented, with the `pa11y-ci@4` pin flagged as a security control. Backward-
+compatible (no input changes); an offline regression guard ships at
+`linkcheck/scripts/selftest.py`. v1.2.0 was the seo-aeo parsed Node+cheerio
+rebuild (T0/T1/T2 severity + the additive `critical-checks` input).
 
 ## `linkcheck` — full-site broken-link / image / outbound crawl
 
@@ -83,7 +92,7 @@ jobs:
 |---|---|---|---|
 | `sitemap-url` | yes | — | Rank Math `sitemap_index.xml` to expand. |
 | `host` | yes | — | Internal host; links here (+ subdomains) are fatal if broken. |
-| `verify-token` | no | `''` | `X-Verify-Source` WAF-bypass token, sent **only** to `host`. |
+| `verify-token` | no | `''` | `X-Verify-Source` WAF-bypass token, sent **only** to `host` (+ subdomains), re-scoped per redirect hop so it never rides a cross-host redirect. |
 | `allow-file` | no | `scripts/linkcheck-allow.txt` | Per-repo baselined-URL list, read from the caller checkout. |
 | `workers` | no | `10` | Concurrent curl workers. |
 | `manage-issue` | no | `true` | Open/auto-close a GitHub issue on failure/clean (needs `issues: write`). |
@@ -94,6 +103,17 @@ Keep a `scripts/linkcheck-allow.txt` in each caller repo (one URL per line,
 `#` comments). Any URL listed is treated as OK — use it only to silence
 genuinely-low-value legacy cruft, never to hide a real outage. It is read
 from **your** checkout, not from this action.
+
+### Token scoping & self-test
+
+The WAF-bypass token is attached **only** to requests on `host` and its
+subdomains, and redirects are followed **manually** (re-evaluating the host at
+every hop) so the token is never carried to a cross-origin redirect target —
+`curl -L` would otherwise re-send a custom `-H` across hosts (it strips only
+`Cookie`/`Authorization`). `scripts/selftest.py` is an offline, network-free
+regression guard: it stands up two loopback servers on different hostnames and
+asserts the token never reaches the external host across a redirect chain
+(`python3 linkcheck/scripts/selftest.py`; also runs in CI on `linkcheck/**`).
 
 ## Adding the action to a new repo
 

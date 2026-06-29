@@ -13,6 +13,10 @@ summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 note() { printf '%s\n' "$*" >>"$summary"; }
 
 # Header for sitemap fetch (pa11y gets it via the config below).
+# NOTE: this curl has NO -L, so a 3xx on the sitemap is not followed and the
+# token can never be replayed to a redirect target (curl re-sends a custom -H
+# across a cross-host redirect — it strips only Cookie/Authorization). Keep it
+# that way: do NOT add -L here, or the token would leak to the redirect host.
 hdr=()
 [ -n "${VERIFY_TOKEN:-}" ] && hdr=(-H "X-Verify-Source: $VERIFY_TOKEN")
 
@@ -40,6 +44,21 @@ urls_json=$(printf '%s\n' "$urls" | sed 's#.*#"&"#' | paste -sd, -)
 # context was destroyed", failing the gate on a compliant page (wait alone loses
 # the race; the cookie removes the reload deterministically). Harmless without
 # Guest Mode. X-Verify-Source is added when a token is set (WAF/CF bypass).
+#
+# TOKEN SCOPE (verified against pa11y@9.1.1 / pa11y-ci@4.1.1): these go into
+# pa11y-ci's `defaults.headers`, which pa11y applies via first-request-only
+# Puppeteer request interception — NOT page.setExtraHTTPHeaders. Its handler
+# overrides headers only while an `interceptionHandled` flag is false, then sets
+# it true (lib/pa11y.js: "We only want to make changes to the first request …
+# which is the request for the page we're testing"). So X-Verify-Source rides
+# ONLY the navigation request to each audited URL — never a cross-origin
+# subresource (fonts/CDNs/analytics) and never a cross-origin redirect target
+# (the 3xx target is a later request → empty overrides → no token). The token is
+# therefore confined to the first-party origins you point this action at. This
+# no-broadcast property depends on pa11y NOT switching to setExtraHTTPHeaders, so
+# the `pa11y-ci@4` pin (see action.yml install step) is a SECURITY control —
+# re-audit token scope on any pa11y-ci major bump. (`_lscache_vary=1` is a public
+# literal, not a secret; only X-Verify-Source is sensitive.)
 hdr_pairs='"Cookie": "_lscache_vary=1"'
 [ -n "${VERIFY_TOKEN:-}" ] && hdr_pairs="$hdr_pairs, \"X-Verify-Source\": \"$VERIFY_TOKEN\""
 headers_json="\"headers\": { $hdr_pairs }, "

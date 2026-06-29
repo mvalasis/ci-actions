@@ -31,7 +31,14 @@ inputs:
     required: false
     default: '25'
   verify-token:
-    description: 'Optional WAF/CF-bypass token, sent as the X-Verify-Source header to the audited host (Cloudflare-tunnel / WAF-fronted origins).'
+    description: >-
+      Optional WAF/CF-bypass token, sent as X-Verify-Source. Scope (verified on
+      pa11y-ci@4/pa11y@9): it rides ONLY the navigation request to each audited
+      URL and the sitemap fetch — pa11y uses first-request-only request
+      interception, so it is NOT broadcast to cross-origin subresources or
+      redirect targets. Still a secret sent to the audited origin: point this
+      action only at first-party origins you trust, and prefer an origin-bound /
+      IP-allowlisted WAF rule over a portable bearer token where you can.
     required: false
     default: ''
 
@@ -44,7 +51,10 @@ runs:
       # bundled Chromium 91 predates CSS cascade layers (@layer, Chrome 99+),
       # so Tailwind v4 utilities were silently dropped → bogus contrast fails
       # on any layered stylesheet. The modern engine renders the page as real
-      # users see it.
+      # users see it. The pin is ALSO a security control: pa11y@9 confines the
+      # verify-token to the first (navigation) request via request interception;
+      # a future major that switched to setExtraHTTPHeaders would broadcast it to
+      # every cross-origin subresource — re-audit token scope before bumping.
       run: npm install -g pa11y-ci@4
     - name: Audit
       shell: bash

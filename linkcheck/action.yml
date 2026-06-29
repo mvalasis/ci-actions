@@ -36,6 +36,10 @@ runs:
       shell: bash
       env:
         VERIFY_HOMEPAGE_TOKEN: ${{ inputs.verify-token }}
+        # Same internal host the crawler uses, so the sitemap fetch scopes the
+        # X-Verify-Source token to it (+ subdomains) and never carries it to a
+        # cross-host child-sitemap or redirect target.
+        LINKCHECK_HOST: ${{ inputs.host }}
       run: |
         python3 "${{ github.action_path }}/scripts/sitemap-urls.py" "${{ inputs.sitemap-url }}" > pages.txt
         N=$(grep -c . pages.txt || true)
