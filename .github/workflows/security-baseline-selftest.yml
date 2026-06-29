@@ -1,0 +1,50 @@
+name: security-baseline self-test
+
+# Two offline regression guards (no network, no secrets): (1) the pure tier-engine self-test
+# (block-by-default, never-newly-block, promotion, redaction); (2) the vendored semgrep rule
+# packs via `semgrep --test` (each bad fixture fires, each good fixture stays silent). Plus a
+# report-mode self-scan smoke so a syntax/wiring break in scan.mjs is caught.
+
+on:
+  push:
+    paths: ['security-baseline/**', '.github/workflows/security-baseline-selftest.yml']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  engine-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Offline tier-engine self-test
+        working-directory: security-baseline
+        run: node scripts/selftest.mjs
+
+  rules-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install semgrep (telemetry off)
+        run: python3 -m pip install --quiet --disable-pip-version-check semgrep
+      - name: Vendored rule-pack self-test (semgrep --test)
+        working-directory: security-baseline
+        env: { SEMGREP_SEND_METRICS: 'off' }
+        run: bash scripts/selftest-rules.sh
+
+  self-scan-smoke:
+    runs-on: ubuntu-latest
+    needs: [engine-selftest, rules-selftest]
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+      # report-mode self-scan of this repo — proves the full action wires up and never blocks itself.
+      - uses: ./security-baseline
+        with:
+          scan-scope: full
+          fail-on-critical: 'false'
+          enable-secrets-history: 'false'
+          verified-secrets: 'off'

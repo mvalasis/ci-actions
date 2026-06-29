@@ -1,39 +1,94 @@
-name: 'Security baseline (SAST + secrets)'
+name: 'Security baseline (SAST + secrets + SCA + supply-chain)'
 description: >-
-  Air-gapped security gate: semgrep SAST (community rules, telemetry OFF) +
-  gitleaks secret scan. Nothing leaves the runner — no US-SaaS egress, so it is
-  sovereignty-safe on any runner. Fails the step on semgrep findings at/above the
-  severity threshold or any detected secret.
+  Air-gapped security gate. CRITICAL core (blocks): semgrep community SAST (ERROR, diff) +
+  gitleaks pattern secrets (diff) + trufflehog verified-live secrets. Everything else —
+  custom WP/PHP & Astro/TS rules, dependency/SCA (osv-scanner), GitHub-Actions supply-chain,
+  full-history & working-tree secrets, Dockerfile lint, license — ships as WARN, per-caller
+  promotable to CRITICAL via `critical-checks`. No source leaves the runner (see README
+  §Sovereignty for the exact, opt-out-able egress points).
 
 inputs:
-  semgrep-config:
-    description: 'Semgrep ruleset(s): a public registry id (p/security-audit) or a local path. Vendor a local rules file for a full air-gap (no registry fetch).'
-    required: false
-    default: 'p/security-audit'
-  semgrep-severity:
-    description: 'Minimum severity that BLOCKS (ERROR | WARNING | INFO). ERROR = lowest noise.'
-    required: false
-    default: 'ERROR'
+  # ---- scope / mode (back-compatible with the prior action) ----
   scan-scope:
     description: 'diff (changed files vs base-ref — fast, PR-friendly) or full (whole tree).'
     required: false
     default: 'diff'
   base-ref:
-    description: 'Base git ref for diff scope. Auto-detected (PR base, else HEAD~1) when empty.'
+    description: 'Base git ref for diff scope. Auto: PR base → push event.before → HEAD~1.'
     required: false
     default: ''
-  fail-on-secrets:
-    description: 'Fail on any gitleaks-detected secret.'
+  fail-on-critical:
+    description: 'true = BLOCK when a CRITICAL (T0, or a promoted T1) fires; false = report-only. Default true — this is the fleet''s always-on gate.'
     required: false
     default: 'true'
-  gitleaks-version:
-    description: 'Pinned gitleaks release to download (no "v" prefix).'
+  critical-checks:
+    description: >-
+      Comma/space list of T1 (promotable-WARN) check ids to ELEVATE to CRITICAL for THIS caller
+      (e.g. "sca-critical,wp-sql-unprepared,wp-rest-error-detail,gha-unpinned-action"). T0 ids are
+      already critical; T2 / reserved / unknown ids are reported and ignored. Empty (default) = the
+      CRITICAL core only, so a caller is never newly-blocked by an upgrade.
     required: false
-    default: '8.18.4'
+    default: ''
+  report-mode:
+    description: 'Onboarding escape hatch: true = report even T0 criticals without blocking (loud banner). Must stay false for an enforcing caller.'
+    required: false
+    default: 'false'
+  report-mode-reason:
+    description: 'Required note echoed in the summary when report-mode is true (why this repo is not enforcing yet).'
+    required: false
+    default: ''
+  # ---- SAST ----
+  semgrep-config:
+    description: 'Community/registry ruleset for the CRITICAL SAST block (a registry id like p/security-audit, or a vendored local path for full air-gap). The custom WARN rule packs are always vendored-local.'
+    required: false
+    default: 'p/security-audit'
+  semgrep-severity:
+    description: 'Minimum community-rule severity that BLOCKS (ERROR | WARNING | INFO). ERROR = today''s behavior.'
+    required: false
+    default: 'ERROR'
+  # ---- secrets ----
+  verified-secrets:
+    description: >-
+      auto | on | off — trufflehog --only-verified live-credential probe. NOTE: auto == on (egress
+      ON by default): when a candidate secret is in scope it sends a test-auth to that credential's
+      OWN provider. Set off for a fully air-gapped runner (no probe; the gitleaks pattern floor
+      still blocks).
+    required: false
+    default: 'auto'
+  enable-secrets-history:
+    description: 'Full-history secret baseline (WARN, never blocks). Set false to skip on large repos / save CI minutes.'
+    required: false
+    default: 'true'
+  fail-on-secrets:
+    description: 'DEPRECATED (kept for back-compat). Secret blocking is governed by the T0 tier + fail-on-critical; use report-mode / fail-on-critical:false to disable.'
+    required: false
+    default: 'true'
+  # ---- SCA ----
+  enable-sca:
+    description: 'Dependency/SCA audit via osv-scanner (WARN; egress: package coordinates → osv.dev). Set false to disable.'
+    required: false
+    default: 'true'
+  # ---- pinned tool versions (air-gap / reproducibility) ----
   semgrep-version:
     description: 'Pinned semgrep version (empty = latest).'
     required: false
     default: ''
+  gitleaks-version:
+    description: 'Pinned gitleaks release (no "v").'
+    required: false
+    default: '8.30.1'
+  trufflehog-version:
+    description: 'Pinned trufflehog release (no "v").'
+    required: false
+    default: '3.95.6'
+  osv-version:
+    description: 'Pinned osv-scanner release (with "v").'
+    required: false
+    default: 'v2.4.0'
+  hadolint-version:
+    description: 'Pinned hadolint release (no "v"). Only invoked when a Dockerfile is in scope.'
+    required: false
+    default: '2.12.0'
 
 runs:
   using: composite
@@ -49,15 +104,42 @@ runs:
       run: |
         v="${{ inputs.gitleaks-version }}"
         curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_linux_x64.tar.gz" | tar -xz gitleaks
-        sudo install gitleaks /usr/local/bin/gitleaks
-        rm -f gitleaks
-    - name: Scan (semgrep + gitleaks)
+        sudo install gitleaks /usr/local/bin/gitleaks && rm -f gitleaks
+    - name: Install trufflehog (pinned release binary, no telemetry)
+      shell: bash
+      # Pinned release tarball (NOT curl|sh from the moving main branch) — same supply-chain
+      # posture as the gitleaks pin above.
+      run: |
+        v="${{ inputs.trufflehog-version }}"
+        curl -sSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${v}/trufflehog_${v}_linux_amd64.tar.gz" | tar -xz trufflehog
+        sudo install trufflehog /usr/local/bin/trufflehog && rm -f trufflehog
+    - name: Install osv-scanner (pinned)
+      shell: bash
+      run: |
+        v="${{ inputs.osv-version }}"
+        sudo curl -sSL "https://github.com/google/osv-scanner/releases/download/${v}/osv-scanner_${v#v}_linux_amd64" -o /usr/local/bin/osv-scanner
+        sudo chmod +x /usr/local/bin/osv-scanner
+    - name: Install hadolint (pinned; used only when a Dockerfile is in scope)
+      shell: bash
+      run: |
+        v="${{ inputs.hadolint-version }}"
+        sudo curl -sSL "https://github.com/hadolint/hadolint/releases/download/v${v}/hadolint-Linux-x86_64" -o /usr/local/bin/hadolint
+        sudo chmod +x /usr/local/bin/hadolint
+    - name: Scan
       shell: bash
       env:
-        SEMGREP_CONFIG: ${{ inputs.semgrep-config }}
-        SEMGREP_SEVERITY: ${{ inputs.semgrep-severity }}
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
         SCAN_SCOPE: ${{ inputs.scan-scope }}
         BASE_REF: ${{ inputs.base-ref }}
-        FAIL_ON_SECRETS: ${{ inputs.fail-on-secrets }}
+        GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        FAIL_ON_CRITICAL: ${{ inputs.fail-on-critical }}
+        CRITICAL_CHECKS: ${{ inputs.critical-checks }}
+        REPORT_MODE: ${{ inputs.report-mode }}
+        REPORT_MODE_REASON: ${{ inputs.report-mode-reason }}
+        SEMGREP_CONFIG: ${{ inputs.semgrep-config }}
+        SAST_SEVERITY: ${{ inputs.semgrep-severity }}
+        VERIFIED_SECRETS: ${{ inputs.verified-secrets }}
+        ENABLE_SECRETS_HISTORY: ${{ inputs.enable-secrets-history }}
+        ENABLE_SCA: ${{ inputs.enable-sca }}
         SEMGREP_SEND_METRICS: 'off'
-      run: bash "${{ github.action_path }}/scripts/scan.sh"
+      run: node "${{ github.action_path }}/scripts/scan.mjs"

@@ -39,18 +39,21 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`) pins `@v1`; current line is **v1.2.1** — a verify-token
-cross-origin **leak fix**: `linkcheck` (linkcheck.py + sitemap-urls.py) now
-follows redirects manually and re-scopes `X-Verify-Source` per hop, so the
-WAF-bypass token never rides a cross-host redirect (curl `-L` re-sends a custom
-`-H` across hosts — it strips only Cookie/Authorization), and `sitemap-urls.py`
-is host-gated like the crawler instead of sending the token unconditionally.
-`a11y-audit` was audited and is NOT affected (pa11y@9 confines the token to the
-first/navigation request via interception, not `setExtraHTTPHeaders`) —
-documented, with the `pa11y-ci@4` pin flagged as a security control. Backward-
-compatible (no input changes); an offline regression guard ships at
-`linkcheck/scripts/selftest.py`. v1.2.0 was the seo-aeo parsed Node+cheerio
-rebuild (T0/T1/T2 severity + the additive `critical-checks` input).
+`linkcheck`) pins `@v1`; current line is **v1.3.0** — the **`security-baseline`
+rebuild**: the 2-tool air-gapped script (semgrep + gitleaks) becomes a tiered
+gate — a tiny **T0 CRITICAL** core that still blocks exactly what it blocked
+before (semgrep community ERROR on diff + gitleaks pattern on diff) plus a NEW
+diff-scoped trufflehog `--only-verified` live-secret check, and a deep
+**T1 promotable-WARN** layer (osv-scanner SCA + 22 vendored WP/PHP & Astro/TS
+semgrep rules + GitHub-Actions supply-chain) elevated per-caller via the additive
+`critical-checks` input. **Backward-compatible** (the callers' `scan-scope` +
+`semgrep-severity` inputs are unchanged) and **validated against all 9 checkouts —
+CRITICAL=0 everywhere, so the tag move newly-blocks nobody.** Offline guards:
+`security-baseline/scripts/selftest.mjs` (tier engine) + `selftest-rules.sh`
+(`semgrep --test`). Full detail: [`security-baseline/README.md`](security-baseline/README.md).
+History: **v1.2.1** was a `linkcheck` verify-token cross-origin leak fix
+(redirects followed manually, `X-Verify-Source` re-scoped per hop); **v1.2.0**
+was the `seo-aeo` parsed Node+cheerio rebuild (T0/T1/T2 + `critical-checks`).
 
 ## `linkcheck` — full-site broken-link / image / outbound crawl
 

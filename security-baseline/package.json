@@ -1,0 +1,12 @@
+{
+  "name": "ci-actions-security-baseline",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Air-gapped security gate — tiered SAST + secrets + SCA + CI supply-chain, with a tiny blocking core and per-caller promotable WARN tiers.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "selftest": "node scripts/selftest.mjs",
+    "selftest:rules": "bash scripts/selftest-rules.sh"
+  }
+}

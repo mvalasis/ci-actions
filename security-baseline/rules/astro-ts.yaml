@@ -1,0 +1,202 @@
+# security-baseline — vendored Astro / TypeScript / React-Native SAST rules (AIR-GAPPED).
+#
+# Covers the Astro+CF-Pages and Expo/RN attack surface that `p/security-audit` under-models:
+# template/JSX HTML injection, eval/child_process, client-bundle secret leaks, SSRF / open
+# redirect in Pages Functions, RN insecure storage / cleartext transport, secret-in-log.
+#
+# Every rule is `severity: WARNING` → never blocks at the default ERROR cut. Each carries a
+# stable `metadata.checkId`; T1 ids are per-caller promotable via `critical-checks`. Rules are
+# scoped to NON-CONSTANT / request-derived / untrusted operands so the careful real code
+# (JSON.stringify(schema), fixed-origin fetch, createSecureStore()) does not false-fire.
+# Taint rules are intraprocedural only (OSS semgrep has no interfile taint — a Pro/cloud
+# feature, air-gap-incompatible); a value laundered through a helper in another file is a
+# documented false-negative.
+
+rules:
+  # ---- CWE-79: React/RN dangerouslySetInnerHTML with non-constant, unsanitized HTML ----
+  - id: ts-dangerous-html-untrusted
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      dangerouslySetInnerHTML __html is a non-constant, unsanitized expression — XSS
+      (CWE-79). Sanitize with DOMPurify.sanitize(...) or render text, not HTML.
+    metadata: { checkId: ts-dangerous-html, cwe: "CWE-79", tier: T1 }
+    patterns:
+      - pattern: '<$EL dangerouslySetInnerHTML={{ __html: $X }} />'
+      - pattern-not: '<$EL dangerouslySetInnerHTML={{ __html: "..." }} />'
+      - pattern-not: '<$EL dangerouslySetInnerHTML={{ __html: `...` }} />'
+      - pattern-not: '<$EL dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(...) }} />'
+      - pattern-not: '<$EL dangerouslySetInnerHTML={{ __html: $S.sanitize(...) }} />'
+
+  # ---- CWE-95: eval / Function constructor on a non-literal ----
+  - id: ts-dynamic-code-exec
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: "eval / new Function on a non-literal argument is arbitrary code execution (CWE-95)."
+    metadata: { checkId: ts-eval, cwe: "CWE-95", tier: T1 }
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: new Function(..., $X)
+      - pattern-not: eval("...")
+      - pattern-not: eval(`...`)
+      - pattern-not: new Function("...")
+      - pattern-not: new Function(..., "...")
+      - pattern-not: new Function(..., `...`)
+
+  # ---- CWE-78: child_process exec/spawn with a non-literal command ----
+  - id: ts-child-process-dynamic
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: "child_process exec/spawn with a non-literal command — possible command injection (CWE-78)."
+    metadata: { checkId: ts-child-process, cwe: "CWE-78", tier: T1 }
+    patterns:
+      - pattern-either:
+          - pattern: $CP.exec($CMD, ...)
+          - pattern: $CP.execSync($CMD, ...)
+          - pattern: $CP.spawn($CMD, ...)
+          - pattern: $CP.spawnSync($CMD, ...)
+      # constrain the receiver to a child_process module — otherwise RegExp.prototype.exec
+      # (/re/.exec(str)) and other .exec() methods false-fire (confirmed against the fleet).
+      - metavariable-regex:
+          metavariable: $CP
+          regex: '^(cp|child_process|childProcess|proc|execa|shell)$'
+      # exclude plain string-literal commands; an interpolated `...${x}...` template IS the
+      # danger, so it is deliberately NOT excluded here.
+      - pattern-not: $CP.exec("...", ...)
+      - pattern-not: $CP.execSync("...", ...)
+      - pattern-not: $CP.spawn("...", ...)
+      - pattern-not: $CP.spawnSync("...", ...)
+
+  # ---- CWE-200: a secret/key baked into a PUBLIC_/EXPO_PUBLIC_ (client/app-bundle) var ----
+  - id: ts-public-env-secret-leak
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      A SECRET/KEY/TOKEN read from a PUBLIC_/EXPO_PUBLIC_ env var is inlined into the
+      client/app bundle and shipped to every device (CWE-200). Move it server-side, or rename
+      it if it is genuinely public. (EXPO_PUBLIC_FLIGHTDATA_API_KEY is a documented accepted
+      tradeoff — keep this rule WARN; do not promote without a recorded waiver.)
+    metadata: { checkId: ts-public-secret-leak, cwe: "CWE-200", tier: T1 }
+    patterns:
+      - pattern-either:
+          - pattern: process.env.$NAME
+          - pattern: import.meta.env.$NAME
+      # genuinely-secret suffixes only — NOT a bare _KEY (a PUBLIC_*_SITE_KEY / public key is
+      # public by design and must not false-fire).
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: '^(PUBLIC_|EXPO_PUBLIC_).*(SECRET|PRIVATE|API_?KEY|TOKEN|PASSWORD)'
+
+  # ---- CWE-918: SSRF — fetch() to a request-derived URL (taint, intraprocedural) ----
+  - id: ts-ssrf-request-derived-fetch
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      fetch() to a URL derived from the request (body / params / query / header) in a server
+      handler — SSRF (CWE-918). Resolve against a fixed allow-listed origin.
+    metadata: { checkId: ts-ssrf, cwe: "CWE-918", tier: T1 }
+    mode: taint
+    pattern-sources:
+      - pattern: (await $REQ.json())
+      - pattern: $REQ.url
+      - pattern: new URL($REQ.url).searchParams.get(...)
+      - pattern: $REQ.headers.get(...)
+      - pattern: $CTX.params
+    pattern-sinks:
+      # focus on the URL argument ONLY (taint in the POST body to a fixed-origin URL is not SSRF),
+      # and EXEMPT a template-literal URL — the fleet's fetches use `${FIXED_ORIGIN}/${path}` proxies
+      # where the host is never request-controlled (only a path/query segment is); SSRF requires the
+      # request to control the ORIGIN, i.e. a DIRECT tainted URL like `fetch(target)`.
+      - patterns:
+          - pattern: fetch($SINK, ...)
+          - focus-metavariable: $SINK
+          - pattern-not: fetch(`...`, ...)
+      - patterns:
+          - pattern: fetch($SINK)
+          - focus-metavariable: $SINK
+          - pattern-not: fetch(`...`)
+    pattern-sanitizers:
+      - pattern: $ALLOW.includes(...)
+      - pattern: encodeURIComponent(...)
+      - pattern-regex: 'new URL\([^,]+,\s*["\x27`]https?://'
+
+  # ---- CWE-601: open redirect — Astro.redirect/Response.redirect of request-derived target ----
+  - id: ts-open-redirect
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: "redirect() to a request-derived target — open redirect (CWE-601, phishing/OAuth-theft pivot)."
+    metadata: { checkId: ts-open-redirect, cwe: "CWE-601", tier: T1 }
+    mode: taint
+    pattern-sources:
+      - pattern: $X.searchParams.get(...)
+      - pattern: (await $REQ.json())
+      - pattern: $REQ.headers.get(...)
+      - pattern: $CTX.params
+    pattern-sinks:
+      - pattern: Astro.redirect($U, ...)
+      - pattern: Astro.redirect($U)
+      - pattern: Response.redirect($U, ...)
+
+  # ---- CWE-922: RN — a token/secret written to plaintext AsyncStorage ----
+  - id: ts-rn-token-in-asyncstorage
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: >-
+      A token/secret stored in AsyncStorage (plaintext on-device) — insecure storage
+      (CWE-922). Use expo-secure-store / Keychain for credentials.
+    metadata: { checkId: rn-insecure-storage, cwe: "CWE-922", tier: T1 }
+    patterns:
+      - pattern-either:
+          - pattern: AsyncStorage.setItem($K, $V)
+          - pattern: $S.setItem($K, $V)
+      - metavariable-regex:
+          metavariable: $K
+          regex: '(?i).*(token|secret|password|passwd|jwt|refresh|access[_-]?token|api[_-]?key|credential)'
+      - pattern-not: SecureStore.setItemAsync(...)
+
+  # ---- CWE-319: RN/web — a literal cleartext http:// fetch ----
+  - id: ts-cleartext-http-fetch
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: "A literal http:// (non-TLS) request URL — cleartext transmission, MITM-able (CWE-319)."
+    metadata: { checkId: rn-cleartext-http, cwe: "CWE-319", tier: T1 }
+    patterns:
+      - pattern-either:
+          - pattern: fetch($U, ...)
+          - pattern: fetch($U)
+          - pattern: axios.$M($U, ...)
+          - pattern: ky.$M($U, ...)
+      - metavariable-regex:
+          metavariable: $U
+          regex: '^["\x27]http://(?!localhost|127\.0\.0\.1|10\.0\.2\.2)'
+
+  # ---- CWE-200: a server secret env var passed to console.* (lands in CF/Workers logs) ----
+  - id: ts-secret-in-log
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: "A secret-named env var passed to console.* — leaks into CF/Workers logs (CWE-200)."
+    metadata: { checkId: ts-secret-in-log, cwe: "CWE-200", tier: T1 }
+    patterns:
+      - pattern: console.$LOG(...)
+      - pattern-regex: '\.(MYPOS_PRIVATE_KEY|TURNSTILE_SECRET|[A-Z_]*CONSUMER_SECRET|[A-Z_]*_SECRET|[A-Z_]*PRIVATE_KEY|[A-Z_]*PASSWORD)\b'
+
+  # ---- CWE-345: a Turnstile/reCAPTCHA TEST sitekey baked into TS/Astro source ----
+  - id: ts-turnstile-test-sitekey
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: "A Cloudflare Turnstile TEST sitekey hardcoded — the widget always-passes (CWE-345). Read the real key; fail closed if unset."
+    metadata: { checkId: turnstile-test-key, cwe: "CWE-345", tier: T1 }
+    patterns:
+      - pattern-regex: '0x0{22}'
+
+  # ---- CWE-942: CORS wildcard origin (ADVISORY / T2 — legit for public JSON) ----
+  - id: ts-cors-wildcard
+    languages: [typescript, javascript]
+    severity: WARNING
+    message: "Access-Control-Allow-Origin '*' — confirm the endpoint exposes no credentials/PII (CWE-942). ADVISORY."
+    metadata: { checkId: ts-cors-wildcard, cwe: "CWE-942", tier: T2 }
+    patterns:
+      - pattern-either:
+          - pattern: $H.set("Access-Control-Allow-Origin", "*")
+          - pattern: $H.append("Access-Control-Allow-Origin", "*")

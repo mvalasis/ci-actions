@@ -1,0 +1,23 @@
+# security-baseline GHA rule self-test fixture (semgrep --test).
+# Run: semgrep --test --config rules/gha.yaml rules/selftest/gha.yml
+# ruleid: gha-pull-request-target
+on: pull_request_target
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # ok: gha-unpinned-third-party-action
+      - uses: actions/checkout@v4
+      # ruleid: gha-unpinned-third-party-action
+      - uses: webfactory/ssh-agent@v0.10.0
+      # ok: gha-unpinned-third-party-action
+      - uses: cloudflare/wrangler-action@5a3bc0e8b6f0f1a2b3c4d5e6f708192a3b4c5d6e
+      # ruleid: gha-script-injection
+      - run: echo "title is ${{ github.event.issue.title }}"
+      - name: safe
+        env:
+          TITLE: ${{ github.event.issue.title }}
+        # ok: gha-script-injection
+        run: echo "title is $TITLE"

@@ -1,0 +1,230 @@
+# security-baseline — vendored WP/PHP SAST rules (AIR-GAPPED: local config, no registry fetch).
+#
+# These model the real WordPress trust boundaries that the community `p/security-audit`
+# pack barely covers: nonce/CSRF, capability checks, $wpdb->prepare, the sanitize/escape
+# boundary, object injection, LFI, REST info-disclosure, weak signing crypto.
+#
+# TIER: every rule ships `severity: WARNING` — it NEVER blocks at the default ERROR cut.
+# The engine (tiers.mjs) maps each `metadata.checkId` to a tier; T1 ids are promotable to
+# CRITICAL per-caller via the `critical-checks` action input. So adding this pack to the
+# shared gate cannot newly-block any repo on the @v1 move.
+#
+# FP DISCIPLINE (load-bearing — proven against the real fleet, where WP core + vendor libs
+# are committed): every rule carries paths.exclude for wp-admin/, wp-includes/, vendor/,
+# *.phar, woocommerce/, and test files, or it drowns in core/library hits. Handler rules
+# additionally require the function to (a) read a request superglobal AND (b) hit a sink,
+# so an internal helper guarded by its caller does not false-fire.
+
+rules:
+  # ---- CWE-89: SQL injection — $wpdb interpolation without ->prepare ----
+  - id: wp-sql-unprepared
+    languages: [php]
+    severity: WARNING
+    message: >-
+      $wpdb query with an interpolated PHP variable and no $wpdb->prepare() — SQL injection
+      (CWE-89). Bind values with $wpdb->prepare("... %d/%s ...", $args).
+    metadata: { checkId: wp-sql-unprepared, cwe: "CWE-89", owasp: "A03:2021-Injection", tier: T1 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/woocommerce/**", "**/tests/**", "**/*test*.php"]
+    patterns:
+      - pattern-either:
+          - pattern: $wpdb->query("...$X...")
+          - pattern: $wpdb->get_results("...$X...")
+          - pattern: $wpdb->get_var("...$X...")
+          - pattern: $wpdb->get_row("...$X...")
+          - pattern: $wpdb->get_col("...$X...")
+      - pattern-not: $wpdb->$M($wpdb->prepare(...))
+
+  # ---- CWE-352: CSRF — state-changing request handler with no nonce verification ----
+  - id: wp-nonce-missing
+    languages: [php]
+    severity: WARNING
+    message: >-
+      A function reads request input ($_POST/$_GET/$_REQUEST) and performs a state change
+      ($wpdb write / update_option / post mutation) with NO nonce check
+      (check_ajax_referer / check_admin_referer / wp_verify_nonce) anywhere in its body —
+      possible CSRF (CWE-352). If the guard lives in a parent dispatcher this is a false
+      positive; keep WARN unless the repo is verified clean before promoting.
+    metadata: { checkId: wp-nonce-missing, cwe: "CWE-352", owasp: "A01:2021-Broken-Access-Control", tier: T1 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/woocommerce/**", "**/tests/**", "**/*test*.php"]
+    patterns:
+      # the matched node is the state-changing SINK; pattern-regex is scoped to it, so it
+      # fires only when request data flows DIRECTLY into the write (low FP). pattern-not-inside
+      # clears the match if ANY nonce check exists in the enclosing function.
+      - pattern-either:
+          - pattern: $wpdb->query(...)
+          - pattern: $wpdb->insert(...)
+          - pattern: $wpdb->update(...)
+          - pattern: $wpdb->delete(...)
+          - pattern: $wpdb->replace(...)
+          - pattern: update_option(...)
+          - pattern: delete_option(...)
+          - pattern: update_post_meta(...)
+          - pattern: delete_post_meta(...)
+          - pattern: wp_insert_post(...)
+          - pattern: wp_update_post(...)
+          - pattern: wp_delete_post(...)
+      - pattern-regex: '\$_(POST|GET|REQUEST)\b'
+      # deep-expression-statement guard: excludes the sink if the enclosing function calls a
+      # nonce check in ANY position (bare statement, if-condition, `|| wp_die()`).
+      - pattern-not-inside: function $FN(...) { ... <... check_ajax_referer(...) ...>; ... }
+      - pattern-not-inside: function $FN(...) { ... <... check_admin_referer(...) ...>; ... }
+      - pattern-not-inside: function $FN(...) { ... <... wp_verify_nonce(...) ...>; ... }
+
+  # ---- CWE-862: missing authorization — privileged request handler with no capability check ----
+  - id: wp-cap-missing
+    languages: [php]
+    severity: WARNING
+    message: >-
+      A function reads request input and performs a privileged/state-changing action with NO
+      capability check (current_user_can / map_meta_cap / user_can) — any logged-in user
+      (incl. subscriber) may reach it (CWE-862). False-positive if the cap check is in a
+      parent dispatcher; keep WARN until the repo is verified.
+    metadata: { checkId: wp-cap-missing, cwe: "CWE-862", owasp: "A01:2021-Broken-Access-Control", tier: T1 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/woocommerce/**", "**/tests/**", "**/*test*.php"]
+    patterns:
+      - pattern-either:
+          - pattern: $wpdb->query(...)
+          - pattern: $wpdb->insert(...)
+          - pattern: $wpdb->update(...)
+          - pattern: $wpdb->delete(...)
+          - pattern: update_option(...)
+          - pattern: delete_post_meta(...)
+          - pattern: wp_delete_post(...)
+          - pattern: wp_insert_user(...)
+      - pattern-regex: '\$_(POST|GET|REQUEST)\b'
+      - pattern-not-inside: function $FN(...) { ... <... current_user_can(...) ...>; ... }
+      - pattern-not-inside: function $FN(...) { ... <... map_meta_cap(...) ...>; ... }
+      - pattern-not-inside: function $FN(...) { ... <... user_can(...) ...>; ... }
+
+  # ---- CWE-502: PHP object injection — unserialize() of request data ----
+  - id: wp-unserialize-user-input
+    languages: [php]
+    severity: WARNING
+    message: >-
+      unserialize() on request data without ['allowed_classes' => false] — PHP object
+      injection (CWE-502). Use json_decode, or pass ['allowed_classes' => false].
+    metadata: { checkId: wp-unserialize, cwe: "CWE-502", owasp: "A08:2021-Data-Integrity", tier: T1 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/woocommerce/**", "**/tests/**", "**/*test*.php"]
+    patterns:
+      - pattern-either:
+          - pattern: unserialize($_POST[...])
+          - pattern: unserialize($_GET[...])
+          - pattern: unserialize($_REQUEST[...])
+          - pattern: unserialize($_COOKIE[...])
+          - pattern: unserialize(base64_decode($_POST[...]))
+          - pattern: unserialize(base64_decode($_GET[...]))
+          - pattern: unserialize(base64_decode($_COOKIE[...]))
+      - pattern-not: unserialize(..., ['allowed_classes' => false])
+      - pattern-not: unserialize(..., ['allowed_classes' => []])
+
+  # ---- CWE-98/22: LFI / path traversal — file op with request-controlled path ----
+  - id: wp-file-include-user-input
+    languages: [php]
+    severity: WARNING
+    message: >-
+      File include/read/open/delete with a request-controlled path component and no
+      sanitize_file_name / basename / realpath / allow-list — LFI / path traversal
+      (CWE-98 / CWE-22).
+    metadata: { checkId: wp-file-include, cwe: "CWE-98", owasp: "A03:2021-Injection", tier: T1 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/woocommerce/**", "**/tests/**", "**/*test*.php"]
+    patterns:
+      - pattern-either:
+          - pattern: include($ARG)
+          - pattern: require($ARG)
+          - pattern: readfile($ARG)
+          - pattern: file_get_contents($ARG)
+      # $ARG must carry request input ...
+      - metavariable-pattern:
+          metavariable: $ARG
+          pattern-either:
+            - pattern: <... $_GET ...>
+            - pattern: <... $_POST ...>
+            - pattern: <... $_REQUEST ...>
+      # ... and must NOT be wrapped in a path sanitizer (rule-level pattern-not; the
+      # metavariable-pattern form of pattern-not does not exclude reliably in this engine).
+      - pattern-not: include(<... basename(...) ...>)
+      - pattern-not: include(<... sanitize_file_name(...) ...>)
+      - pattern-not: include(<... realpath(...) ...>)
+      - pattern-not: require(<... basename(...) ...>)
+      - pattern-not: require(<... sanitize_file_name(...) ...>)
+      - pattern-not: require(<... realpath(...) ...>)
+      - pattern-not: readfile(<... basename(...) ...>)
+      - pattern-not: readfile(<... sanitize_file_name(...) ...>)
+      - pattern-not: file_get_contents(<... basename(...) ...>)
+      - pattern-not: file_get_contents(<... sanitize_file_name(...) ...>)
+
+  # ---- CWE-209: information disclosure — exception detail in a REST 500 response ----
+  - id: wp-rest-exception-detail
+    languages: [php]
+    severity: WARNING
+    message: >-
+      Exception message / file / line returned in a WP_REST_Response body — leaks internal
+      paths + plugin internals to the caller (CWE-209). Log server-side; return a generic
+      {error:'internal'} to the client.
+    metadata: { checkId: wp-rest-error-detail, cwe: "CWE-209", owasp: "A05:2021-Misconfiguration", tier: T1 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/tests/**", "**/*test*.php"]
+    patterns:
+      - pattern-either:
+          - pattern: new \WP_REST_Response(<... $E->getMessage() ...>, ...)
+          - pattern: new \WP_REST_Response(<... $E->getFile() ...>, ...)
+          - pattern: new \WP_REST_Response(<... $E->getTraceAsString() ...>, ...)
+          - pattern: new WP_REST_Response(<... $E->getMessage() ...>, ...)
+          - pattern: rest_ensure_response(<... $E->getMessage() ...>)
+
+  # ---- CWE-327: weak crypto used for signing/auth (NOT cache keys) ----
+  - id: wp-weak-crypto-signing
+    languages: [php]
+    severity: WARNING
+    message: >-
+      md5/sha1 assigned to a signing/auth-named variable — not a secure hash for
+      passwords/tokens/signatures (CWE-327). Use password_hash() or hash_hmac('sha256', ...).
+      (Cache-key/transient md5() is fine and intentionally not matched.)
+    metadata: { checkId: wp-weak-crypto, cwe: "CWE-327", owasp: "A02:2021-Crypto-Failures", tier: T1 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/tests/**", "**/*test*.php"]
+    patterns:
+      - pattern-either:
+          - pattern: $T = md5(...);
+          - pattern: $T = sha1(...);
+      - metavariable-regex:
+          metavariable: $T
+          regex: '^\$(password|passwd|pwd|token|secret|sig|signature|hash|hmac|apikey|api_key|auth)$'
+
+  # ---- CWE-345: a Cloudflare Turnstile / reCAPTCHA TEST sitekey baked into source ----
+  - id: wp-turnstile-test-sitekey
+    languages: [php]
+    severity: WARNING
+    message: >-
+      A Cloudflare Turnstile TEST sitekey (0x0000000000000000000000) is hardcoded in PHP —
+      the widget always-passes and enforces no bot protection (CWE-345). Read the real key
+      from config and fail closed if unset.
+    metadata: { checkId: turnstile-test-key, cwe: "CWE-345", tier: T1 }
+    paths:
+      exclude: ["**/vendor/**", "**/node_modules/**", "**/*.phar", "**/tests/**", "**/*test*.php"]
+    patterns:
+      - pattern-regex: '0x0{22}'
+
+  # ---- CWE-79: unescaped output (ADVISORY / T2 — too FP-heavy to ever promote) ----
+  - id: wp-unescaped-output
+    languages: [php]
+    severity: WARNING
+    message: >-
+      echo/print of a plain variable with no esc_html/esc_attr/esc_url/wp_kses — possible
+      XSS (CWE-79). ADVISORY only (echoing a known int is benign); never promote fleet-wide.
+    metadata: { checkId: wp-unescaped-output, cwe: "CWE-79", owasp: "A03:2021-Injection", tier: T2 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/woocommerce/**", "**/tests/**", "**/*test*.php"]
+    patterns:
+      - pattern-either:
+          - pattern: echo $_GET[...];
+          - pattern: echo $_POST[...];
+          - pattern: echo $_REQUEST[...];
+          - pattern: echo $_SERVER[...];
+          - pattern: print $_GET[...];
+          - pattern: print $_REQUEST[...];

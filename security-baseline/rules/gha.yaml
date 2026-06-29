@@ -1,0 +1,51 @@
+# security-baseline — vendored GitHub Actions supply-chain rules (AIR-GAPPED).
+#
+# The gate that protects the fleet's CI must also audit the fleet's CI. A third-party action
+# pinned to a MUTABLE tag runs with the workflow's secrets (webfactory/ssh-agent consumes an
+# SSH deploy key; cloudflare/wrangler-action consumes the CF API token) and can be silently
+# re-pointed by a compromised upstream. None of these patterns exist-and-block today, so the
+# rules ship WARN and cannot newly-block; they make the existing tag-pins VISIBLE.
+# Run only over .github/workflows/ (the engine scopes the target).
+
+rules:
+  # ---- CWE-829: a third-party action pinned to a mutable tag/branch, not a 40-char SHA ----
+  - id: gha-unpinned-third-party-action
+    languages: [yaml]
+    severity: WARNING
+    message: >-
+      Third-party action pinned to a mutable ref (a tag/branch can be re-pointed by a
+      compromised upstream and runs with this workflow's secrets) — pin to a full 40-char
+      commit SHA (CWE-829). First-party actions/* and github/* are exempt.
+    metadata: { checkId: gha-unpinned-action, cwe: "CWE-829", tier: T1 }
+    patterns:
+      - pattern: 'uses: $USES'
+      - metavariable-regex:
+          metavariable: $USES
+          regex: '^(?!\./)(?!actions/)(?!github/)[A-Za-z0-9._-]+/[A-Za-z0-9._-]+@(?![0-9a-f]{40}\b)'
+
+  # ---- CWE-94: untrusted github.event.* interpolated into a run: shell block ----
+  - id: gha-script-injection
+    languages: [yaml]
+    severity: WARNING
+    message: >-
+      Attacker-controllable github.event.* (issue/PR title/body, head ref, comment) is
+      interpolated directly into a run: shell block — CI script injection (CWE-94). Pass it
+      through an env: var and reference "$VAR" instead.
+    metadata: { checkId: gha-script-injection, cwe: "CWE-94", tier: T1 }
+    patterns:
+      - pattern: 'run: $CMD'
+      - metavariable-regex:
+          metavariable: $CMD
+          regex: '(?s).*\$\{\{\s*github\.event\.[a-zA-Z0-9_.]*(title|body|ref|name|label|email|message|head)'
+
+  # ---- CWE-829: the pull_request_target trigger (runs with write token + secrets) ----
+  - id: gha-pull-request-target
+    languages: [yaml]
+    severity: WARNING
+    message: >-
+      pull_request_target runs with a read/WRITE token and repo secrets in the context of the
+      BASE repo — if it also checks out PR head code, a fork PR can exfiltrate secrets
+      (CWE-829). Review carefully; never checkout+build untrusted head under this trigger.
+    metadata: { checkId: gha-pr-target, cwe: "CWE-829", tier: T1 }
+    patterns:
+      - pattern-regex: '\bpull_request_target\b'
