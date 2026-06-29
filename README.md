@@ -39,7 +39,9 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`) pins `@v1`; current line is **v1.1.0**.
+`linkcheck`) pins `@v1`; current line is **v1.2.0** (seo-aeo rebuilt as a
+parsed Node+cheerio gate — T0/T1/T2 severity + the additive `critical-checks`
+input; backward-compatible, no-regression on the enforcing callers).
 
 ## `linkcheck` — full-site broken-link / image / outbound crawl
 
