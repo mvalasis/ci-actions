@@ -1,0 +1,11 @@
+{
+  "name": "ci-actions-seo-aeo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SEO + AEO/GEO CI gate — parses the JS-disabled served HTML with a real DOM parser.",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "cheerio": "1.0.0"
+  }
+}

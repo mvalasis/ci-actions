@@ -1,9 +1,12 @@
 name: 'SEO + AEO/GEO checks'
 description: >-
-  Technical SEO + AEO checks over live URLs from a JS-disabled (raw curl) fetch —
-  the crawler's-eye view. Title + h1 are crawlability-critical (BLOCK when
-  fail-on-critical); meta description, canonical, JSON-LD, and the AEO artifacts
-  (llms.txt) are WARN. Suits server-rendered WP and prerendered Astro.
+  Technical SEO + AEO/GEO audit of live URLs from a JS-disabled (raw fetch) view —
+  the crawler's-eye. Parses the served HTML with a real DOM parser (cheerio), not
+  regex: title/meta length, canonical validity, accidental noindex, Open Graph,
+  hreflang, robots/sitemap sanity, parsed-and-typed JSON-LD, redirect hygiene, plus
+  AEO (llms.txt structure, AI-crawler allow-list, entity/freshness signals). CRITICAL
+  set is tiny and config-free (HTTP 200 + title + h1); everything else is WARN, with a
+  per-caller opt-in to promote individual checks. Air-gapped: only fetches the target.
 
 inputs:
   urls:
@@ -11,26 +14,43 @@ inputs:
     required: false
     default: ''
   sitemap-url:
-    description: 'Sitemap to expand into the URL list.'
+    description: 'Sitemap (or sitemap index) to expand into the URL list.'
     required: false
     default: ''
   fail-on-critical:
-    description: 'true = BLOCK when a page is missing title or h1; false = report-only.'
+    description: 'true = BLOCK when a CRITICAL check fails (HTTP non-200, missing title, missing h1, or a promoted check); false = report-only.'
     required: false
     default: 'false'
   max-urls:
-    description: 'Cap the number of URLs checked.'
+    description: 'Cap the number of URLs checked (sampled from the front of the list/sitemap).'
     required: false
     default: '15'
   verify-token:
     description: 'Optional WAF/CF-bypass token, sent as the X-Verify-Source header to the checked host (Cloudflare-tunnel / WAF-fronted origins).'
     required: false
     default: ''
+  critical-checks:
+    description: >-
+      Optional comma/space-separated list of WARN check IDs to ELEVATE to CRITICAL for
+      THIS caller (e.g. "noindex,canonical-valid,meta-description"). Only promotable
+      (T1) IDs are honored; unknown/advisory (T2) IDs are reported and ignored. Empty
+      (default) = the CRITICAL core only, so a caller is never newly-blocked by an upgrade.
+      Promotable IDs: noindex, single-h1, canonical-present, canonical-valid,
+      meta-description, html-lang, viewport, jsonld-valid, og-core, robots-txt, sitemap,
+      redirect-consistency.
+    required: false
+    default: ''
 
 runs:
   using: composite
   steps:
-    - name: Check
+    - name: Install deps (cheerio)
+      shell: bash
+      # Air-gapped: cheerio is the only dependency (a real HTML parser); npm registry
+      # only. Lockfile-pinned, no scripts, no audit/fund pings.
+      working-directory: ${{ github.action_path }}
+      run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+    - name: SEO/AEO check
       shell: bash
       env:
         URLS: ${{ inputs.urls }}
@@ -38,4 +58,5 @@ runs:
         FAIL_ON_CRITICAL: ${{ inputs.fail-on-critical }}
         MAX_URLS: ${{ inputs.max-urls }}
         VERIFY_TOKEN: ${{ inputs.verify-token }}
-      run: bash "${{ github.action_path }}/scripts/check.sh"
+        CRITICAL_CHECKS: ${{ inputs.critical-checks }}
+      run: node "${{ github.action_path }}/scripts/check.mjs"

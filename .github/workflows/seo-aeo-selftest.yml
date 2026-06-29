@@ -1,0 +1,48 @@
+name: seo-aeo self-test
+
+# Two layers: (1) the offline engine self-test (deterministic fixtures, no network —
+# the real regression guard); (2) a live report-mode smoke run of the action against a
+# chosen site. fail-on-critical is forced off so this can never block ci-actions itself.
+
+on:
+  push:
+    paths: ['seo-aeo/**', '.github/workflows/seo-aeo-selftest.yml']
+  workflow_dispatch:
+    inputs:
+      sitemap-url:
+        description: 'Sitemap to crawl in the live smoke run'
+        required: false
+        default: 'https://www.lampakia.gr/sitemap-index.xml'
+      urls:
+        description: 'Explicit URLs (overrides sitemap-url if set)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  engine-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Offline engine self-test
+        working-directory: seo-aeo
+        run: |
+          npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+          node scripts/selftest.mjs
+
+  live-smoke:
+    runs-on: ubuntu-latest
+    needs: engine-selftest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./seo-aeo
+        with:
+          sitemap-url: ${{ inputs.sitemap-url || 'https://www.lampakia.gr/sitemap-index.xml' }}
+          urls: ${{ inputs.urls }}
+          fail-on-critical: 'false'
+          verify-token: ${{ secrets.VERIFY_HOMEPAGE_TOKEN }}
+          max-urls: '8'

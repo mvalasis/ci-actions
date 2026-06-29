@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 pages.txt
 linkcheck-report.txt
+
+# node deps installed at action runtime (regenerated via `npm ci` from the lockfile)
+node_modules/
