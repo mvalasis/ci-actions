@@ -1,0 +1,7 @@
+{
+  "name": "fixture/php-composer",
+  "description": "Offline selftest fixture: a PHP project with a composer `test` script. The action must resolve the command to `composer test` from this (no execution in the offline selftest — composer isn't guaranteed on the runner; resolution is asserted by the pure core).",
+  "scripts": {
+    "test": "phpunit"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "fixture-node-redgreen",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Offline selftest fixture: a node project whose `test` script emits real vitest-shaped output for one passing + one failing test, so the runner must detect RED. No network / no real vitest install — the script is a self-contained Node stub that prints the exact summary line vitest produces and exits 1.",
+  "scripts": {
+    "test": "node vitest-stub.mjs"
+  }
+}

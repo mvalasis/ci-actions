@@ -39,7 +39,19 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`) pins `@v1`; current line is **v1.3.0** — the **`security-baseline`
+`linkcheck`) pins `@v1`; current line is **v1.4.0** — three NEW actions for the
+disciplines rethink (the 8 software-house lifecycle lenses): **`test-suite`**
+(per-stack node/php test runner; a repo with no tests stays green),
+**`contract-check`** (live WP/WC REST JSON probe vs a committed manifest —
+required fields + types + money/encoding invariants; `seo-aeo`-shaped live
+probe), and **`deps-currency`** (scheduled full-lockfile osv scan — the TIME
+axis `security-baseline`'s diff scan misses — + unpinned-action flag, with a
+linkcheck-style auto-issue). All three **report-mode-first** (`fail-on-*`
+defaults `false`), each ships an **offline selftest** (run green: 50 / 36 / 47
+assertions). **Purely additive** — no existing action or caller changes, so the
+`v1` move newly-blocks nobody; not yet wired to any caller (a separate deploy
+step pins `mvalasis/ci-actions/<action>@v1`).
+History: **v1.3.0** was the **`security-baseline`
 rebuild**: the 2-tool air-gapped script (semgrep + gitleaks) becomes a tiered
 gate — a tiny **T0 CRITICAL** core that still blocks exactly what it blocked
 before (semgrep community ERROR on diff + gitleaks pattern on diff) plus a NEW

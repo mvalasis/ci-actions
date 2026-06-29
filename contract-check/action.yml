@@ -1,0 +1,65 @@
+name: 'WP/WC REST contract check'
+description: >-
+  Validate that the WP/WC REST JSON payloads a deployed Astro/RN consumer reads still satisfy a
+  committed contract — catch a backend change that silently breaks or mis-prices a live frontend.
+  Fetches each endpoint as raw JSON (the consumer's-eye view, JS-disabled) and checks it against a
+  manifest of required-fields / type-expectations / money & encoding invariants. CRITICAL core is
+  tiny and config-free (a required field MISSING or RE-TYPED, price<=0, inc-VAT<ex-VAT, missing
+  currency, empty slug, a double-encoded entity); softer drift (new field, null optional, empty
+  collection) is WARN, per-caller promotable. Air-gapped: only fetches the configured endpoints.
+
+inputs:
+  endpoints:
+    description: >-
+      JSON object mapping a friendly name to a URL, e.g. {"products":"https://cms.example.gr/wp-json/wc/store/products",
+      "posts":"https://.../wp-json/wp/v2/posts"}. Endpoints given this way are checked against the
+      transport + encoding floors only (no required-field/invariant contract). Use `manifest` for a
+      rich contract. This OR `manifest` (you can supply both).
+    required: false
+    default: ''
+  manifest:
+    description: >-
+      Path (relative to the checkout, or absolute) to a committed JSON contract file:
+      {"endpoints":[{"name","url","required":[],"types":{path:type},"invariants":[],"optional":[],
+      "money":[],"slug":[],"nonEmpty":bool,"expectFields":[],"allowExtra":bool}]}. The contract lives
+      in the consumer repo so a backend shape-change is caught against what THIS frontend relies on.
+    required: false
+    default: ''
+  fail-on-critical:
+    description: 'true = BLOCK when a CRITICAL fires (a required field missing/retyped, a money/encoding invariant violated, or a promoted check); false = report-only.'
+    required: false
+    default: 'false'
+  max-endpoints:
+    description: 'Cap the number of endpoints checked (deduped by URL, sampled from the front of the list).'
+    required: false
+    default: '25'
+  verify-token:
+    description: 'Optional WAF/CF-bypass token, sent as the X-Verify-Source header ONLY to the configured endpoint hosts (Cloudflare-tunnel / WAF-fronted origins). Never carried across a cross-host redirect.'
+    required: false
+    default: ''
+  critical-checks:
+    description: >-
+      Optional comma/space-separated list of T1 (promotable-WARN) check IDs to ELEVATE to CRITICAL
+      for THIS caller (e.g. "unexpected-field,optional-null"). T0 ids are already critical; unknown /
+      advisory ids are reported and ignored. Empty (default) = the CRITICAL core only, so wiring a
+      caller never newly-blocks. Promotable IDs: invariant-declared, optional-null, unexpected-field,
+      array-empty.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Zero runtime dependencies — JSON parsing is a Node 22 built-in, fetch is built-in. Nothing
+    # to install (no npm ci), which keeps the step air-gapped and fast.
+    - name: Contract check
+      shell: bash
+      env:
+        ENDPOINTS: ${{ inputs.endpoints }}
+        MANIFEST: ${{ inputs.manifest }}
+        FAIL_ON_CRITICAL: ${{ inputs.fail-on-critical }}
+        MAX_ENDPOINTS: ${{ inputs.max-endpoints }}
+        VERIFY_TOKEN: ${{ inputs.verify-token }}
+        CRITICAL_CHECKS: ${{ inputs.critical-checks }}
+        GITHUB_WORKSPACE: ${{ github.workspace }}
+      run: node "${{ github.action_path }}/scripts/check.mjs"

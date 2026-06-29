@@ -1,0 +1,9 @@
+{
+  "name": "fixture-node-notests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Offline selftest fixture: a node project carrying ONLY the npm-init placeholder `test` script (and no test runner dep). The action must treat this as 'no tests configured' → PASS green, never a failure — so wiring a repo that has no tests yet stays green.",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}

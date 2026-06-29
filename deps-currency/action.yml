@@ -1,0 +1,75 @@
+name: 'Dependency currency (scheduled SCA over full lockfiles)'
+description: >-
+  The TIME-axis dependency check — the scheduled complement to security-baseline's diff-scoped
+  osv. Runs osv-scanner over the FULL committed lockfiles (npm/pnpm/composer, recursive — NOT
+  diff-scoped) to surface known-vuln / abandoned dependencies that were already in the tree, plus
+  unpinned third-party GitHub Actions that consume secrets. Filters by a severity FLOOR, renders a
+  report, and opens/auto-closes a 'dependency advisories' tracking issue (linkcheck's lifecycle).
+  Report-mode-first: fail-on-vuln defaults FALSE, so wiring a caller never newly-blocks. osv-scanner
+  sends only package COORDINATES to osv.dev (never your lockfile body — the same opt-out-able egress
+  security-baseline's SCA documents).
+
+inputs:
+  working-directory:
+    description: 'Directory to scan (recursively, skipping node_modules/vendor/dist/.git).'
+    required: false
+    default: '.'
+  ecosystems:
+    description: >-
+      auto | npm | composer | "npm composer". auto = enable npm when a package-lock/pnpm-lock (etc.)
+      is present, composer when a composer.lock is present. Unknown ecosystems are reported + ignored.
+    required: false
+    default: 'auto'
+  severity-floor:
+    description: >-
+      Minimum advisory severity that counts toward the issue / the optional block:
+      CRITICAL | HIGH | MODERATE | LOW (CVSS-bucketed; a vuln with no CVSS is treated as HIGH).
+    required: false
+    default: 'HIGH'
+  manage-issue:
+    description: >-
+      Open/update a single 'dependency advisories' tracking issue when advisories are found at/above
+      the floor, and auto-close it when the next run is clean. Needs `issues: write`.
+    required: false
+    default: 'true'
+  fail-on-vuln:
+    description: >-
+      true = exit non-zero (BLOCK) when an advisory at/above the floor exists; false = report-only.
+      Default FALSE — report-mode-first, so wiring a caller never newly-blocks. Unpinned-action
+      advisories are WARN-only and never block regardless.
+    required: false
+    default: 'false'
+  issue-title:
+    description: 'Title of the tracking issue (kept stable so the same issue is reused/closed).'
+    required: false
+    default: 'deps-currency: dependency advisories'
+  osv-version:
+    description: 'Pinned osv-scanner release (with "v"). Mirrors security-baseline''s pin.'
+    required: false
+    default: 'v2.4.0'
+
+runs:
+  using: composite
+  steps:
+    - name: Install osv-scanner (pinned)
+      shell: bash
+      # Same pinned-release-binary supply-chain posture as security-baseline. osv-scanner is a
+      # self-contained Go binary; the only egress at scan time is package coordinates → osv.dev.
+      run: |
+        v="${{ inputs.osv-version }}"
+        sudo curl -sSL "https://github.com/google/osv-scanner/releases/download/${v}/osv-scanner_${v#v}_linux_amd64" -o /usr/local/bin/osv-scanner
+        sudo chmod +x /usr/local/bin/osv-scanner
+    - name: Scan dependency currency
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        ECOSYSTEMS: ${{ inputs.ecosystems }}
+        SEVERITY_FLOOR: ${{ inputs.severity-floor }}
+        MANAGE_ISSUE: ${{ inputs.manage-issue }}
+        FAIL_ON_VULN: ${{ inputs.fail-on-vuln }}
+        ISSUE_TITLE: ${{ inputs.issue-title }}
+        GH_TOKEN: ${{ github.token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_SERVER_URL: ${{ github.server_url }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+      run: node "${{ github.action_path }}/scripts/scan.mjs"

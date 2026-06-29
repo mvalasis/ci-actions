@@ -1,0 +1,40 @@
+{
+  "_comment": "Example committed contract for the WP/WC REST payloads a headless consumer reads. Copy into the CONSUMER repo (e.g. contract/wp-rest.json) and point the action's `manifest` input at it. Each entry describes ONE item's shape; a list endpoint is validated against its first element.",
+  "endpoints": [
+    {
+      "name": "wc-store-product",
+      "url": "https://cms.example.gr/wp-json/wc/store/products?per_page=1",
+      "required": ["id", "name", "slug", "permalink", "prices", "is_in_stock"],
+      "types": {
+        "id": "number",
+        "name": "string",
+        "slug": "string",
+        "permalink": "string",
+        "prices": "object",
+        "is_in_stock": "boolean",
+        "images": "array"
+      },
+      "money": ["prices.price", "prices.regular_price"],
+      "slug": ["slug"],
+      "invariants": [
+        "price>0",
+        "currency:prices.currency_code"
+      ],
+      "nonEmpty": true
+    },
+    {
+      "name": "wp-post",
+      "url": "https://cms.example.gr/wp-json/wp/v2/posts?per_page=1",
+      "required": ["id", "slug", "title.rendered", "link"],
+      "types": {
+        "id": "number",
+        "slug": "string",
+        "title.rendered": "string",
+        "link": "string"
+      },
+      "slug": ["slug"],
+      "invariants": ["slug"],
+      "nonEmpty": true
+    }
+  ]
+}

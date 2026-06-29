@@ -1,0 +1,41 @@
+name: test-suite self-test
+
+# Offline regression guard (no network, no real test-runner install): the pure core
+# (stack detection, command resolution, runner-aware count parsing, exit-code-authoritative
+# verdict, the "no tests = green" floor) PLUS end-to-end runs of run.mjs over committed node
+# fixtures whose `test` script is a self-contained Node stub emitting real vitest-shaped output —
+# proving the action detects RED, reports GREEN, and never blocks a repo with no tests. Plus a
+# report-mode self-run smoke so a syntax/wiring break in run.mjs is caught.
+
+on:
+  push:
+    paths: ['test-suite/**', '.github/workflows/test-suite-selftest.yml']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  engine-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Offline self-test (core + E2E fixtures)
+        working-directory: test-suite
+        run: node scripts/selftest.mjs
+
+  self-run-smoke:
+    runs-on: ubuntu-latest
+    needs: [engine-selftest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      # report-mode self-run against ci-actions itself (no root package.json/composer.json) —
+      # proves the full action wires up and reports a green "no stack to test", never blocking.
+      - uses: ./test-suite
+        with:
+          working-directory: .
+          fail-on-fail: 'false'

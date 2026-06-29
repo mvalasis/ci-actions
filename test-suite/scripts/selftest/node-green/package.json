@@ -1,0 +1,9 @@
+{
+  "name": "fixture-node-green",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Offline selftest fixture: a node project whose `test` script emits real vitest-shaped output for an all-passing suite and exits 0. Asserts the runner reports PASS (green) end-to-end with no network.",
+  "scripts": {
+    "test": "node vitest-stub.mjs"
+  }
+}

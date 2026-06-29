@@ -1,0 +1,47 @@
+name: 'Test suite (per-stack, report-mode-first)'
+description: >-
+  Runs a repo's existing test suite — Node (package.json "test" script via the repo's package
+  manager, or `npx vitest run`) or PHP (`composer test` / `vendor/bin/pest` / `vendor/bin/phpunit`)
+  — auto-detecting the stack from the working dir. A repo with NO test config configured is PASS
+  (green), never a block — so wiring this action onto a repo that has no tests yet stays green.
+  Report-mode-first: parses pass/fail counts, emits a GitHub step-summary table, and exits
+  non-zero ONLY when a test failed AND `fail-on-fail` is true. Air-gapped: runs only the repo's
+  own test command (no SaaS, no telemetry).
+
+inputs:
+  working-directory:
+    description: 'Directory to detect the stack in and run the tests from.'
+    required: false
+    default: '.'
+  stack:
+    description: >-
+      auto (default) | node | php | none. auto: node if package.json present, else php if
+      composer.json present, else none (reports "no stack" and passes). Set explicitly to skip
+      detection (e.g. a polyglot repo where only the PHP suite should run here).
+    required: false
+    default: 'auto'
+  test-command:
+    description: >-
+      Override the resolved test command entirely (e.g. `pnpm test:ci`, `vendor/bin/phpunit
+      --testsuite unit`). When set, stack detection is used only for the summary label; the command
+      is run verbatim via the shell. Empty (default) = resolve from the detected stack.
+    required: false
+    default: ''
+  fail-on-fail:
+    description: >-
+      true = BLOCK (exit non-zero) when a test FAILED; false = report-only (default). Report-mode-
+      first: wiring a caller never newly-blocks until it flips this to true after the suite is green.
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Run test suite
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        STACK: ${{ inputs.stack }}
+        TEST_COMMAND: ${{ inputs.test-command }}
+        FAIL_ON_FAIL: ${{ inputs.fail-on-fail }}
+      run: node "${{ github.action_path }}/scripts/run.mjs"

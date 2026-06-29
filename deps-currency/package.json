@@ -1,0 +1,11 @@
+{
+  "name": "ci-actions-deps-currency",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Scheduled time-axis SCA — osv-scanner over full lockfiles for known-vuln/abandoned deps + unpinned secret-consuming GH actions, with a tracking-issue lifecycle. Report-mode-first.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "selftest": "node scripts/selftest.mjs"
+  }
+}

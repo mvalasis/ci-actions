@@ -1,0 +1,26 @@
+name: deps-currency self-test
+
+# Offline regression guard (no network, no osv-scanner, no gh, no secrets): feeds a SAVED
+# osv-scanner JSON fixture + workflow-text fixtures to the pure engine and asserts CVSS→bucket,
+# severity-floor filtering, the issue open/close lifecycle, the fail-on-vuln block decision
+# (report-mode-first), the unpinned-secret-consuming-action detection, and the spoof/disclosure
+# guard. Deterministic — the action's own regression guard.
+
+on:
+  push:
+    paths: ['deps-currency/**', '.github/workflows/deps-currency-selftest.yml']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  engine-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Offline engine self-test
+        working-directory: deps-currency
+        run: node scripts/selftest.mjs
