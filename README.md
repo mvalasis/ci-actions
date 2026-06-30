@@ -39,7 +39,13 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`) pins `@v1`; current line is **v1.4.4** — `security-baseline`'s
+`linkcheck`) pins `@v1`; current line is **v1.4.5** — `security-baseline`'s
+`wp-rest-exception-detail` (T1) + `wp-rest-wp-error-detail` (T2) now **also cover the `wp_die()`
+sink**: `wp_die($e->getMessage())` / `wp_die($e->getTraceAsString(), …)` (plus the WP_Error
+`wp_die($wpe->get_error_message())` advisory variant) — the frontend/admin terminator that leaks
+raw exception detail exactly like the AJAX/REST sinks (a request the v1.4.4 work named but did not
+wire). Additive under the same `wp-rest-error-detail` **T1** id (still `WARNING`), so the `@v1` move
+newly-blocks nobody; `semgrep --test` + `selftest.mjs` green. **v1.4.4** — `security-baseline`'s
 **`wp-rest-exception-detail` now also catches the WordPress AJAX leak path**:
 `wp_send_json_error($e->getMessage())`, `wp_send_json_error(['message'=>$e->getMessage()], 500)`,
 `wp_send_json_success(['debug'=>$e->getMessage()])`, `wp_send_json([...$e->getTraceAsString()...])`

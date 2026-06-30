@@ -95,10 +95,24 @@ function sb_ajax_success_bad($e) {
 	// ruleid: wp-rest-exception-detail
 	wp_send_json_success(array('debug' => $e->getMessage()));
 }
+// wp_die() leak — the frontend/admin sink that terminates with raw exception detail.
+function sb_die_msg_bad($e) {
+	// ruleid: wp-rest-exception-detail
+	wp_die($e->getMessage());
+}
+function sb_die_trace_bad($e) {
+	// ruleid: wp-rest-exception-detail
+	wp_die($e->getTraceAsString(), 'Fatal error', array('response' => 500));
+}
 function sb_ajax_ok($e) {
 	error_log('[plugin] fatal: ' . $e->getMessage());
 	// ok: wp-rest-exception-detail
 	wp_send_json_error('internal error');
+}
+function sb_die_ok($e) {
+	error_log('[plugin] fatal: ' . $e->getMessage());
+	// ok: wp-rest-exception-detail
+	wp_die('An unexpected error occurred. Please try again.');
 }
 
 // ---- wp-rest-wp-error-detail (T2 advisory — the hlek rest-categories WP_Error case) ----
@@ -113,6 +127,10 @@ function sb_wperror_rest_bad($wpe) {
 function sb_wperror_success_bad($wpe) {
 	// ruleid: wp-rest-wp-error-detail
 	wp_send_json_success(array('note' => $wpe->get_error_message()));
+}
+function sb_wperror_die_bad($wpe) {
+	// ruleid: wp-rest-wp-error-detail
+	wp_die($wpe->get_error_message());
 }
 function sb_wperror_ok() {
 	// ok: wp-rest-wp-error-detail

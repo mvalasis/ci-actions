@@ -138,9 +138,9 @@ newsletter route (`ts-ssrf`), and the fleet's unpinned `webfactory/ssh-agent` / 
   documented false-negative. Same class hits `wp-rest-error-detail`: a laundered local
   (`$m = $e->getMessage(); wp_send_json_error($m);`) slips the syntactic match — the rule fires only
   when the accessor is *inline* in the response body. The dominant inline shapes (`WP_REST_Response`,
-  `rest_ensure_response`, `wp_send_json`/`_error`/`_success`) are covered; **not** covered (deferred,
-  not taint-limited): a bare `return new WP_Error('code', $e->getMessage())` from a REST callback, and
-  `wp_die()` / `echo` of exception HTML. Catching the laundered case needs semgrep `taint` mode.
+  `rest_ensure_response`, `wp_send_json`/`_error`/`_success`, and `wp_die()`) are covered; **not**
+  covered (deferred, not taint-limited): a bare `return new WP_Error('code', $e->getMessage())` from a
+  REST callback, and `echo` of exception HTML. Catching the laundered case needs semgrep `taint` mode.
 - **Reserved checkIds (defined, not yet emitted by a scanner):** `secret-worktree` (a working-tree
   gitignored-`.env` scan — primarily a *local* pre-push concern; in CI the gitignored file isn't
   checked out), `license-denied`, `lockfile-integrity`, `iac-misconfig`. They are wired into the
