@@ -117,8 +117,14 @@ runs:
       shell: bash
       run: |
         v="${{ inputs.osv-version }}"
-        sudo curl -sSL "https://github.com/google/osv-scanner/releases/download/${v}/osv-scanner_${v#v}_linux_amd64" -o /usr/local/bin/osv-scanner
+        # Asset name is UNVERSIONED (osv-scanner_linux_amd64) — osv-scanner v2.x dropped the version
+        # from the filename; version is pinned by the release TAG (${v}). `-f` fails the step on a
+        # missing/renamed asset instead of silently saving the 404 body as a fake binary (which would
+        # skip the SCA → false "clean"); `--version` smoke-checks it runs. (Fixed 2026-06-30 — the
+        # versioned name had silently disabled osv SCA fleet-wide.)
+        sudo curl -fsSL "https://github.com/google/osv-scanner/releases/download/${v}/osv-scanner_linux_amd64" -o /usr/local/bin/osv-scanner
         sudo chmod +x /usr/local/bin/osv-scanner
+        osv-scanner --version
     - name: Install hadolint (pinned; used only when a Dockerfile is in scope)
       shell: bash
       run: |

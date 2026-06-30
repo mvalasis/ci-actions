@@ -57,8 +57,14 @@ runs:
       # self-contained Go binary; the only egress at scan time is package coordinates → osv.dev.
       run: |
         v="${{ inputs.osv-version }}"
-        sudo curl -sSL "https://github.com/google/osv-scanner/releases/download/${v}/osv-scanner_${v#v}_linux_amd64" -o /usr/local/bin/osv-scanner
+        # NOTE asset name is UNVERSIONED (osv-scanner_linux_amd64) — osv-scanner v2.x dropped the
+        # version from the release-asset filename; the version is pinned by the release TAG (${v}).
+        # `-f` makes a missing/renamed asset FAIL THE STEP (red) instead of silently saving the 404
+        # body as a fake binary → the scan would skip → a false "clean" SCA. `--version` smoke-checks
+        # the binary actually runs. (This exact bug silently disabled osv in CI before 2026-06-30.)
+        sudo curl -fsSL "https://github.com/google/osv-scanner/releases/download/${v}/osv-scanner_linux_amd64" -o /usr/local/bin/osv-scanner
         sudo chmod +x /usr/local/bin/osv-scanner
+        osv-scanner --version
     - name: Scan dependency currency
       shell: bash
       env:
