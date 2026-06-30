@@ -152,6 +152,17 @@ jobs:
   check('does NOT flag an unpinned action in a workflow with no secret', !r.some((u) => u.uses.includes('some/linter')));
   check('does NOT flag a local ./action', scanUnpinnedActions([{ path: 'x.yml', text: 'uses: ./local\nsecrets.FOO' }]).length === 0);
   check('empty input → []', scanUnpinnedActions([]).length === 0 && scanUnpinnedActions(null).length === 0);
+
+  // self-owner exclusion: the repo's OWN org is first-party (e.g. mvalasis/ci-actions@v1,
+  // deliberately floating-tag-pinned by the fleet policy) — must NOT be flagged.
+  const selfOrg = [{ path: '.github/workflows/x.yml',
+    text: 'jobs:\n  a:\n    steps:\n      - uses: mvalasis/ci-actions/linkcheck@v1\n      - uses: oven-sh/setup-bun@v2\n    env:\n      T: ${{ secrets.CF_TOKEN }}' }];
+  const sOff = scanUnpinnedActions(selfOrg);            // no selfOwner → flags BOTH
+  const sOn = scanUnpinnedActions(selfOrg, 'mvalasis'); // selfOwner set → only the real third-party
+  check('without selfOwner, own-org action IS flagged', sOff.some((u) => u.uses.includes('mvalasis/ci-actions')));
+  check('selfOwner excludes own-org action', !sOn.some((u) => u.uses.includes('mvalasis/ci-actions')));
+  check('selfOwner still flags the genuine third-party (oven-sh)', sOn.length === 1 && sOn[0].uses === 'oven-sh/setup-bun@v2', JSON.stringify(sOn));
+  check('selfOwner is case-insensitive', scanUnpinnedActions([{ path: 'x.yml', text: 'uses: MVALASIS/ci-actions@v1\nsecrets.X' }], 'mvalasis').length === 0);
 }
 
 console.log('\n# report rendering is deterministic + spoof-safe');

@@ -39,7 +39,11 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`) pins `@v1`; current line is **v1.4.0** — three NEW actions for the
+`linkcheck`) pins `@v1`; current line is **v1.4.1** — `deps-currency`'s
+unpinned-action scan now excludes the repo's **own org** (`mvalasis/*`) as
+first-party (it was flagging the fleet's own `mvalasis/ci-actions@v1` callers,
+which are deliberately floating-tag-pinned by policy — pure noise on every
+caller; surfaced by the EPN pilot). **v1.4.0** — three NEW actions for the
 disciplines rethink (the 8 software-house lifecycle lenses): **`test-suite`**
 (per-stack node/php test runner; a repo with no tests stays green),
 **`contract-check`** (live WP/WC REST JSON probe vs a committed manifest —

@@ -147,7 +147,7 @@ function manageIssue(decision, body) {
   const { ecosystems, lockfiles } = resolveEcosystems();
   const { findings } = runOsv();
   const floorFindings = filterByFloor(findings, FLOOR);
-  const unpinned = scanUnpinnedActions(loadWorkflows());
+  const unpinned = scanUnpinnedActions(loadWorkflows(), (process.env.GITHUB_REPOSITORY || '').split('/')[0]);
 
   const report = renderReport(floorFindings, unpinned, {
     floor: FLOOR, ecosystems, lockfiles, totalFindings: findings.length,

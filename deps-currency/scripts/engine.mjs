@@ -84,14 +84,18 @@ export function filterByFloor(findings, floor) {
 // under you), so it belongs in the scheduled currency sweep. Pure text scan of a
 // single workflow YAML body — no YAML lib (zero-dep), heuristic but FP-disciplined:
 //   - only flags steps whose `uses:` is a third-party `owner/repo@ref` (skips local
-//     `./...`, `docker://`, and first-party `actions/*` / `github/*`),
+//     `./...`, `docker://`, first-party `actions/*` / `github/*`, AND the repo's OWN
+//     org `selfOwner/*` — your own shared actions, e.g. `mvalasis/ci-actions@v1`, are
+//     first-party + deliberately floating-tag-pinned by the fleet's versioning policy;
+//     flagging them on every caller is pure noise),
 //   - only when the ref is NOT a full 40-char hex SHA,
 //   - AND only when a secret is referenced anywhere in the same workflow file
 //     (`secrets.*` or `${{ secrets… }}`) — the consuming-secrets qualifier.
 // Conservative-by-design: file-level secret co-presence (not step-level dataflow),
 // so it can over-report within a file but never crosses files. WARN-only signal.
 const SHA40 = /^[0-9a-f]{40}$/i;
-export function scanUnpinnedActions(workflowFiles) {
+export function scanUnpinnedActions(workflowFiles, selfOwner = '') {
+  const self = String(selfOwner || '').toLowerCase();
   const out = [];
   for (const wf of asArray(workflowFiles)) {
     const path = (wf && wf.path) || '';
@@ -110,7 +114,9 @@ export function scanUnpinnedActions(workflowFiles) {
       const repo = ref.slice(0, at);
       const pin = ref.slice(at + 1);
       const owner = repo.split('/')[0] || '';
-      if (owner === 'actions' || owner === 'github') continue; // first-party — trusted, GitHub-pinned
+      const ownerLc = owner.toLowerCase();
+      if (ownerLc === 'actions' || ownerLc === 'github') continue; // first-party — trusted, GitHub-pinned
+      if (self && ownerLc === self) continue; // the repo's own org — first-party (e.g. mvalasis/ci-actions@v1)
       if (SHA40.test(pin)) continue; // immutably pinned — safe
       out.push({ path, line: i + 1, uses: ref, pin });
     }
