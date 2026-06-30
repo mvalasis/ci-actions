@@ -129,8 +129,11 @@ runs:
       shell: bash
       run: |
         v="${{ inputs.hadolint-version }}"
-        sudo curl -sSL "https://github.com/hadolint/hadolint/releases/download/v${v}/hadolint-Linux-x86_64" -o /usr/local/bin/hadolint
+        # -f so a missing/renamed asset fails the step instead of silently saving the 404 body as a
+        # fake binary (the osv-scanner silent-skip class — fail loud, never fail-open to "clean").
+        sudo curl -fsSL "https://github.com/hadolint/hadolint/releases/download/v${v}/hadolint-Linux-x86_64" -o /usr/local/bin/hadolint
         sudo chmod +x /usr/local/bin/hadolint
+        hadolint --version
     - name: Scan
       shell: bash
       env:
