@@ -78,6 +78,46 @@ function sb_rest_ok($e) {
 	// ok: wp-rest-exception-detail
 	return new \WP_REST_Response(array('error' => 'internal'), 500);
 }
+// AJAX leak — the gap found 2026-06-29 (EPN custom plugins leak via exactly this).
+function sb_ajax_msg_bad($e) {
+	// ruleid: wp-rest-exception-detail
+	wp_send_json_error($e->getMessage());
+}
+function sb_ajax_arr_bad($e) {
+	// ruleid: wp-rest-exception-detail
+	wp_send_json_error(array('line' => $e->getLine(), 'file' => $e->getFile()), 500);
+}
+function sb_ajax_trace_bad($e) {
+	// ruleid: wp-rest-exception-detail
+	wp_send_json(array('ok' => false, 'detail' => $e->getTraceAsString()));
+}
+function sb_ajax_success_bad($e) {
+	// ruleid: wp-rest-exception-detail
+	wp_send_json_success(array('debug' => $e->getMessage()));
+}
+function sb_ajax_ok($e) {
+	error_log('[plugin] fatal: ' . $e->getMessage());
+	// ok: wp-rest-exception-detail
+	wp_send_json_error('internal error');
+}
+
+// ---- wp-rest-wp-error-detail (T2 advisory — the hlek rest-categories WP_Error case) ----
+function sb_wperror_bad($wpe) {
+	// ruleid: wp-rest-wp-error-detail
+	wp_send_json_error($wpe->get_error_message());
+}
+function sb_wperror_rest_bad($wpe) {
+	// ruleid: wp-rest-wp-error-detail
+	return new \WP_REST_Response(array('message' => $wpe->get_error_message()), 500);
+}
+function sb_wperror_success_bad($wpe) {
+	// ruleid: wp-rest-wp-error-detail
+	wp_send_json_success(array('note' => $wpe->get_error_message()));
+}
+function sb_wperror_ok() {
+	// ok: wp-rest-wp-error-detail
+	wp_send_json_error('plain curated string');
+}
 
 // ---- wp-weak-crypto-signing (signing var fires; cache-key does not) ----
 function sb_crypto_bad($payload, $secret) {

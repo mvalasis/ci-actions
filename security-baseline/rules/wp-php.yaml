@@ -158,24 +158,62 @@ rules:
       - pattern-not: file_get_contents(<... basename(...) ...>)
       - pattern-not: file_get_contents(<... sanitize_file_name(...) ...>)
 
-  # ---- CWE-209: information disclosure — exception detail in a REST 500 response ----
+  # ---- CWE-209: information disclosure — exception detail in a REST / AJAX response ----
   - id: wp-rest-exception-detail
     languages: [php]
     severity: WARNING
     message: >-
-      Exception message / file / line returned in a WP_REST_Response body — leaks internal
-      paths + plugin internals to the caller (CWE-209). Log server-side; return a generic
-      {error:'internal'} to the client.
+      Exception message / file / line / stack-trace returned to the client in a WP_REST_Response,
+      rest_ensure_response(), or a WordPress AJAX wp_send_json()/wp_send_json_error()/
+      wp_send_json_success() body — leaks internal paths + plugin internals to the caller
+      (CWE-209). Log server-side; return a generic {error:'internal'} to the client.
     metadata: { checkId: wp-rest-error-detail, cwe: "CWE-209", owasp: "A05:2021-Misconfiguration", tier: T1 }
     paths:
       exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/tests/**", "**/*test*.php"]
     patterns:
+      # the SINK is the REST response constructor / rest_ensure_response / AJAX json emitter; $BODY
+      # is its data argument. The metavariable-pattern then requires a Throwable accessor
+      # (getMessage/getFile/getLine/getTraceAsString) ANYWHERE inside that body — so the rule fires
+      # ONLY when an exception-variable accessor is actually carried into the response (low FP).
       - pattern-either:
-          - pattern: new \WP_REST_Response(<... $E->getMessage() ...>, ...)
-          - pattern: new \WP_REST_Response(<... $E->getFile() ...>, ...)
-          - pattern: new \WP_REST_Response(<... $E->getTraceAsString() ...>, ...)
-          - pattern: new WP_REST_Response(<... $E->getMessage() ...>, ...)
-          - pattern: rest_ensure_response(<... $E->getMessage() ...>)
+          - pattern: new \WP_REST_Response($BODY, ...)
+          - pattern: new WP_REST_Response($BODY, ...)
+          - pattern: rest_ensure_response($BODY)
+          - pattern: wp_send_json_error($BODY, ...)
+          - pattern: wp_send_json_success($BODY, ...)
+          - pattern: wp_send_json($BODY, ...)
+      - metavariable-pattern:
+          metavariable: $BODY
+          pattern-either:
+            - pattern: <... $E->getMessage() ...>
+            - pattern: <... $E->getFile() ...>
+            - pattern: <... $E->getLine() ...>
+            - pattern: <... $E->getTraceAsString() ...>
+
+  # ---- CWE-209: WP_Error detail in a REST / AJAX response (ADVISORY / T2 — too FP-heavy to promote) ----
+  - id: wp-rest-wp-error-detail
+    languages: [php]
+    severity: WARNING
+    message: >-
+      WP_Error::get_error_message() reaching a WP_REST_Response / rest_ensure_response /
+      wp_send_json() response body. ADVISORY (T2): usually this IS the intended client-facing
+      message — but a WP_Error wrapping $wpdb->last_error or a caught exception leaks internal
+      detail to the caller (CWE-209). Confirm the WP_Error message is curated/safe; never promote
+      fleet-wide (legit benign error strings would false-fire).
+    metadata: { checkId: wp-rest-wp-error-detail, cwe: "CWE-209", owasp: "A05:2021-Misconfiguration", tier: T2 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/tests/**", "**/*test*.php"]
+    patterns:
+      - pattern-either:
+          - pattern: new \WP_REST_Response($BODY, ...)
+          - pattern: new WP_REST_Response($BODY, ...)
+          - pattern: rest_ensure_response($BODY)
+          - pattern: wp_send_json_error($BODY, ...)
+          - pattern: wp_send_json_success($BODY, ...)
+          - pattern: wp_send_json($BODY, ...)
+      - metavariable-pattern:
+          metavariable: $BODY
+          pattern: <... $WPE->get_error_message() ...>
 
   # ---- CWE-327: weak crypto used for signing/auth (NOT cache keys) ----
   - id: wp-weak-crypto-signing

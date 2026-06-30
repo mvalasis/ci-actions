@@ -17,7 +17,7 @@ silently un-enforce every repo.
 |---|---|---|
 | **T0 — CRITICAL** | always blocks (when `fail-on-critical`, the default) | `sast-critical` (semgrep community ERROR on the diff — *today's block, unchanged*); `secret-pattern` (gitleaks pattern on the diff — *today's block, unchanged*); `secret-verified` (trufflehog `--only-verified` on the **diff range** — NEW; a provider just authenticated it → ~zero FP) |
 | **T1 — promotable WARN** | reports; a caller ELEVATES any id to CRITICAL via `critical-checks` | `sca-critical`, `sca-high` (osv-scanner); the custom **WP/PHP** rules (`wp-nonce-missing`, `wp-cap-missing`, `wp-sql-unprepared`, `wp-unserialize`, `wp-file-include`, `wp-rest-error-detail`, `wp-weak-crypto`, `turnstile-test-key`); the custom **Astro/TS/RN** rules (`ts-dangerous-html`, `ts-eval`, `ts-child-process`, `ts-public-secret-leak`, `ts-ssrf`, `ts-open-redirect`, `ts-secret-in-log`, `rn-insecure-storage`, `rn-cleartext-http`); the **GitHub-Actions** rules (`gha-unpinned-action`, `gha-script-injection`, `gha-pr-target`); `dockerfile-lint` |
-| **T2 — advisory** | reports (WARN/INFO); never promotable | `sca-moderate`/`sca-low` (INFO); `wp-unescaped-output` (syntactic XSS — too FP-heavy to promote); `ts-cors-wildcard`; `secrets-history` (full-history baseline — clearing needs a history rewrite, so it can **never** be a merge precondition) |
+| **T2 — advisory** | reports (WARN/INFO); never promotable | `sca-moderate`/`sca-low` (INFO); `wp-unescaped-output` (syntactic XSS — too FP-heavy to promote); `wp-rest-wp-error-detail` (`WP_Error::get_error_message()` in a REST/AJAX body — usually the *intended* client message, so advisory-only); `ts-cors-wildcard`; `secrets-history` (full-history baseline — clearing needs a history rewrite, so it can **never** be a merge precondition) |
 
 The CRITICAL core is exactly what a clean repo always passes; **a failure there is always a real
 defect.** Everything else is real signal but site-/dependency-/editorial-variable, so it
@@ -135,7 +135,12 @@ newsletter route (`ts-ssrf`), and the fleet's unpinned `webfactory/ssh-agent` / 
   catching those needs WPScan/Patchstack (paid + plugin-inventory egress). SCA covers
   composer/npm/pnpm/bun transitive deps only.
 - **Intraprocedural taint.** A request value laundered through a helper in another file is a
-  documented false-negative.
+  documented false-negative. Same class hits `wp-rest-error-detail`: a laundered local
+  (`$m = $e->getMessage(); wp_send_json_error($m);`) slips the syntactic match — the rule fires only
+  when the accessor is *inline* in the response body. The dominant inline shapes (`WP_REST_Response`,
+  `rest_ensure_response`, `wp_send_json`/`_error`/`_success`) are covered; **not** covered (deferred,
+  not taint-limited): a bare `return new WP_Error('code', $e->getMessage())` from a REST callback, and
+  `wp_die()` / `echo` of exception HTML. Catching the laundered case needs semgrep `taint` mode.
 - **Reserved checkIds (defined, not yet emitted by a scanner):** `secret-worktree` (a working-tree
   gitignored-`.env` scan — primarily a *local* pre-push concern; in CI the gitignored file isn't
   checked out), `license-denied`, `lockfile-integrity`, `iac-misconfig`. They are wired into the

@@ -60,6 +60,7 @@ export const CHECKS = {
   'sca-moderate':      { tier: 'T2', sev: SEV.INFO },
   'sca-low':           { tier: 'T2', sev: SEV.INFO },
   'wp-unescaped-output': { tier: 'T2', sev: SEV.WARN }, // syntactic XSS heuristic — too FP-heavy to promote
+  'wp-rest-wp-error-detail': { tier: 'T2', sev: SEV.WARN }, // WP_Error msg in a REST/AJAX body — usually the intended message, never promote
   'ts-cors-wildcard':  { tier: 'T2', sev: SEV.WARN },
   'secrets-history':   { tier: 'T2', sev: SEV.WARN },   // full-history secret baseline — clearing needs history rewrite, never a merge precondition
   'lockfile-integrity':{ tier: 'T2', sev: SEV.INFO },

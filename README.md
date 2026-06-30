@@ -39,7 +39,20 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`) pins `@v1`; current line is **v1.4.2** — **critical osv-scanner
+`linkcheck`) pins `@v1`; current line is **v1.4.4** — `security-baseline`'s
+**`wp-rest-exception-detail` now also catches the WordPress AJAX leak path**:
+`wp_send_json_error($e->getMessage())`, `wp_send_json_error(['message'=>$e->getMessage()], 500)`,
+`wp_send_json_success(['debug'=>$e->getMessage()])`, `wp_send_json([...$e->getTraceAsString()...])`
+— the common companion to the REST `WP_REST_Response` / `rest_ensure_response` leak it already
+caught (`getLine()`, already named in the rule message, is now matched too). Backward-compatible — catches strictly **more** under the
+same `wp-rest-error-detail` **T1** id, so the `@v1` move newly-blocks nobody. Also adds a separate
+**T2 advisory** `wp-rest-wp-error-detail` for `WP_Error::get_error_message()` reaching those sinks —
+**never promotable**, since that string is usually the *intended* client-facing message (folding it
+into the promotable T1 rule would risk false CRITICALs). The EPN custom plugins leak via exactly
+this AJAX pattern (a companion task fixes the EPN code); the clean WP repos can promote
+`wp-rest-error-detail` once released. **v1.4.3** — `security-baseline` hardened the `hadolint`
+install (`curl -f` fail-closed + a post-install `--version` smoke check, mirroring the v1.4.2 osv
+fix). **v1.4.2** — **critical osv-scanner
 install fix**: both `deps-currency` and `security-baseline` downloaded the
 *versioned* asset name (`osv-scanner_2.4.0_linux_amd64`), but osv-scanner v2.x
 dropped the version from its release-asset filename — the URL 404'd, `curl -sSL`
