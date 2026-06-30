@@ -39,7 +39,16 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`) pins `@v1`; current line is **v1.4.1** — `deps-currency`'s
+`linkcheck`) pins `@v1`; current line is **v1.4.2** — **critical osv-scanner
+install fix**: both `deps-currency` and `security-baseline` downloaded the
+*versioned* asset name (`osv-scanner_2.4.0_linux_amd64`), but osv-scanner v2.x
+dropped the version from its release-asset filename — the URL 404'd, `curl -sSL`
+(no `-f`) silently saved the error page as the "binary", and the SCA scan was
+**skipped → false clean, fleet-wide**. Fixed: unversioned asset name (version
+still pinned by the release tag), `curl -fsSL` so a missing asset fails the step
+red, + an `osv-scanner --version` smoke check. Surfaced by the `deps-currency`
+lux-pm pilot (osv.dev had 6 advisories / 4 ≥HIGH for its phpspreadsheet, gate
+reported 0). **v1.4.1** — `deps-currency`'s
 unpinned-action scan now excludes the repo's **own org** (`mvalasis/*`) as
 first-party (it was flagging the fleet's own `mvalasis/ci-actions@v1` callers,
 which are deliberately floating-tag-pinned by policy — pure noise on every
