@@ -39,7 +39,23 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`) pins `@v1`; current line is **v1.4.5** — `security-baseline`'s
+`linkcheck`) pins `@v1`; current line is **v1.4.6** — `security-baseline` now catches the
+**laundered CWE-209** error-detail shapes the inline accessor-grep MISSES (a 2026-06-30 dataflow
+re-audit of epn-billing/lux-main/hlektrologos found real public-unauth leaks reported "clean"
+because the detail is routed through an intermediate object/array/redirect before the sink). Four
+new vendored WP/PHP rules under a **separate** `wp-rest-error-detail-laundered` **T1** id (so
+promoting the inline `wp-rest-error-detail` does not auto-promote — and possibly newly-block on —
+these heuristics; a caller opts in independently): (a) a `WP_Error::get_error_data()` value flowing
+(semgrep **taint** mode, through `array_merge`/an intermediate var) into a `WP_REST_Response` /
+`rest_ensure_response` / `wp_send_json*` body; (b) a debug-labeled array key
+(`detail`/`debug`/`trace`/`sql`/…) set to a raw accessor (`$e->getMessage()`, `$wpdb->last_error`,
+`$wpe->get_error_message()`); (c) an exception/`get_error_message()` accessor reflected into a
+`wp_safe_redirect()`/`wp_redirect()`/`add_query_arg()` URL; (d)
+`new WP_Error('code', $body['error_description'] ?? $body['error'])` wrapping upstream/provider text.
+Admin-gated (`current_user_can`) handlers are exempt and the in-sink case is left to the inline rule
+(no double-report). New `wp-rest-error-detail-laundered` is **WARN** and promoted by no caller, so the
+`@v1` move newly-blocks nobody; `semgrep --test` (14 wp-php rules) + `selftest.mjs` green.
+**v1.4.5** — `security-baseline`'s
 `wp-rest-exception-detail` (T1) + `wp-rest-wp-error-detail` (T2) now **also cover the `wp_die()`
 sink**: `wp_die($e->getMessage())` / `wp_die($e->getTraceAsString(), …)` (plus the WP_Error
 `wp_die($wpe->get_error_message())` advisory variant) — the frontend/admin terminator that leaks

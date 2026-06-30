@@ -32,6 +32,7 @@ export const CHECKS = {
   'wp-unserialize':     { tier: 'T1', sev: SEV.WARN },
   'wp-file-include':    { tier: 'T1', sev: SEV.WARN },
   'wp-rest-error-detail': { tier: 'T1', sev: SEV.WARN },
+  'wp-rest-error-detail-laundered': { tier: 'T1', sev: SEV.WARN }, // laundered CWE-209 (taint/heuristic); separate id so promoting wp-rest-error-detail doesn't auto-promote these
   'wp-weak-crypto':     { tier: 'T1', sev: SEV.WARN },
   'turnstile-test-key': { tier: 'T1', sev: SEV.WARN },
 

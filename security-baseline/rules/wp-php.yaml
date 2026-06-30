@@ -218,6 +218,143 @@ rules:
           metavariable: $BODY
           pattern: <... $WPE->get_error_message() ...>
 
+  # ---- CWE-209 LAUNDERED: error detail that the plain inline grep above MISSES, because it is
+  #      routed through an intermediate object/array/redirect before the sink. These four rules
+  #      emit a SEPARATE checkId (wp-rest-error-detail-laundered) so promoting the inline
+  #      `wp-rest-error-detail` does not also promote (and possibly newly-block on) these heuristics;
+  #      a caller opts in independently once it has eyeballed a clean run. Found by a 2026-06-30
+  #      dataflow re-audit of epn-billing / lux-main / hlektrologos (the inline grep reported clean).
+
+  # ---- (a) a WP_Error::get_error_data() value flows (taint) into a client response ----
+  - id: wp-rest-laundered-error-data
+    mode: taint
+    languages: [php]
+    severity: WARNING
+    message: >-
+      A WP_Error::get_error_data() value flows into a WP_REST_Response / rest_ensure_response /
+      wp_send_json* body — directly or laundered through an array_merge()/intermediate variable
+      (a normalizer). WP_Error data routinely carries raw transport / exception text (e.g.
+      ['detail' => $resp->get_error_message()]), so this returns internal detail to the client
+      (CWE-209). Strip the detail keys server-side; return a curated client shape. (Admin-gated
+      handlers — current_user_can in the same function — are intentionally exempt.)
+    metadata: { checkId: wp-rest-error-detail-laundered, cwe: "CWE-209", owasp: "A05:2021-Misconfiguration", tier: T1 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/tests/**", "**/*test*.php"]
+    pattern-sources:
+      - pattern: $E->get_error_data()
+      - pattern: $E->get_error_data(...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: new \WP_REST_Response(...)
+              - pattern: new WP_REST_Response(...)
+              - pattern: rest_ensure_response(...)
+              - pattern: wp_send_json(...)
+              - pattern: wp_send_json_error(...)
+              - pattern: wp_send_json_success(...)
+          # admin-gated diagnostic surface — exempt (the SAFE pattern: detail behind a cap check)
+          - pattern-not-inside: function $FN(...) { ... <... current_user_can(...) ...>; ... }
+
+  # ---- (b) a debug-labeled array key holds a raw internal accessor (the laundered SOURCE) ----
+  - id: wp-error-data-array-detail
+    languages: [php]
+    severity: WARNING
+    message: >-
+      A debug-labeled array key (detail/debug/trace/stack/sql/query/exception/backtrace) is set to a
+      raw internal accessor ($e->getMessage()/getFile()/getLine()/getTraceAsString(),
+      $wpe->get_error_message(), $wpdb->last_error). In a WP_Error data array or a to-be-normalized
+      array this laundered internal detail reaches the client (CWE-209). Log it server-side; never
+      label-and-return it.
+    metadata: { checkId: wp-rest-error-detail-laundered, cwe: "CWE-209", owasp: "A05:2021-Misconfiguration", tier: T1 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/tests/**", "**/*test*.php"]
+    patterns:
+      - pattern-either:
+          - pattern: array(..., $K => $V, ...)
+          - pattern: "[..., $K => $V, ...]"
+      # ONLY the clearly-DEBUG keys. A plain 'error'/'message' key is deliberately NOT matched: a
+      # 2026-06-30 fleet scan showed `'error' => $e->getMessage()` is the dominant idiom in real WP
+      # code and is usually the INTENDED client message (and is anyway caught inline by
+      # wp-rest-exception-detail when it reaches a sink) — including it drowned the rule (~70 of 98
+      # hits). These debug-labeled keys do not have a benign client-facing meaning.
+      - metavariable-regex:
+          metavariable: $K
+          regex: "(?i)^['\"](detail|debug|trace|stack|sql|query|exception|backtrace|db_error|sql_error|error_detail)['\"]$"
+      - metavariable-pattern:
+          metavariable: $V
+          pattern-either:
+            - pattern: $E->getMessage()
+            - pattern: $E->getFile()
+            - pattern: $E->getLine()
+            - pattern: $E->getTraceAsString()
+            - pattern: $WPE->get_error_message()
+            - pattern: $wpdb->last_error
+      # this rule is the LAUNDERED detector. When the labeled array is DIRECTLY the sink argument,
+      # the inline `wp-rest-exception-detail` / `wp-rest-wp-error-detail` rules already cover it —
+      # exclude that so the same line is not double-reported under two checkIds.
+      - pattern-not-inside: new \WP_REST_Response(...)
+      - pattern-not-inside: new WP_REST_Response(...)
+      - pattern-not-inside: rest_ensure_response(...)
+      - pattern-not-inside: wp_send_json(...)
+      - pattern-not-inside: wp_send_json_error(...)
+      - pattern-not-inside: wp_send_json_success(...)
+      - pattern-not-inside: wp_die(...)
+      # SAFE pattern: detail destined only for a logger — exclude the standard sinks (a custom-named
+      # logger like my_plugin_log() is a documented residual FP; see README §Honest limits).
+      - pattern-not-inside: error_log(...)
+      - pattern-not-inside: trigger_error(...)
+      # exempt an admin-gated diagnostic builder (cap check in the same function)
+      - pattern-not-inside: function $FN(...) { ... <... current_user_can(...) ...>; ... }
+
+  # ---- (c) error detail reflected into a redirect / query arg on a (public) page ----
+  - id: wp-error-detail-in-redirect
+    languages: [php]
+    severity: WARNING
+    message: >-
+      Exception / WP_Error detail interpolated into a wp_safe_redirect() / wp_redirect() /
+      add_query_arg() URL — the raw message rides a query arg back to the browser, often on a
+      public callback page (CWE-209, reflected). Redirect with a generic error CODE; map it to a
+      user-facing string client-side. (Admin-gated callers are exempt.)
+    metadata: { checkId: wp-rest-error-detail-laundered, cwe: "CWE-209", owasp: "A05:2021-Misconfiguration", tier: T1 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/tests/**", "**/*test*.php"]
+    patterns:
+      # the raw accessor is the matched node; require it to sit inside a redirect / query-arg
+      # builder. add_query_arg is covered on its own so the build-then-redirect shape
+      # ($u = add_query_arg(.., $e->getMessage(), ..); wp_redirect($u);) is caught at the build site.
+      - pattern-either:
+          - pattern: $E->get_error_message()
+          - pattern: $E->getMessage()
+          - pattern: $E->getFile()
+          - pattern: $E->getLine()
+          - pattern: $E->getTraceAsString()
+      - pattern-either:
+          - pattern-inside: add_query_arg(...)
+          - pattern-inside: wp_safe_redirect(...)
+          - pattern-inside: wp_redirect(...)
+      - pattern-not-inside: function $FN(...) { ... <... current_user_can(...) ...>; ... }
+
+  # ---- (d) WP_Error wrapping unsanitized upstream/provider body text ----
+  - id: wp-error-upstream-text
+    languages: [php]
+    severity: WARNING
+    message: >-
+      new WP_Error() whose message is a fallback over an upstream/provider response body
+      ($body['error_description'] ?? $body['error']) rather than a curated literal / __() string —
+      provider-controlled text propagates into the WP_Error, which conventionally surfaces to the
+      user or a redirect (CWE-209). Wrap a curated message; log the upstream text separately. (Only
+      the null-coalesce-over-array-access shape is matched, to stay low-FP — a plain
+      `new WP_Error('code', $msg)` does NOT fire.)
+    metadata: { checkId: wp-rest-error-detail-laundered, cwe: "CWE-209", owasp: "A05:2021-Misconfiguration", tier: T1 }
+    paths:
+      exclude: ["**/wp-admin/**", "**/wp-includes/**", "**/vendor/**", "**/node_modules/**", "**/*.phar", "**/tests/**", "**/*test*.php"]
+    patterns:
+      - pattern-either:
+          - pattern: new WP_Error($CODE, $X[$K] ?? $Y)
+          - pattern: new WP_Error($CODE, $X[$K] ?? $Y, ...)
+          - pattern: new \WP_Error($CODE, $X[$K] ?? $Y)
+          - pattern: new \WP_Error($CODE, $X[$K] ?? $Y, ...)
+
   # ---- CWE-327: weak crypto used for signing/auth (NOT cache keys) ----
   - id: wp-weak-crypto-signing
     languages: [php]

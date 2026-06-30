@@ -13,7 +13,7 @@ const EMITTED = new Set([
   'sast-critical', 'secret-pattern', 'secret-verified', 'secrets-history',
   'sca-critical', 'sca-high', 'sca-moderate', 'sca-low',
   'wp-nonce-missing', 'wp-cap-missing', 'wp-sql-unprepared', 'wp-unserialize', 'wp-file-include',
-  'wp-rest-error-detail', 'wp-weak-crypto', 'turnstile-test-key', 'wp-unescaped-output', 'wp-rest-wp-error-detail',
+  'wp-rest-error-detail', 'wp-rest-error-detail-laundered', 'wp-weak-crypto', 'turnstile-test-key', 'wp-unescaped-output', 'wp-rest-wp-error-detail',
   'ts-dangerous-html', 'ts-eval', 'ts-child-process', 'ts-public-secret-leak', 'ts-ssrf',
   'ts-open-redirect', 'ts-secret-in-log', 'rn-insecure-storage', 'rn-cleartext-http', 'ts-cors-wildcard',
   'gha-unpinned-action', 'gha-script-injection', 'gha-pr-target', 'dockerfile-lint',

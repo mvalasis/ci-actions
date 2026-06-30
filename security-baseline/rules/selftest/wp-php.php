@@ -137,6 +137,111 @@ function sb_wperror_ok() {
 	wp_send_json_error('plain curated string');
 }
 
+// ---- CWE-209 LAUNDERED shapes (the inline grep above MISSES these — re-audit 2026-06-30) ----
+
+// (a) wp-rest-laundered-error-data — WP_Error data taints a response (inline + two-step normalizer)
+function sb_launder_inline($payload, $err) {
+	// ruleid: wp-rest-laundered-error-data
+	return new \WP_REST_Response(array_merge($payload, $err->get_error_data()), 502);
+}
+function sb_launder_twostep($payload, $err) {
+	$payload = array_merge($payload, $err->get_error_data());
+	// ruleid: wp-rest-laundered-error-data
+	return new \WP_REST_Response($payload, 502);
+}
+function sb_launder_twostep_var($payload, $err) {
+	$data = $err->get_error_data();
+	$payload = array_merge($payload, $data);
+	// ruleid: wp-rest-laundered-error-data
+	wp_send_json_error($payload);
+}
+function sb_launder_logonly($payload, $err) {
+	$debug = array_merge($payload, $err->get_error_data());
+	error_log('[plugin] ' . wp_json_encode($debug));
+	// merged data only logged; the response body is clean
+	// ok: wp-rest-laundered-error-data
+	return new \WP_REST_Response(array('error' => 'internal'), 502);
+}
+function sb_launder_capgated($payload, $err) {
+	if (!current_user_can('manage_options')) wp_die('no');
+	$payload = array_merge($payload, $err->get_error_data());
+	// admin-only diagnostic surface
+	// ok: wp-rest-laundered-error-data
+	return new \WP_REST_Response($payload, 502);
+}
+
+// (b) wp-error-data-array-detail — a debug-labeled array key holds a raw accessor (the SOURCE)
+function sb_dataarr_wperror($resp) {
+	// ruleid: wp-error-data-array-detail
+	return new WP_Error('flight_confirm_failed', 'Could not confirm', array(
+		'detail' => $resp->get_error_message(),
+	));
+}
+function sb_dataarr_sql() {
+	global $wpdb;
+	// ruleid: wp-error-data-array-detail
+	return array(
+		'ok'  => false,
+		'sql' => $wpdb->last_error,
+	);
+}
+function sb_dataarr_trace($e) {
+	// ruleid: wp-error-data-array-detail
+	return [
+		'trace' => $e->getTraceAsString(),
+	];
+}
+function sb_dataarr_ok_literal() {
+	// curated string, not a raw accessor
+	// ok: wp-error-data-array-detail
+	return array('detail' => 'Please retry in a moment.');
+}
+function sb_dataarr_ok_msgkey($e) {
+	// 'message' is not a flagged debug key (logger array)
+	// ok: wp-error-data-array-detail
+	$log = array('message' => $e->getMessage(), 'time' => 1);
+	error_log(wp_json_encode($log));
+	return true;
+}
+
+// (c) wp-error-detail-in-redirect — error detail reflected into a redirect URL (lux social callback)
+function sb_redirect_wperror($result) {
+	// ruleid: wp-error-detail-in-redirect
+	wp_safe_redirect(add_query_arg('login_error', urlencode($result->get_error_message()), home_url('/login/')));
+	exit;
+}
+function sb_redirect_exc($e) {
+	// ruleid: wp-error-detail-in-redirect
+	wp_redirect(add_query_arg('err', rawurlencode($e->getMessage()), home_url('/login/')));
+	exit;
+}
+function sb_redirect_ok($result) {
+	// generic code, no raw detail
+	// ok: wp-error-detail-in-redirect
+	wp_safe_redirect(add_query_arg('login_error', 'oauth_failed', home_url('/login/')));
+	exit;
+}
+
+// (d) wp-error-upstream-text — WP_Error wrapping upstream provider body text (oauth callback)
+function sb_upstream_oauth($body) {
+	// ruleid: wp-error-upstream-text
+	return new WP_Error('oauth_error', $body['error_description'] ?? $body['error']);
+}
+function sb_upstream_ns($body) {
+	// ruleid: wp-error-upstream-text
+	return new \WP_Error('provider_error', $body['message'] ?? 'unknown', array('status' => 502));
+}
+function sb_upstream_ok_literal() {
+	// curated literal message
+	// ok: wp-error-upstream-text
+	return new WP_Error('oauth_error', __('Sign-in failed. Please try again.', 'arhs'));
+}
+function sb_upstream_ok_var($msg) {
+	// plain local string, not an upstream-body fallback
+	// ok: wp-error-upstream-text
+	return new WP_Error('oauth_error', $msg);
+}
+
 // ---- wp-weak-crypto-signing (signing var fires; cache-key does not) ----
 function sb_crypto_bad($payload, $secret) {
 	// ruleid: wp-weak-crypto-signing

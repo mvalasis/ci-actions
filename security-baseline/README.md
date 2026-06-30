@@ -16,7 +16,7 @@ silently un-enforce every repo.
 | Tier | Behaviour | Checks |
 |---|---|---|
 | **T0 — CRITICAL** | always blocks (when `fail-on-critical`, the default) | `sast-critical` (semgrep community ERROR on the diff — *today's block, unchanged*); `secret-pattern` (gitleaks pattern on the diff — *today's block, unchanged*); `secret-verified` (trufflehog `--only-verified` on the **diff range** — NEW; a provider just authenticated it → ~zero FP) |
-| **T1 — promotable WARN** | reports; a caller ELEVATES any id to CRITICAL via `critical-checks` | `sca-critical`, `sca-high` (osv-scanner); the custom **WP/PHP** rules (`wp-nonce-missing`, `wp-cap-missing`, `wp-sql-unprepared`, `wp-unserialize`, `wp-file-include`, `wp-rest-error-detail`, `wp-weak-crypto`, `turnstile-test-key`); the custom **Astro/TS/RN** rules (`ts-dangerous-html`, `ts-eval`, `ts-child-process`, `ts-public-secret-leak`, `ts-ssrf`, `ts-open-redirect`, `ts-secret-in-log`, `rn-insecure-storage`, `rn-cleartext-http`); the **GitHub-Actions** rules (`gha-unpinned-action`, `gha-script-injection`, `gha-pr-target`); `dockerfile-lint` |
+| **T1 — promotable WARN** | reports; a caller ELEVATES any id to CRITICAL via `critical-checks` | `sca-critical`, `sca-high` (osv-scanner); the custom **WP/PHP** rules (`wp-nonce-missing`, `wp-cap-missing`, `wp-sql-unprepared`, `wp-unserialize`, `wp-file-include`, `wp-rest-error-detail`, `wp-rest-error-detail-laundered`, `wp-weak-crypto`, `turnstile-test-key`); the custom **Astro/TS/RN** rules (`ts-dangerous-html`, `ts-eval`, `ts-child-process`, `ts-public-secret-leak`, `ts-ssrf`, `ts-open-redirect`, `ts-secret-in-log`, `rn-insecure-storage`, `rn-cleartext-http`); the **GitHub-Actions** rules (`gha-unpinned-action`, `gha-script-injection`, `gha-pr-target`); `dockerfile-lint` |
 | **T2 — advisory** | reports (WARN/INFO); never promotable | `sca-moderate`/`sca-low` (INFO); `wp-unescaped-output` (syntactic XSS — too FP-heavy to promote); `wp-rest-wp-error-detail` (`WP_Error::get_error_message()` in a REST/AJAX body — usually the *intended* client message, so advisory-only); `ts-cors-wildcard`; `secrets-history` (full-history baseline — clearing needs a history rewrite, so it can **never** be a merge precondition) |
 
 The CRITICAL core is exactly what a clean repo always passes; **a failure there is always a real
@@ -124,7 +124,11 @@ carries a stable `metadata.checkId`, and is **FP-disciplined** against the real 
 The packs already surface **real findings** the old gate missed — e.g. exception detail leaked in
 hlek-headless REST 500s (`wp-rest-error-detail`), a request-derived `fetch` in lampakia's
 newsletter route (`ts-ssrf`), and the fleet's unpinned `webfactory/ssh-agent` / `wrangler-action`
-/ `pnpm/action-setup` (`gha-unpinned-action`) — all as **WARN**.
+/ `pnpm/action-setup` (`gha-unpinned-action`) — all as **WARN**. A 2026-06-30 dataflow re-audit of
+lux-main found two **laundered** CWE-209 leaks the plain accessor-grep called clean —
+`array_merge($payload, $err->get_error_data())` normalized into a REST 502 (flight-confirm), and a
+provider `error_description` reflected via `add_query_arg`/`wp_safe_redirect` on the public `/login/`
+page — now caught by **`wp-rest-error-detail-laundered`** (see §Honest limits for the four shapes).
 
 ## Honest limits
 
@@ -134,13 +138,28 @@ newsletter route (`ts-ssrf`), and the fleet's unpinned `webfactory/ssh-agent` / 
 - **WordPress.org plugin CVEs are out of scope.** osv.dev does not index WP plugin versions;
   catching those needs WPScan/Patchstack (paid + plugin-inventory egress). SCA covers
   composer/npm/pnpm/bun transitive deps only.
-- **Intraprocedural taint.** A request value laundered through a helper in another file is a
-  documented false-negative. Same class hits `wp-rest-error-detail`: a laundered local
-  (`$m = $e->getMessage(); wp_send_json_error($m);`) slips the syntactic match — the rule fires only
-  when the accessor is *inline* in the response body. The dominant inline shapes (`WP_REST_Response`,
-  `rest_ensure_response`, `wp_send_json`/`_error`/`_success`, and `wp_die()`) are covered; **not**
-  covered (deferred, not taint-limited): a bare `return new WP_Error('code', $e->getMessage())` from a
-  REST callback, and `echo` of exception HTML. Catching the laundered case needs semgrep `taint` mode.
+- **Intraprocedural taint.** A request value laundered through a helper in **another file** is a
+  documented false-negative (semgrep OSS taint is intraprocedural). The inline `wp-rest-error-detail`
+  rule fires only when the accessor is *inline* in the sink body (`WP_REST_Response`,
+  `rest_ensure_response`, `wp_send_json`/`_error`/`_success`, `wp_die()`). The **laundered** CWE-209
+  shapes — detail routed through an intermediate object/array/redirect *within a function* before the
+  sink, which the inline grep reports "clean" — are now caught by the separate
+  **`wp-rest-error-detail-laundered`** id (T1, promotable; **not** auto-promoted with
+  `wp-rest-error-detail`, so a strict caller opts in once verified): (a) a `WP_Error::get_error_data()`
+  value flowing (semgrep **taint** mode, through `array_merge`/an intermediate var) into a response;
+  (b) a debug-labeled array key (`detail`/`debug`/`trace`/`sql`/…) set to a raw accessor
+  (`$e->getMessage()`, `$wpdb->last_error`, `$wpe->get_error_message()`); (c) a `get_error_message()` /
+  exception accessor interpolated into a `wp_safe_redirect()`/`wp_redirect()`/`add_query_arg()` URL;
+  (d) `new WP_Error('code', $body['error_description'] ?? $body['error'])` wrapping unsanitized
+  upstream/provider text. Admin-gated handlers (`current_user_can` in-function) are exempt, and the
+  in-sink case is left to the inline rule (no double-report). FP discipline (proven against the
+  fleet, 2026-06-30): (b) matches only clearly-DEBUG keys — a plain `'error'`/`'message'` key is
+  **not** matched (it is the dominant idiom and usually the intended client string; ~70 of 98 raw
+  hits), and `error_log()`/`trigger_error()` builders are excluded. Residual FP: a labeled detail
+  passed to a **custom-named** logger (`my_plugin_log(['detail' => …])`) still fires — obvious on
+  review, WARN-only. Still **not** covered (genuine FNs): cross-*file* laundering, a bare
+  `return new WP_Error('code', $e->getMessage())` whose message is a plain accessor (not the
+  upstream-body fallback shape), and `echo` of exception HTML.
 - **Reserved checkIds (defined, not yet emitted by a scanner):** `secret-worktree` (a working-tree
   gitignored-`.env` scan — primarily a *local* pre-push concern; in CI the gitignored file isn't
   checked out), `license-denied`, `lockfile-integrity`, `iac-misconfig`. They are wired into the
