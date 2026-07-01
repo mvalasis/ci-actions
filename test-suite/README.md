@@ -41,6 +41,14 @@ actually has:
 Set `test-command` to override resolution entirely (e.g. `pnpm test:ci`,
 `vendor/bin/phpunit --testsuite unit`) — it runs verbatim via the shell.
 
+> **WordPress-on-hulk repos (gitignored phar) — override is mandatory.** A WP repo that commits
+> `vendor/` and does **not** run `composer install` on deploy runs PHPUnit from a **gitignored
+> `phpunit.phar`** fetched at CI time — so there is no composer `test` script and no
+> `vendor/bin/phpunit`, and PHP auto-detect resolves to **"no tests configured" (green) WITHOUT
+> running the suite** (a silent false-green). Fetch the phar in a prior step and pass
+> `test-command: 'php phpunit.phar'` to force the real run. Reference caller: `mvalasis/epn.one`
+> → `.github/workflows/test-suite.yml`.
+
 ## Use it
 
 ```yaml

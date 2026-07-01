@@ -39,7 +39,9 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`) pins `@v1`; current line is **v1.4.6** — `security-baseline` now catches the
+`linkcheck`) pins `@v1`; current line is **v1.4.7**. **v1.4.7** — docs only: `test-suite`
+gitignored-phar `test-command` override note (WP-on-hulk repos; no action-behavior change).
+**v1.4.6** — `security-baseline` now catches the
 **laundered CWE-209** error-detail shapes the inline accessor-grep MISSES (a 2026-06-30 dataflow
 re-audit of epn-billing/lux-main/hlektrologos found real public-unauth leaks reported "clean"
 because the detail is routed through an intermediate object/array/redirect before the sink). Four
