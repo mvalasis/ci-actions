@@ -1,0 +1,41 @@
+name: verify-homepage self-test
+
+# Live smoke run of the action in REPORT mode (fail-on-structure forced off, so
+# this can never block ci-actions itself). There is no offline fixture layer —
+# overflow/collapse/overlap are rendered-layout facts that need a live page; the
+# push-triggered run proves npm ci + Chromium install + the measurement engine
+# execute end-to-end. ci-actions carries no scripts/verify-nav.json, so the push
+# run also exercises the nav-file-missing skip path. Dispatch to point it at any
+# site or enable the `links` crawl (links fails loud on a genuinely broken link
+# — dispatch-only by default, so a flaky outbound can't redden pushes).
+
+on:
+  push:
+    paths: ['verify-homepage/**', '.github/workflows/verify-homepage-selftest.yml']
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'Live URLs to render (space/newline-separated)'
+        required: false
+        default: 'https://www.lampakia.gr/'
+      checks:
+        description: 'Any subset of: render,nav,links'
+        required: false
+        default: 'render,nav'
+
+permissions:
+  contents: read
+
+jobs:
+  live-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./verify-homepage
+        with:
+          urls: ${{ inputs.urls || 'https://www.lampakia.gr/' }}
+          checks: ${{ inputs.checks || 'render,nav' }}
+          fail-on-structure: 'false'
+          verify-token: ${{ secrets.VERIFY_HOMEPAGE_TOKEN }}
+          max-urls: '4'

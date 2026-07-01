@@ -39,7 +39,14 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`) pins `@v1`; current line is **v1.4.7**. **v1.4.7** — docs only: `test-suite`
+`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.5.0**.
+**v1.5.0** — NEW action **`verify-homepage`**: multi-viewport structure/render +
+nav-inventory gate (Playwright/Chromium) + the canonical copy of the per-repo
+`verify-homepage-t1.sh` link crawl (`checks: links`). Ships with a live-smoke
+selftest workflow; validated locally against lampakia (nav 6-in-order, 4 clean
+viewports, 24-link T1 green). **Purely additive** — no existing action or
+caller changes, so the `v1` move newly-blocks nobody.
+**v1.4.7** — docs only: `test-suite`
 gitignored-phar `test-command` override note (WP-on-hulk repos; no action-behavior change).
 **v1.4.6** — `security-baseline` now catches the
 **laundered CWE-209** error-detail shapes the inline accessor-grep MISSES (a 2026-06-30 dataflow
@@ -186,7 +193,27 @@ asserts the token never reaches the external host across a redirect chain
 2. Commit an empty `scripts/linkcheck-allow.txt`.
 3. (If using a WAF token) add the `VERIFY_HOMEPAGE_TOKEN` secret.
 
+## `verify-homepage` — structure + cross-viewport render gate
+
+Renders each live page in headless Chromium across a viewport matrix
+(desktop/laptop/mobile) and BLOCKS on broken layout (horizontal overflow,
+collapsed / overlapping landmarks) + a **nav-inventory assert** (the primary-nav
+items present, in declared order, against a per-repo `scripts/verify-nav.json`) —
+so a silently wrong / missing / reordered menu fails the gate. The mechanical
+half of the UI/UX discipline (`~/.claude/DISCIPLINES.md`); visual taste stays
+advisory. Also carries the **one canonical copy** of the per-repo
+`verify-homepage-t1.sh` link crawl (`checks: links`). Full inputs +
+`verify-nav.json` schema: [`verify-homepage/README.md`](verify-homepage/README.md).
+
+The browser matrix is the costly tier — wire it on the **weekly schedule +
+manual dispatch only, never per-push** (a standalone `verify-render.yml` per
+caller). Report-mode-first (`fail-on-structure: false`), then flip to BLOCK once
+clean. Wired 2026-06-29: epn-astro (ENFORCING); lampakia-astro, hlektrologos,
+prevedourougr, lux-main + lux-dev (report-only).
+
 ## Roadmap
 
-- `verify-homepage` — fold the per-repo `verify-homepage-t1.sh` copies into a
-  shared action here (same duplication, same fix).
+- ~~`verify-homepage` — fold the per-repo `verify-homepage-t1.sh` copies into a
+  shared action~~ **DONE 2026-06-29** (`verify-homepage`, `checks: links`). The
+  per-repo copies can migrate to `uses: …/verify-homepage@v1` with `checks:
+  links` incrementally; the per-deploy crawls still use the local copy for now.

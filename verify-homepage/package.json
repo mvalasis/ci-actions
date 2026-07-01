@@ -1,0 +1,10 @@
+{
+  "name": "ci-actions-verify-homepage",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Multi-viewport structure + render gate (Playwright) for the mvalasis/* site ecosystem.",
+  "type": "module",
+  "dependencies": {
+    "playwright": "1.61.1"
+  }
+}

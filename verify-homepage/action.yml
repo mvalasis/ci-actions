@@ -1,0 +1,95 @@
+name: 'Verify homepage — structure + cross-viewport render'
+description: >-
+  Renders each live page in headless Chromium across a viewport matrix
+  (desktop / laptop / mobile) and BLOCKS on broken layout: horizontal overflow,
+  collapsed (0-height) landmarks, overlapping in-flow landmarks — plus a nav
+  inventory assert (the primary-nav items present, in declared order, against a
+  tiny per-repo verify-nav.json) so a silently wrong / missing / reordered menu
+  fails the gate. Optionally also runs the curl link-crawl (the T1 tier), the
+  one canonical copy of the per-repo verify-homepage-t1.sh. Mechanical
+  structure/render = BLOCK; visual taste stays advisory (design-critic). Cost:
+  the browser matrix is meant for the WEEKLY schedule + cutover, NOT per-push.
+
+inputs:
+  urls:
+    description: 'Space/newline-separated live URLs to verify (production at cutover, never a preview host).'
+    required: true
+  nav-file:
+    description: 'Path (relative to the caller checkout) to the nav-inventory + landmarks file. Empty/missing = nav check skipped (render still runs).'
+    required: false
+    default: 'scripts/verify-nav.json'
+  viewports:
+    description: 'Comma-separated viewport matrix as [name:]WxH. Widths ≤600 emulate mobile (touch + meta-viewport).'
+    required: false
+    default: 'desktop:1920x1080,laptop:1440x900,iphone:393x852,android:384x854'
+  checks:
+    description: 'Comma list of: render (overflow/overlap/collapse), nav (inventory), links (curl T1 crawl).'
+    required: false
+    default: 'render,nav'
+  fail-on-structure:
+    description: 'true = BLOCK on any render/nav failure; false = report-only (WARN). links always fails loud on a broken link.'
+    required: false
+    default: 'true'
+  max-urls:
+    description: 'Cap the number of URLs rendered (the browser matrix is the costly part).'
+    required: false
+    default: '12'
+  verify-token:
+    description: 'Optional WAF/CF-bypass token, sent as X-Verify-Source ONLY to the target host + its www/apex variants (Cloudflare-tunnel / WAF-fronted origins).'
+    required: false
+    default: ''
+  wait-ms:
+    description: 'Settle time (ms) after load+networkidle before measuring, for responsive JS / late layout.'
+    required: false
+    default: '1200'
+  overflow-tolerance:
+    description: 'Horizontal-overflow slack in px (scrollWidth − clientWidth) before failing.'
+    required: false
+    default: '2'
+  overlap-tolerance:
+    description: 'Landmark-overlap slack in px (both axes) before failing.'
+    required: false
+    default: '4'
+
+runs:
+  using: composite
+  steps:
+    - name: Install Playwright + Chromium
+      if: ${{ contains(inputs.checks, 'render') || contains(inputs.checks, 'nav') }}
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      # playwright is the only dependency, pinned + lockfile'd; --ignore-scripts
+      # blocks dependency lifecycle scripts (matches seo-aeo's hardening). The
+      # chromium engine + its OS libs come from the EXPLICIT install step below,
+      # not a postinstall, so --ignore-scripts is safe here.
+      run: |
+        npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+        npx playwright install --with-deps chromium
+
+    - name: Structure + cross-viewport render (+ nav inventory)
+      if: ${{ contains(inputs.checks, 'render') || contains(inputs.checks, 'nav') }}
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        URLS: ${{ inputs.urls }}
+        NAV_FILE: ${{ inputs.nav-file != '' && format('{0}/{1}', github.workspace, inputs.nav-file) || '' }}
+        VIEWPORTS: ${{ inputs.viewports }}
+        CHECKS: ${{ inputs.checks }}
+        FAIL_ON_STRUCTURE: ${{ inputs.fail-on-structure }}
+        MAX_URLS: ${{ inputs.max-urls }}
+        VERIFY_TOKEN: ${{ inputs.verify-token }}
+        WAIT_MS: ${{ inputs.wait-ms }}
+        OVERFLOW_TOL: ${{ inputs.overflow-tolerance }}
+        OVERLAP_TOL: ${{ inputs.overlap-tolerance }}
+      run: node scripts/render-check.mjs
+
+    - name: Link crawl (T1)
+      if: ${{ contains(inputs.checks, 'links') }}
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        URLS: ${{ inputs.urls }}
+        VERIFY_HOMEPAGE_TOKEN: ${{ inputs.verify-token }}
+      # Word-split URLS into args (passed via env, not interpolated into the
+      # command, so a caller's URL list can't inject shell).
+      run: bash "${{ github.action_path }}/scripts/link-crawl.sh" $URLS
