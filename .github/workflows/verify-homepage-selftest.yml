@@ -11,6 +11,7 @@ name: verify-homepage self-test
 
 on:
   push:
+    branches: [main]
     paths: ['verify-homepage/**', '.github/workflows/verify-homepage-selftest.yml']
   workflow_dispatch:
     inputs:

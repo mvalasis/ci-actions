@@ -9,6 +9,7 @@ name: test-suite self-test
 
 on:
   push:
+    branches: [main]
     paths: ['test-suite/**', '.github/workflows/test-suite-selftest.yml']
   workflow_dispatch: {}
 

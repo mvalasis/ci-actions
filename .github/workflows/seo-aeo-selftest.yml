@@ -6,6 +6,7 @@ name: seo-aeo self-test
 
 on:
   push:
+    branches: [main]
     paths: ['seo-aeo/**', '.github/workflows/seo-aeo-selftest.yml']
   workflow_dispatch:
     inputs:

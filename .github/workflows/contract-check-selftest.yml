@@ -6,6 +6,7 @@ name: contract-check self-test
 
 on:
   push:
+    branches: [main]
     paths: ['contract-check/**', '.github/workflows/contract-check-selftest.yml']
   workflow_dispatch:
     inputs:
