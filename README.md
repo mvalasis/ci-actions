@@ -39,7 +39,20 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.5.0**.
+`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.6.0**.
+**v1.6.0** — NEW action **`form-protection`**: bot-gate enforced-END-TO-END gate
+(the DISCIPLINES.md §Security "no-op class" — a test/placeholder sitekey shipped to
+prod, or a server that skip-verifies the token; both shipped silently on EPN 2026-06).
+Per wired form page: CRITICAL `sitekey-real` (missing/empty/known-test `data-sitekey`;
+built-in Turnstile `1x/2x/3x` + `0x000…0`, reCAPTCHA `6LeIxAcT…`, hCaptcha test keys;
+client-rendered widgets classified via the inline-script sitekey literal) + CRITICAL
+`server-rejects` (tokenless + junk-token POST must hard-reject; `form-endpoints`
+map takes `mode=json token=<field> expect=<reject-signature>` so a field-validation
+4xx can't mask a skip-verifying JSON endpoint — probes send a minimal body, read-safe
+by design). Offline selftest incl. a local-http-server e2e of the real CLI + exit
+codes. **Purely additive** — no existing action or caller changes, so the `v1` move
+newly-blocks nobody. First callers (report-mode): epn-astro contact+employers,
+lampakia-astro checkout.
 **v1.5.0** — NEW action **`verify-homepage`**: multi-viewport structure/render +
 nav-inventory gate (Playwright/Chromium) + the canonical copy of the per-repo
 `verify-homepage-t1.sh` link crawl (`checks: links`). Ships with a live-smoke

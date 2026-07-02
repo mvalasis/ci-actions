@@ -1,0 +1,86 @@
+name: 'Form bot-protection E2E checks'
+description: >-
+  Asserts a public form's bot protection is enforced END-TO-END on the live
+  site, not just decorated client-side — the gate that catches the no-op class
+  (a test/placeholder sitekey shipped to production, or a server that
+  skip-verifies the token). Two CRITICAL checks per bot-widget form
+  (.cf-turnstile / .g-recaptcha / .h-captcha / [data-sitekey]):
+  sitekey-real (missing/empty/known-test key = FAIL) and server-rejects
+  (a tokenless POST and a junk-token POST to the resolved submit endpoint must
+  hard-reject — a 2xx accept means the server never verifies). Probes send a
+  minimal body (no real-looking fields) so they are read-safe even against a
+  broken endpoint. Air-gapped: only fetches the target.
+
+inputs:
+  urls:
+    description: 'Space/newline-separated URLs to check (this OR sitemap-url). List the form pages explicitly — this gate is per-surface, not a crawler.'
+    required: false
+    default: ''
+  sitemap-url:
+    description: 'Sitemap (or sitemap index) to expand into the URL list.'
+    required: false
+    default: ''
+  fail-on-critical:
+    description: 'true = BLOCK when a CRITICAL check fails (test/missing sitekey, or an endpoint that accepts an unverified POST); false = report-only.'
+    required: false
+    default: 'false'
+  max-urls:
+    description: 'Cap the number of URLs checked (sampled from the front of the list/sitemap).'
+    required: false
+    default: '15'
+  verify-token:
+    description: 'Optional WAF/CF-bypass token, sent as the X-Verify-Source header to the checked host (Cloudflare-tunnel / WAF-fronted origins).'
+    required: false
+    default: ''
+  submit-probe:
+    description: >-
+      true (default) = also fire the server-rejects check (tokenless + junk-token
+      POST per resolved endpoint). Set false ONLY where a live POST would mutate
+      state with no test/sink mode — a correctly-gated endpoint rejects before
+      any side-effect, and the probe body is minimal on purpose.
+    required: false
+    default: 'true'
+  form-endpoints:
+    description: >-
+      Optional selector→endpoint map for JS-driven forms whose submit URL is not
+      in the <form action> (Astro Pages-Function routes, admin-ajax.php, …).
+      One entry per line: "selector => endpoint [mode=json] [token=<field>]
+      [expect=<substring>]". selector matches the form element or anything
+      inside it; endpoint is resolved against the page URL; mode=json posts a
+      JSON body (default urlencoded); token names the token field for the
+      junk-token probe; expect is the bot-gate's reject signature (e.g.
+      turnstile_failed) — when set, a reject WITHOUT it is judged CRITICAL
+      (the reject came from field validation, not the bot gate). Without a map
+      entry the probe falls back to the form's action attribute.
+    required: false
+    default: ''
+  test-sitekeys:
+    description: >-
+      Extra sitekey values to treat as test keys, comma/space-separated; a
+      trailing * makes an entry a prefix match. Defaults already cover the
+      Turnstile 1x/2x/3x force-keys + the 0x000…0 placeholder, the reCAPTCHA
+      6LeIxAcT… universal test pair, and the hCaptcha 10000000-ffff-… test keys.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install deps (cheerio)
+      shell: bash
+      # Air-gapped: cheerio is the only dependency (a real HTML parser); npm registry
+      # only. Lockfile-pinned, no scripts, no audit/fund pings.
+      working-directory: ${{ github.action_path }}
+      run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+    - name: Form-protection check
+      shell: bash
+      env:
+        URLS: ${{ inputs.urls }}
+        SITEMAP_URL: ${{ inputs.sitemap-url }}
+        FAIL_ON_CRITICAL: ${{ inputs.fail-on-critical }}
+        MAX_URLS: ${{ inputs.max-urls }}
+        VERIFY_TOKEN: ${{ inputs.verify-token }}
+        SUBMIT_PROBE: ${{ inputs.submit-probe }}
+        FORM_ENDPOINTS: ${{ inputs.form-endpoints }}
+        TEST_SITEKEYS: ${{ inputs.test-sitekeys }}
+      run: node "${{ github.action_path }}/scripts/check.mjs"

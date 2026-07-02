@@ -1,0 +1,11 @@
+{
+  "name": "ci-actions-form-protection",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Form bot-protection E2E gate — asserts the live sitekey is real and the submit endpoint actually verifies tokens.",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "cheerio": "1.0.0"
+  }
+}
