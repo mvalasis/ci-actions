@@ -62,6 +62,10 @@ export function classifySitekey(raw, extra = []) {
 //              "the bot gate rejected" from "field validation rejected while
 //              the bot gate silently skip-verified" — set it wherever you know
 //              the signature.
+//   fields   — extra static control fields for the probe body, k:v pairs
+//              comma-separated (fields=formType:contact) — for routing fields
+//              a handler checks BEFORE the bot gate. Form-mode probes also
+//              auto-include the form's hidden inputs for the same reason.
 export function parseEndpointMap(raw) {
   const entries = [];
   for (const line of String(raw || '').split(/\n+/)) {
@@ -77,11 +81,17 @@ export function parseEndpointMap(raw) {
     if (!selector || !endpoint) { entries.push({ error: t }); continue; }
     const opts = {};
     for (const p of parts) { const j = p.indexOf('='); if (j > 0) opts[p.slice(0, j)] = p.slice(j + 1); }
+    const fields = {};
+    for (const pair of (opts.fields || '').split(',')) {
+      const k = pair.indexOf(':');
+      if (k > 0) fields[pair.slice(0, k).trim()] = pair.slice(k + 1).trim();
+    }
     entries.push({
       selector, endpoint,
       mode: opts.mode === 'json' ? 'json' : 'form',
       token: opts.token || '',
       expect: opts.expect || '',
+      fields,
     });
   }
   return entries;
@@ -191,11 +201,22 @@ export function analyzeForms({ requestUrl, html, endpointMap = [], extraTestKeys
       findings.push(f('endpoint-unknown', SEV.WARN, `${where} — no <form action> and no form-endpoints entry matches; server-rejects probe skipped (add a form-endpoints mapping)`));
       return;
     }
+    // Static control fields (routing discriminators like formType) that a
+    // handler may check BEFORE its bot gate — without them a minimal probe
+    // bounces off the router and never reaches the verification layer. Hidden
+    // inputs carry no user data, so read-safety is unchanged.
+    const hiddenFields = {};
+    const tokenNames = new Set(Object.values(TOKEN_FIELD));
+    $form.find('input[type=hidden][name]').each((_, inp) => {
+      const n = $(inp).attr('name');
+      if (n && !tokenNames.has(n)) hiddenFields[n] = $(inp).attr('value') ?? '';
+    });
     surfaces.push({
       form: describeForm($, formEl), page: requestUrl, endpoint,
       mode: entry?.mode || 'form',
       tokenField: entry?.token || (widgetType && TOKEN_FIELD[widgetType]) || '',
       expect: entry?.expect || '',
+      fields: { ...hiddenFields, ...(entry?.fields || {}) },
       widgetType: widgetType || 'client-rendered',
       mapped: !!entry,
     });
@@ -215,7 +236,8 @@ export function analyzeForms({ requestUrl, html, endpointMap = [], extraTestKeys
     surfaces.push({
       form: entry.selector, page: requestUrl, endpoint,
       mode: entry.mode, tokenField: entry.token || (entry.mode === 'json' ? 'turnstileToken' : ''),
-      expect: entry.expect, widgetType: 'client-rendered', mapped: true,
+      expect: entry.expect, fields: entry.fields || {},
+      widgetType: 'client-rendered', mapped: true,
     });
   }
 
@@ -238,18 +260,22 @@ export function defaultTokenField(surface) {
   return surface.mode === 'json' ? 'turnstileToken' : TOKEN_FIELD.turnstile;
 }
 
-// Build the POST body for a probe. Tokenless = minimal valid body with NO
-// token field; junk-token = same + a syntactically-invalid token. We never
-// fill in real-looking form fields: a correctly-gated endpoint rejects before
-// validation, and on a broken endpoint an empty payload can't create a record
-// — that's what keeps the probe read-safe even against the failure it hunts.
+// Build the POST body for a probe. Tokenless = minimal body with NO token
+// field; junk-token = same + a syntactically-invalid token. Static control
+// fields (the form's hidden inputs + the map's fields=) ARE included — a
+// router that checks them before the bot gate would otherwise bounce the
+// probe. We never fill in real-looking USER fields: a correctly-gated
+// endpoint rejects before validation, and on a broken endpoint the empty
+// user-field payload still fails the handler's own validation, so the probe
+// can't create a record — that keeps it read-safe against the failure it hunts.
 export function buildProbeBody(surface, kind) {
   const tokenField = defaultTokenField(surface);
+  const fields = surface.fields || {};
   if (surface.mode === 'json') {
-    const body = kind === 'junk-token' ? { [tokenField]: JUNK_TOKEN } : {};
+    const body = kind === 'junk-token' ? { ...fields, [tokenField]: JUNK_TOKEN } : { ...fields };
     return { body: JSON.stringify(body), contentType: 'application/json' };
   }
-  const params = new URLSearchParams();
+  const params = new URLSearchParams(Object.entries(fields));
   if (kind === 'junk-token') {
     if (surface.tokenField || surface.widgetType in TOKEN_FIELD) params.set(tokenField, JUNK_TOKEN);
     else Object.values(TOKEN_FIELD).forEach((tf) => params.set(tf, JUNK_TOKEN)); // widget type unknown — cover all three

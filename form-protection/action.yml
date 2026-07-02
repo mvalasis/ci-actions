@@ -45,13 +45,15 @@ inputs:
       Optional selector→endpoint map for JS-driven forms whose submit URL is not
       in the <form action> (Astro Pages-Function routes, admin-ajax.php, …).
       One entry per line: "selector => endpoint [mode=json] [token=<field>]
-      [expect=<substring>]". selector matches the form element or anything
-      inside it; endpoint is resolved against the page URL; mode=json posts a
-      JSON body (default urlencoded); token names the token field for the
-      junk-token probe; expect is the bot-gate's reject signature (e.g.
-      turnstile_failed) — when set, a reject WITHOUT it is judged CRITICAL
-      (the reject came from field validation, not the bot gate). Without a map
-      entry the probe falls back to the form's action attribute.
+      [expect=<substring>] [fields=k:v,k2:v2]". selector matches the form
+      element or anything inside it; endpoint is resolved against the page URL;
+      mode=json posts a JSON body (default urlencoded); token names the token
+      field for the junk-token probe; expect is the bot-gate's reject signature
+      (e.g. turnstile_failed) — when set, a reject WITHOUT it is judged CRITICAL
+      (the reject came from field validation, not the bot gate); fields adds
+      static routing fields a handler checks BEFORE the bot gate (form-mode
+      probes also auto-include the form's hidden inputs). Without a map entry
+      the probe falls back to the form's action attribute.
     required: false
     default: ''
   test-sitekeys:

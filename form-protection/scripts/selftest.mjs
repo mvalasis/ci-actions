@@ -45,11 +45,19 @@ console.log('\n# form-endpoints map parsing');
 
 console.log('\n# page analyzer — the epn shape (static data-sitekey + action attr)');
 {
-  const html = `<form data-epn-form="contact" method="post" action="/api/contact"><div class="cf-turnstile" data-sitekey="${REAL_KEY}"></div></form>`;
+  const html = `<form data-epn-form="contact" method="post" action="/api/contact"><input type="hidden" name="formType" value="contact"><div class="cf-turnstile" data-sitekey="${REAL_KEY}"></div></form>`;
   const { findings, surfaces } = A(html);
   check('real key → no sitekey-real finding', !ids(findings).includes('sitekey-real'), JSON.stringify(findings));
   check('endpoint resolved from action attr against page URL', surfaces.length === 1 && surfaces[0].endpoint === 'https://example.com/api/contact');
   check('turnstile token field inferred', surfaces[0].tokenField === 'cf-turnstile-response' && surfaces[0].mode === 'form');
+  check('hidden control field picked up (routing before the bot gate)', surfaces[0].fields.formType === 'contact');
+}
+{
+  // map fields= override + hidden pickup merge; token-named hidden inputs excluded
+  const html = `<form id="f" action="/api/x"><input type="hidden" name="formType" value="contact"><input type="hidden" name="cf-turnstile-response" value="stale"><div class="cf-turnstile" data-sitekey="${REAL_KEY}"></div></form>`;
+  const map = parseEndpointMap('#f => /api/x fields=formType:employer,ref:ci');
+  const { surfaces } = A(html, { map });
+  check('fields= map opt overrides hidden value + adds extras; token-named hidden excluded', surfaces[0].fields.formType === 'employer' && surfaces[0].fields.ref === 'ci' && !('cf-turnstile-response' in surfaces[0].fields));
 }
 {
   const { findings } = A(`<form action="/api/contact"><div class="cf-turnstile" data-sitekey="1x00000000000000000000AA"></div></form>`);
@@ -140,12 +148,25 @@ const PAGES = {
   '/page-testkey.html': `<html><body><form action="/api/reject"><div class="cf-turnstile" data-sitekey="1x00000000000000000000AA"></div></form></body></html>`,
   '/page-skipverify.html': `<html><body><form action="/api/accept"><div class="cf-turnstile" data-sitekey="${REAL_KEY}"></div></form></body></html>`,
   '/page-jsdriven.html': `<html><body><form id="checkout-form"><div id="turnstile-checkout"></div></form><script>const turnstileSiteKey = "${REAL_KEY}";</script></body></html>`,
+  // the epn shape: a hidden routing field the handler checks BEFORE the bot gate
+  '/page-routed.html': `<html><body><form data-epn-form="contact" method="post" action="/api/routed-reject"><input type="hidden" name="formType" value="contact"><div class="cf-turnstile" data-sitekey="${REAL_KEY}"></div></form></body></html>`,
 };
 const server = createServer((req, res) => {
   if (req.method === 'GET' && PAGES[req.url]) { res.writeHead(200, { 'content-type': 'text/html' }); res.end(PAGES[req.url]); return; }
   if (req.method === 'POST' && req.url === '/api/reject') { res.writeHead(403, { 'content-type': 'application/json' }); res.end('{"ok":false,"error":"turnstile_failed"}'); return; }
   if (req.method === 'POST' && req.url === '/api/accept') { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); return; }
   if (req.method === 'POST' && req.url === '/api/wrong-layer') { res.writeHead(400, { 'content-type': 'application/json' }); res.end('{"error":"missing_fields"}'); return; }
+  if (req.method === 'POST' && req.url === '/api/routed-reject') {
+    // router first (400 unknown_form_type), bot gate second (403 turnstile_failed)
+    let body = '';
+    req.on('data', (d) => { body += d; });
+    req.on('end', () => {
+      const hasFormType = new URLSearchParams(body).get('formType');
+      if (!hasFormType) { res.writeHead(400, { 'content-type': 'application/json' }); res.end('{"ok":false,"error":"unknown_form_type"}'); }
+      else { res.writeHead(403, { 'content-type': 'application/json' }); res.end('{"ok":false,"error":"turnstile_failed"}'); }
+    });
+    return;
+  }
   res.writeHead(404); res.end('not found');
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -207,6 +228,16 @@ function runCli(extraEnv) {
     FORM_ENDPOINTS: '#checkout-form => /api/reject mode=json token=turnstileToken expect=turnstile_failed',
   });
   check('e2e mapped+expect green: exit 0', r.code === 0, `${r.stderr} ${r.summary}`);
+}
+// routed endpoint (formType checked before the bot gate): hidden-field pickup
+// must carry the probe PAST the router so the reject bears the gate signature
+{
+  const r = await runCli({
+    URLS: `${BASE}/page-routed.html`, FAIL_ON_CRITICAL: 'true',
+    FORM_ENDPOINTS: '[data-epn-form="contact"] => /api/routed-reject expect=turnstile_failed',
+  });
+  check('e2e routed: hidden formType reaches the bot gate → exit 0', r.code === 0, `${r.stderr} ${r.summary}`);
+  check('e2e routed: gate signature present in reject', r.summary.includes('hard reject') && r.summary.includes('signature "turnstile_failed" present'), r.summary);
 }
 // submit-probe off → sitekey checks only, skip-verify endpoint NOT probed
 {

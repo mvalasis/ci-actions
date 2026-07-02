@@ -168,7 +168,9 @@ async function expandSitemap(sm) {
     note('### Submit probes (tokenless + junk-token POST must hard-reject)');
     const byEndpoint = new Map();
     for (const s of surfaces) {
-      const key = `${s.endpoint} ${s.mode} ${s.tokenField} ${s.expect}`;
+      // fields is part of the key: two forms can share an endpoint but carry
+      // different routing discriminators (epn contact vs employer formType).
+      const key = `${s.endpoint} ${s.mode} ${s.tokenField} ${s.expect} ${JSON.stringify(s.fields || {})}`;
       if (!byEndpoint.has(key)) byEndpoint.set(key, { ...s, forms: [] });
       byEndpoint.get(key).forms.push(`${s.form} @ ${s.page}`);
     }

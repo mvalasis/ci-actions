@@ -41,7 +41,7 @@ Mirrors `seo-aeo`: `urls` / `sitemap-url`, `fail-on-critical` (default
   `<form action>`. One entry per line:
 
   ```
-  <css-selector> => <endpoint> [mode=json] [token=<field>] [expect=<substring>]
+  <css-selector> => <endpoint> [mode=json] [token=<field>] [expect=<substring>] [fields=k:v,k2:v2]
   ```
 
   The selector matches the form element **or anything inside it** (a widget
@@ -49,7 +49,12 @@ Mirrors `seo-aeo`: `urls` / `sitemap-url`, `fail-on-critical` (default
   `token` names the token field for the junk-token probe (defaults:
   `cf-turnstile-response`/`g-recaptcha-response`/`h-captcha-response` by widget
   type in form mode, `turnstileToken` in json mode). `expect` is the bot-gate's
-  reject-body signature. Lines starting with `#` that carry no `=>` are comments.
+  reject-body signature. `fields` adds static routing fields for handlers that
+  check a discriminator (e.g. `formType`) BEFORE the bot gate — form-mode
+  probes also auto-include the form's **hidden inputs** for the same reason
+  (hidden inputs carry no user data, so read-safety is unchanged: the empty
+  user fields still fail the handler's own validation on a broken server).
+  Lines starting with `#` that carry no `=>` are comments.
 - **`test-sitekeys`** — extra values to treat as test keys; trailing `*` = prefix.
 
 ## Wired callers
