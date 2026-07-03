@@ -49,7 +49,15 @@ console.log('\n# stack detection');
 console.log('\n# package-manager detection (node)');
 {
   check('packageManager field wins (pnpm)', detectNodePM('/x', { packageManager: 'pnpm@9.0.0' }) === 'pnpm');
+  check('packageManager field wins (bun)', detectNodePM('/x', { packageManager: 'bun@1.2.19' }) === 'bun');
   check('yarn.lock → yarn (no field)', detectNodePM(FIX, {}) === 'npm'); // FIX has no lockfile → npm floor
+  const bunDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-bun-'));
+  fs.writeFileSync(path.join(bunDir, 'bun.lockb'), '');
+  check('bun.lockb → bun (no field)', detectNodePM(bunDir, {}) === 'bun');
+  fs.unlinkSync(path.join(bunDir, 'bun.lockb'));
+  fs.writeFileSync(path.join(bunDir, 'bun.lock'), '{}');
+  check('bun.lock (text lockfile) → bun (no field)', detectNodePM(bunDir, {}) === 'bun');
+  fs.rmSync(bunDir, { recursive: true, force: true });
   check('default PM is npm', detectNodePM('/no/such/dir', {}) === 'npm');
 }
 
@@ -66,6 +74,8 @@ console.log('\n# node command resolution');
 {
   const c1 = resolveNodeCommand('/x', { scripts: { test: 'vitest run' }, packageManager: 'pnpm@9' }, 'pnpm');
   check('package-script via the repo PM (pnpm run test)', !!c1 && c1.argv.join(' ') === 'pnpm run test' && c1.runner === 'package-script', JSON.stringify(c1));
+  const c1b = resolveNodeCommand('/x', { scripts: { test: 'vitest run' }, packageManager: 'bun@1.2.19' }, 'bun');
+  check('package-script via the repo PM (bun run test)', !!c1b && c1b.argv.join(' ') === 'bun run test' && c1b.runner === 'package-script', JSON.stringify(c1b));
   const c2 = resolveNodeCommand('/x', { devDependencies: { vitest: '^1' } }, 'npm');
   check('vitest dep (no script) → npx vitest run', !!c2 && c2.argv.join(' ') === 'npx --no-install vitest run' && c2.runner === 'vitest', JSON.stringify(c2));
   const c3 = resolveNodeCommand('/x', { scripts: { test: 'echo "Error: no test specified" && exit 1' } }, 'npm');

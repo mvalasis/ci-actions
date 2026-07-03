@@ -33,8 +33,11 @@ treated as "no tests configured" (green), so it can't masquerade as a red gate.
 actually has:
 
 - **Node** — a real `package.json` `"test"` script via the repo's package manager (`pnpm` /
-  `yarn` / `npm`, chosen from `packageManager` field or lockfile; degrades to `npm` if the chosen
-  PM isn't on PATH); else `npx vitest run` when `vitest` is a (dev)dependency; else **no tests**.
+  `yarn` / `bun` / `npm`, chosen from the `packageManager` field or lockfile — `pnpm-lock.yaml`,
+  `yarn.lock`, `bun.lock`/`bun.lockb`; degrades to `npm run test` with a visible ℹ️ note if the
+  chosen PM isn't on PATH, so a bun repo needs bun installed in a prior step — e.g.
+  `oven-sh/setup-bun@v2` — to actually run under bun); else `npx vitest run` when `vitest` is a
+  (dev)dependency; else **no tests**.
 - **PHP** — a `composer.json` `"test"` script → `composer test`; else `vendor/bin/pest`; else
   `vendor/bin/phpunit`; else **no tests**.
 
@@ -67,7 +70,7 @@ jobs:
       # install deps in a prior step (the action runs the tests, it does not install them):
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
-      - run: npm ci                     # or: pnpm i --frozen-lockfile / composer install
+      - run: npm ci                     # or: pnpm i --frozen-lockfile / bun install --frozen-lockfile / composer install
       - uses: mvalasis/ci-actions/test-suite@v1
         with:
           # working-directory: apps/web   # monorepo sub-package

@@ -33,9 +33,10 @@ export function detectStack(dir, requested = 'auto') {
 // pick a PM that's plausibly present; the CLI degrades to npm if the chosen one isn't on PATH.
 export function detectNodePM(dir, pkg) {
   const field = pkg && typeof pkg.packageManager === 'string' ? pkg.packageManager.split('@')[0].trim() : '';
-  if (field === 'pnpm' || field === 'yarn' || field === 'npm') return field;
+  if (field === 'pnpm' || field === 'yarn' || field === 'npm' || field === 'bun') return field;
   if (exists(path.join(dir, 'pnpm-lock.yaml'))) return 'pnpm';
   if (exists(path.join(dir, 'yarn.lock'))) return 'yarn';
+  if (exists(path.join(dir, 'bun.lock')) || exists(path.join(dir, 'bun.lockb'))) return 'bun';
   return 'npm';
 }
 
@@ -59,7 +60,7 @@ const hasDep = (pkg, name) =>
 // renders "no tests configured" and PASSES green).
 export function resolveNodeCommand(dir, pkg, pm) {
   if (hasRealTestScript(pkg)) {
-    const runner = { pnpm: ['pnpm', 'run', 'test'], yarn: ['yarn', 'run', 'test'], npm: ['npm', 'run', 'test'] }[pm] || ['npm', 'run', 'test'];
+    const runner = { pnpm: ['pnpm', 'run', 'test'], yarn: ['yarn', 'run', 'test'], bun: ['bun', 'run', 'test'], npm: ['npm', 'run', 'test'] }[pm] || ['npm', 'run', 'test'];
     return { argv: runner, label: `${pm} run test`, runner: 'package-script' };
   }
   if (hasDep(pkg, 'vitest')) return { argv: ['npx', '--no-install', 'vitest', 'run'], label: 'npx vitest run', runner: 'vitest' };
