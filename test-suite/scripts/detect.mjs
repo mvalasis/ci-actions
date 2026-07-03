@@ -120,6 +120,21 @@ export function parseCounts(output, runner = '') {
   const ok = text.match(/OK\s*\((\d+)\s+tests?/i);
   if (ok) { const n = parseInt(ok[1], 10); return { passed: n, failed: 0, skipped: null, total: n }; }
 
+  // --- bun native test runner (`bun test`): bare " N pass" / " N fail" / " N skip" / " N todo"
+  // summary lines plus "Ran N tests across M files." — none carry the "N passed/N failed" tokens
+  // the vitest/jest/pest block below keys on. Whole-line anchors keep "pass" from ever matching
+  // inside vitest's "N passed", and skip the " N expect() calls" line by construction.
+  const bunPass = num1(text, /^\s*(\d+)\s+pass\s*$/m);
+  const bunFail = num1(text, /^\s*(\d+)\s+fail\s*$/m);
+  if (bunPass != null || bunFail != null) {
+    const bunSkip = num1(text, /^\s*(\d+)\s+skip\s*$/m);
+    const bunTodo = num1(text, /^\s*(\d+)\s+todo\s*$/m);
+    const bunSkipped = bunSkip == null && bunTodo == null ? null : (bunSkip || 0) + (bunTodo || 0);
+    const bunTotal = num1(text, /^Ran\s+(\d+)\s+tests?\s+across\s+\d+\s+files?/im)
+      ?? (bunPass || 0) + (bunFail || 0) + (bunSkipped || 0);
+    return { passed: bunPass, failed: bunFail, skipped: bunSkipped, total: bunTotal };
+  }
+
   // --- vitest / jest / pest: parse the CANONICAL summary line only. ---
   // vitest:  "      Tests  1 failed | 1 passed (2)"   (NB: a sibling "Test Files …" line carries
   //           the same N-passed/(N) tokens, so matching the whole text would pick the wrong line.)

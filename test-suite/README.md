@@ -95,8 +95,9 @@ The action **runs** the suite — it does **not** install dependencies or the ru
 ## Offline self-test
 
 `scripts/selftest.mjs` is a network-free regression guard with two layers: the **pure core**
-(`detect.mjs` — detection, resolution, runner-aware count parsing for vitest/jest/pest/phpunit,
-exit-code-authoritative verdict, the "no tests = green" floor) **and end-to-end** runs of
+(`detect.mjs` — detection, resolution, runner-aware count parsing for vitest/jest/pest/phpunit
+plus bun's native runner (`bun test` — bare ` N pass`/` N fail`/` N skip` lines + `Ran N tests
+across M files`), exit-code-authoritative verdict, the "no tests = green" floor) **and end-to-end** runs of
 `run.mjs` over committed node fixtures whose `test` script is a self-contained Node stub emitting
 real vitest-shaped output — so it proves the action **detects RED** (1 pass + 1 fail → reported,
 and blocks under `fail-on-fail`), **reports GREEN**, and **passes green on a no-tests repo**. No

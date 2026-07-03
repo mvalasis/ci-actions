@@ -119,6 +119,12 @@ console.log('\n# count parsing (runner-aware, exit-code-authoritative)');
   check('phpunit OK line parsed', puok.total === 12 && puok.failed === 0 && puok.passed === 12, JSON.stringify(puok));
   const pest = parseCounts('  Tests:  1 failed, 9 passed (40 assertions)', 'pest');
   check('pest line parsed', pest.failed === 1 && pest.passed === 9, JSON.stringify(pest));
+  const b = parseCounts('bun test v1.2.19 (aad3abea)\n\n 5 pass\n 2 skip\n 1 fail\n 8 expect() calls\nRan 8 tests across 3 files. [50.00ms]', 'package-script');
+  check('bun native pass/fail/skip lines parsed', b.passed === 5 && b.failed === 1 && b.skipped === 2 && b.total === 8, JSON.stringify(b));
+  const bg = parseCounts(' 3 pass\n 0 fail\n 6 expect() calls\nRan 3 tests across 1 files. [12.00ms]', 'package-script');
+  check('bun native all-pass parsed (fail=0, not null)', bg.passed === 3 && bg.failed === 0 && bg.skipped === null && bg.total === 3, JSON.stringify(bg));
+  const bt = parseCounts(' 4 pass\n 1 todo\n 0 fail\nRan 5 tests across 2 files. [9.00ms]', 'package-script');
+  check('bun native todo counted as skipped', bt.passed === 4 && bt.skipped === 1 && bt.total === 5, JSON.stringify(bt));
   const junk = parseCounts('some compiler error before any test ran', 'vitest');
   check('unparsable output → null counts (no fabricated verdict)', junk.passed === null && junk.failed === null);
 }
