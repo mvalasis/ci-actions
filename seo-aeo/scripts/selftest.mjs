@@ -106,6 +106,10 @@ console.log('\n# robots.txt analyzer');
   check('robots with Sitemap: directive → no robots-sitemap-directive warn', !ids(r.findings).includes('robots-sitemap-directive'));
 }
 {
+  const r = analyzeRobots({ status: 200, body: 'User-agent: *\nAllow: /\n' });
+  check('robots 200 WITHOUT Sitemap: directive → WARN robots-sitemap-directive (T1 promotable)', sevOf(r.findings, 'robots-sitemap-directive').includes(SEV.WARN));
+}
+{
   const r = analyzeRobots({ status: 404, body: '' });
   check('robots 404 → INFO robots-txt (valid per RFC, not the promotable WARN)', sevOf(r.findings, 'robots-txt').includes(SEV.INFO) && !sevOf(r.findings, 'robots-txt').includes(SEV.WARN));
 }

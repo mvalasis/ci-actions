@@ -37,7 +37,7 @@ inputs:
       (default) = the CRITICAL core only, so a caller is never newly-blocked by an upgrade.
       Promotable IDs: noindex, single-h1, canonical-present, canonical-valid,
       meta-description, html-lang, viewport, jsonld-valid, og-core, robots-txt, sitemap,
-      redirect-consistency.
+      robots-sitemap-directive, redirect-consistency.
     required: false
     default: ''
 

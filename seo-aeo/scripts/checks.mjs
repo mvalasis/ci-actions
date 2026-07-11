@@ -19,7 +19,7 @@ export const T0_CHECKS = new Set(['http-200', 'title-present', 'h1-present']);
 export const T1_CHECKS = new Set([
   'noindex', 'single-h1', 'canonical-present', 'canonical-valid', 'meta-description',
   'html-lang', 'viewport', 'jsonld-valid', 'og-core', 'robots-txt', 'sitemap',
-  'redirect-consistency',
+  'robots-sitemap-directive', 'redirect-consistency',
 ]);
 // Everything else is T2 (advisory; ignored if a caller tries to promote it).
 
