@@ -39,7 +39,28 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.7.0**.
+`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.7.1**.
+**v1.7.1** — `verify-homepage` **report-output plumbing**, surfaced by the sibling
+audit after v1.7.0 (2026-07-29). (1) When the step-summary write threw, the `catch`
+printed the whole report *and* the unconditional line below printed it again — a
+doubled report in the job log on exactly the run you are trying to read; the catch
+is now a no-op, since the unconditional mirror already covers it. (2) Every terminal
+path was a `console.log`/`console.error` immediately followed by `process.exit()`:
+`process.stdout`/`stderr` writes are **async on macOS pipes** (synchronous on
+Linux/Windows) and `process.exit()` does not drain a pending write, so a piped local
+run truncated at the 65,536-byte pipe buffer. Reachable, not theoretical, and worst
+exactly where it hurts: a 12-URL run against a badly-wrong nav puts every mismatch
+on one line, and that 78,083-byte report arrived on a Mac pipe as 65,536 bytes —
+the lost tail included the `---` verdict. Both paths (the report, and the `no URLs
+provided` diagnostic that is the *only* output of the `exit 2` path) now go through
+the same `fs.writeSync` helper `test-suite` adopted in v1.7.0. CI is Linux, so this
+was latent rather than live — the point is that the two actions no longer disagree
+about how a verdict reaches the log. **No gutter prefix here, deliberately:** every
+`verify-homepage` line starts with code-controlled markdown (`### `, `- **`, `| `)
+and page-derived strings are `safe()`-stripped and embedded mid-line, so a hostile
+page title cannot reach line-start to forge a workflow command — re-verify that
+property if you ever change how a `note()` line is composed. **Behavior-compatible**
+— no input, verdict or exit code changed.
 **v1.7.0** — `test-suite` **job-log mirror + the false-green documented**, both
 surfaced wiring the action to a new caller (2026-07-28). (1) The action captured
 the test command's stdout and reported ONLY to `$GITHUB_STEP_SUMMARY`, echoing a

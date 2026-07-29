@@ -41,6 +41,15 @@ const MOBILE_UA =
 const summaryFile = env.GITHUB_STEP_SUMMARY || '/dev/stdout';
 const out = [];
 const note = (s = '') => out.push(s);
+// Job-log output goes through fs.writeSync, never console.log/console.error:
+// process.stdout/stderr writes are ASYNC on macOS pipes (synchronous on
+// Linux/Windows), and every terminal path here is a bare process.exit(), which
+// does not drain a pending async write. CI runs on Linux so it would be safe
+// there, but neither the report nor the no-URLs diagnostic may be the thing
+// that silently goes missing on a local mac run. (Same fix, same reason as
+// test-suite/scripts/run.mjs v1.7.0.)
+const say = (s) => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
+const sayErr = (s) => { try { fs.writeSync(2, `${s}\n`); } catch { console.error(s); } };
 // Neutralize page-controlled strings before they reach the markdown summary —
 // a hostile nav label / class can't forge verdict lines, autolink, or inject a
 // beacon. (The authoritative verdict + exit code derive from rows[].fail, never
@@ -234,7 +243,7 @@ function overlapFailures(landmarks) {
 // ---- run ----
 const targets = URLS.slice(0, MAX_URLS);
 if (!targets.length) {
-  console.error('verify-homepage render-check: no URLs provided');
+  sayErr('verify-homepage render-check: no URLs provided');
   process.exit(2);
 }
 
@@ -362,9 +371,11 @@ if (failed.length === 0) {
 try {
   fs.appendFileSync(summaryFile, out.join('\n') + '\n');
 } catch {
-  console.log(out.join('\n'));
+  // Summary sink unwritable (no GITHUB_STEP_SUMMARY and /dev/stdout not
+  // openable) — nothing to do here: the job-log mirror below is unconditional,
+  // so the report still reaches stdout exactly once.
 }
-console.log(out.join('\n'));
+say(out.join('\n'));
 
 if (failed.length && FAIL) process.exit(1);
 process.exit(0);
