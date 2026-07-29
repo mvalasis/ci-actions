@@ -22,7 +22,9 @@ const RUN = path.join(HERE, 'run.mjs');
 let failed = 0;
 function check(name, cond, detail = '') { if (cond) console.log(`  ✅ ${name}`); else { console.log(`  ❌ ${name} ${detail}`); failed++; } }
 
-// Run run.mjs end-to-end with a captured step-summary; returns { exit, summary }.
+// Run run.mjs end-to-end with a captured step-summary; returns { exit, summary, stdout }.
+// stdout is the JOB-LOG mirror (separate from the step summary, which CI writes to a file) — the
+// selftest asserts against both, since a green run used to leave the job log empty.
 function runCli(env) {
   const summaryPath = path.join(os.tmpdir(), `ts-summary-${Math.random().toString(36).slice(2)}.md`);
   fs.writeFileSync(summaryPath, '');
@@ -32,8 +34,14 @@ function runCli(env) {
   });
   const summary = fs.readFileSync(summaryPath, 'utf8');
   try { fs.unlinkSync(summaryPath); } catch { /* ignore */ }
-  return { exit: r.status, summary, stderr: r.stderr || '' };
+  return { exit: r.status, summary, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
+
+// A job-log line is a GitHub workflow command only when the line STARTS with `::`. Our own
+// ::group::/::endgroup:: markers are code-controlled and allowed; anything else that reaches
+// line-start would let captured test output forge an annotation or halt command processing.
+const FORGEABLE = /^::(?!group::|endgroup::)/;
+const forgedCommandLines = (stdout) => stdout.split('\n').filter((l) => FORGEABLE.test(l));
 
 console.log('\n# stack detection');
 {
@@ -159,6 +167,7 @@ console.log('\n# E2E — RED suite (1 pass + 1 fail) is detected');
   const block = runCli({ WORKING_DIRECTORY: path.join(FIX, 'node-redgreen'), FAIL_ON_FAIL: 'true' });
   check('RED + fail-on-fail:true → exit 1 (BLOCKS)', block.exit === 1, `exit=${block.exit}`);
   check('RED block summary says BLOCKED', /BLOCKED —/.test(block.summary), block.summary);
+  check('RED job log carries status=fail + BLOCKED', /test-suite: .*status=fail — BLOCKED/.test(block.stdout), block.stdout);
 }
 
 console.log('\n# E2E — GREEN suite passes');
@@ -167,6 +176,13 @@ console.log('\n# E2E — GREEN suite passes');
   check('GREEN + fail-on-fail:true → exit 0', g.exit === 0, `exit=${g.exit} :: ${g.summary}`);
   check('GREEN summary reports status: pass', /status:\s*pass/.test(g.summary), g.summary);
   check('GREEN summary parsed 3 passed', /3 passed/.test(g.summary), g.summary);
+
+  // The regression this whole mirror exists for: a GREEN run must be legible from the job log
+  // alone (`gh run view --log`), without opening the step summary in the web UI.
+  check('GREEN job log names the resolved command', /test-suite: .*command=npm run test/.test(g.stdout), g.stdout);
+  check('GREEN job log names the mode', /mode=block-on-fail/.test(g.stdout), g.stdout);
+  check('GREEN job log carries status=pass + counts', /test-suite: .*status=pass — PASS — suite green · 3 passed/.test(g.stdout), g.stdout);
+  check('GREEN job log echoes a tail of the real test output', /::group::test output/.test(g.stdout) && /::endgroup::/.test(g.stdout) && /│ .*Tests\s+3 passed/.test(g.stdout), g.stdout);
 }
 
 console.log('\n# E2E — NO TESTS configured → PASS green (never blocks a repo without tests)');
@@ -175,6 +191,9 @@ console.log('\n# E2E — NO TESTS configured → PASS green (never blocks a repo
   check('placeholder-only node repo → exit 0 even with fail-on-fail:true', n.exit === 0, `exit=${n.exit} :: ${n.summary}`);
   check('no-tests summary reports status: no-tests', /status:\s*no-tests/.test(n.summary), n.summary);
   check('no-tests summary is explicitly green / not-blocked', /not blocked|no test suite configured/i.test(n.summary), n.summary);
+  // The false-green must be LOUD in the job log — green + nothing executed looks identical to a
+  // real green run otherwise (the trap that cost a fleet caller a silent no-op).
+  check('no-tests job log says NOTHING RAN + points at test-command', /status=no-tests — .*NOTHING RAN/.test(n.stdout) && /test-command/.test(n.stdout), n.stdout);
 }
 
 console.log('\n# E2E — NO STACK (empty dir) → PASS green');
@@ -184,6 +203,7 @@ console.log('\n# E2E — NO STACK (empty dir) → PASS green');
   fs.rmSync(empty, { recursive: true, force: true });
   check('empty dir → exit 0 (no stack to test)', s.exit === 0, `exit=${s.exit} :: ${s.summary}`);
   check('no-stack summary reports status: no-stack', /status:\s*no-stack/.test(s.summary), s.summary);
+  check('no-stack job log says NOTHING RAN + points at test-command', /status=no-stack — .*NOTHING RAN/.test(s.stdout) && /test-command/.test(s.stdout), s.stdout);
 }
 
 console.log('\n# E2E — test-command OVERRIDE is honored');
@@ -195,6 +215,25 @@ console.log('\n# E2E — test-command OVERRIDE is honored');
   check('failing override + fail-on-fail:true → exit 1', badc.exit === 1, `exit=${badc.exit}`);
   const badro = runCli({ WORKING_DIRECTORY: FIX, TEST_COMMAND: 'exit 7', FAIL_ON_FAIL: 'false' });
   check('failing override + report-only → exit 0 (never newly-blocks)', badro.exit === 0, `exit=${badro.exit}`);
+  check('override job log names the override command', /test-suite: .*command=exit 7/.test(badro.stdout), badro.stdout);
+}
+
+console.log('\n# job-log mirror — workflow-command injection is defanged');
+{
+  // A hostile test name / file path echoed verbatim to stdout would be parsed by the runner as a
+  // workflow command: `::error::` forges an annotation, `::stop-commands::` halts command parsing
+  // for the rest of the job. safe() guards the markdown summary and does NOT strip `::`, so the
+  // job-log mirror must keep captured output off line-start (gutter prefix).
+  const hostile = "printf '::error::forged annotation\\n::stop-commands::halt\\n::set-output name=x::y\\nTests  1 passed\\n'";
+  const inj = runCli({ WORKING_DIRECTORY: FIX, TEST_COMMAND: hostile, FAIL_ON_FAIL: 'true' });
+  const forged = forgedCommandLines(inj.stdout);
+  check('hostile output → exit 0 (the command itself succeeded)', inj.exit === 0, `exit=${inj.exit} :: ${inj.stdout}`);
+  check('NO forged workflow command reaches line-start in the job log', forged.length === 0, `forged=${JSON.stringify(forged)}`);
+  check('hostile lines are still SHOWN (defanged, not dropped)', /│ ::error::forged annotation/.test(inj.stdout), inj.stdout);
+  check('our own ::group:: markers survive (they are code-controlled)', /^::group::test output/m.test(inj.stdout), inj.stdout);
+
+  // Green runs echo the tail too — that is the whole point of the mirror.
+  check('SUCCESS echoes the output tail (not just failures)', /::group::test output/.test(inj.stdout) && /status=pass/.test(inj.stdout), inj.stdout);
 }
 
 console.log(failed === 0 ? '\n✅ all test-suite self-tests passed\n' : `\n❌ ${failed} self-test(s) failed\n`);

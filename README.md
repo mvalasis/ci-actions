@@ -39,7 +39,30 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.6.0**.
+`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.7.0**.
+**v1.7.0** — `test-suite` **job-log mirror + the false-green documented**, both
+surfaced wiring the action to a new caller (2026-07-28). (1) The action captured
+the test command's stdout and reported ONLY to `$GITHUB_STEP_SUMMARY`, echoing a
+tail solely on FAIL — so a green run left the job log **empty** and
+`gh run view --log` could not answer "did my tests actually run?" (fleet-wide: all
+six callers). Now every terminal path prints one `test-suite: … status=…` line with
+the resolved command, mode and parsed counts, and the output tail is echoed on
+**success as well as failure**. Captured output keeps the existing `safe()`
+defanging **and** gains a `│ ` gutter — GitHub parses a log line as a workflow
+command only at line-start, so a hostile test name can't forge an `::error::`
+annotation or fire `::stop-commands::` now that runner output reaches stdout
+(selftest pins it). (2) The **auto-detect false-green** is now in
+`test-suite/README.md` instead of only in two callers' workflow headers: with no
+`test-command` and no root `package.json`/`composer.json` the action reports
+"PASS — no stack to test" and exits `0` **even under `fail-on-fail: 'true'`** —
+`test-command:` is load-bearing for repos whose suites are plain scripts rather
+than a framework. The two nothing-ran paths now render `⚠️ … NOTHING RAN …` in the
+log and name `test-command`, so the trap is visible at the point of failure.
+**Behavior-compatible** — no input added or changed, no verdict or exit code
+changed; callers get strictly more log output, so the `v1` move newly-blocks
+nobody. Intervening patch line: **v1.6.3** `seo-aeo` robots-sitemap-directive
+T2→T1, **v1.6.2**/**v1.6.1** `test-suite` bun-native count parsing + bun PM
+detection.
 **v1.6.0** — NEW action **`form-protection`**: bot-gate enforced-END-TO-END gate
 (the DISCIPLINES.md §Security "no-op class" — a test/placeholder sitekey shipped to
 prod, or a server that skip-verifies the token; both shipped silently on EPN 2026-06).
