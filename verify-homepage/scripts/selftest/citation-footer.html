@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fixture — a citation footer shadows the site footer</title>
+<!--
+  THE prevedourou.gr SHAPE, and the reason the drawer case is not a one-off: the
+  shadowing element does not have to be drawer chrome. `<blockquote><footer>` is
+  the spec-sanctioned way to attribute a quotation (HTML-AAM does NOT map a
+  nested <footer> to the contentinfo landmark, so this markup is CORRECT — it is
+  the unscoped selector that is wrong), and a rotating-quote list renders all but
+  one item inside a display:none <li>.
+
+  Result: `querySelector('footer')` resolves to a citation footer inside a hidden
+  list item — 0-height, ancestor display:none, three matches. Live check
+  2026-07-30: prevedourou.gr ships this list with `landmarks: ["header","main#main",
+  "footer"]` and an ENFORCING gate; all 23 quotes currently have an empty
+  `author`, so the <footer> never renders. One populated author field arms it.
+-->
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.4 system-ui, sans-serif; }
+  header.site { height: 64px; background: #eee; }
+  main#main   { min-height: 300px; }
+  footer.site { height: 140px; background: #333; color: #fff; }
+  .quote-list { list-style: none; margin: 0; padding: 20px; }
+  .hidden { display: none; }
+  blockquote { margin: 0 0 16px; font-style: italic; }
+  blockquote footer { font-style: normal; margin-top: 8px; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<header class="site">the real header</header>
+
+<main id="main">
+  <ul class="quote-list">
+    <!-- Not the visible quote: the rotator hides every item but one. -->
+    <li class="hidden" data-quote-id="2">
+      <blockquote>
+        &ldquo;a quote that is not currently on screen&rdquo;
+        <footer class="quote-cite">&mdash; Some Author, <cite>Some Source</cite></footer>
+      </blockquote>
+    </li>
+    <li data-quote-id="1">
+      <blockquote>&ldquo;the visible quote, which has no attribution&rdquo;</blockquote>
+    </li>
+  </ul>
+</main>
+
+<footer class="site">the real footer</footer>
+
+</body>
+</html>

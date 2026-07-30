@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fixture — drawer chrome shadows the real landmarks</title>
+<!--
+  THE lampakia SHAPE (live 2026-07-01 → 2026-07-30, one month of an unreadable
+  verdict). A mobile-menu drawer whose chrome uses <header>/<footer> elements and
+  which PRECEDES the real landmarks in document order, so `querySelector('footer')`
+  resolves to the drawer's footer, not the site footer.
+
+  At >=1024px the `lg:hidden`-equivalent rule puts display:none on the DRAWER,
+  which collapses the descendant footer's rect to 0x0 while the descendant's OWN
+  computed display stays `block` — so it trips `display !== 'none' && h <= 0`.
+  That is the whole trap: the flagged element is not the one at fault, and the
+  element at fault is not the one named.
+
+  Below 1024px the drawer is visible and position:fixed, so its in-flow chrome
+  sits over `main` — the same ambiguity as a false OVERLAP instead of a false
+  collapse. Both viewports are asserted by scripts/selftest.mjs.
+
+  Heights are explicit (120px real footer, 64px real header) so the runner-up
+  pointer in the report is a stable string to assert on.
+-->
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.4 system-ui, sans-serif; }
+
+  /* The drawer: fixed, full-viewport, ahead of everything in document order. */
+  #mobile-menu { position: fixed; inset: 0; background: #fff; z-index: 50; }
+  /* `lg:hidden` — the ancestor that actually causes the 0-height descendant. */
+  @media (min-width: 1024px) { #mobile-menu { display: none; } }
+  .drawer-head { height: 50px; padding: 0 20px; }
+  .drawer-foot { height: 50px; padding: 0 20px; border-top: 1px solid #ddd; }
+
+  header.site { height: 64px; background: #eee; }
+  main#main   { height: 400px; background: #fafafa; }
+  footer.site { height: 120px; background: #333; color: #fff; }
+</style>
+</head>
+<body>
+
+<aside id="mobile-menu" aria-label="Mobile menu">
+  <header class="drawer-head">drawer header (chrome, not a landmark)</header>
+  <nav><a href="/one/">one</a> <a href="/two/">two</a></nav>
+  <footer class="drawer-foot">drawer footer (chrome, not a landmark)</footer>
+</aside>
+
+<header class="site">the real header</header>
+<main id="main">the real main</main>
+<footer class="site">the real footer</footer>
+
+</body>
+</html>

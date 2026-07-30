@@ -39,7 +39,38 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.7.1**.
+`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.8.0**.
+**v1.8.0** — `verify-homepage` **self-diagnosing landmark resolution** (2026-07-30).
+A landmark verdict named the *selector* and nothing else, which cost a month:
+lampakia's weekly run reported `collapsed landmark footer (0-height)` at desktop
++ laptop, PASS at mobile, from 2026-07-01 to 07-30, and nothing in that message
+said the flagged element was a mobile drawer's chrome `<footer>` (first in
+document order) rather than the site footer. Landmarks resolve with
+`document.querySelector` — first match wins — and at ≥1024px the drawer's
+`lg:hidden` ancestor went `display:none`, collapsing the descendant's rect to
+`0×0` while the descendant's **own** computed display stayed `block`, so it tripped
+`display !== 'none' && h <= 0`. Fixed at the source in lampakia (e2ff769, drawer
+chrome → `<div>`); fixed *here* so the next one is a two-minute read. Landmark
+findings now carry (1) the element the selector resolved to, (2) the `display:none`
+ancestor that is the actual cause, or the drawer/blockquote/article container it is
+nested in, (3) the match count and the runner-up match that actually renders. The
+**overlap** path gets the same annotation and needs it more — there an ambiguous
+selector yields a *false FAIL* (`main ∩ footer` when `footer` resolved to a
+`<blockquote><footer>` citation nested inside main; prevedourou.gr is one populated
+`author` field away from exactly that, gate ENFORCING). A run that saw an
+ambiguous resolution also prints one advisory block **before the verdict, on PASS
+too** — the regression signal the scoped-selector callers were structurally unable
+to see (full reasoning + the measured fleet data + the standing call:
+`verify-homepage/README.md` → "Selector precision vs. catching markup
+regressions"). Plus one latent trap disarmed: the nav file is now read whenever it
+exists, not only when `nav` is in `checks` — `checks: render` alone had been
+silently falling back to the DEFAULT `header/main/footer` selectors instead of the
+caller's declared `landmarks` (no fleet caller sets `checks:`, so no live verdict
+moves). **Report-only, verdict-neutral** — no input changed, and the new
+`scripts/selftest.mjs` pins exit `1` unscoped-and-enforcing, exit `0` scoped, on
+the same fixture. First offline fixture layer for this action (real Chromium,
+`file://` fixtures) — necessary because the live site that carried the defect has
+since been fixed and can no longer exercise the path.
 **v1.7.1** — `verify-homepage` **report-output plumbing**, surfaced by the sibling
 audit after v1.7.0 (2026-07-29). (1) When the step-summary write threw, the `catch`
 printed the whole report *and* the unconditional line below printed it again — a
@@ -212,8 +243,8 @@ one adjacent to a `process.exit()` — in the v1.7.1 case the two sat lines apar
 Two allowances: the `catch` fallback of an `fs.writeSync` on the same line, and
 `// lint-allow-raw-output: <reason>` (a reason is required).
 
-The six `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
-`console.log(…)` then `process.exit(…)`, but emit 2100–4117 bytes, an order of
+The seven `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
+`console.log(…)` then `process.exit(…)`, but emit 1375–4117 bytes, an order of
 magnitude under the pipe buffer, so they cannot truncate. Don't "fix" them.
 
 Repo-internal only: no caller consumes this lint, so changing it needs **no
@@ -303,8 +334,17 @@ advisory. Also carries the **one canonical copy** of the per-repo
 The browser matrix is the costly tier — wire it on the **weekly schedule +
 manual dispatch only, never per-push** (a standalone `verify-render.yml` per
 caller). Report-mode-first (`fail-on-structure: false`), then flip to BLOCK once
-clean. Wired 2026-06-29: epn-astro (ENFORCING); lampakia-astro, hlektrologos,
-prevedourougr, lux-main + lux-dev (report-only).
+clean. Wired 2026-06-29; status as of 2026-07-30: **ENFORCING** — epn-astro
+(pilot), lampakia-astro, hlektrologos, prevedourougr (the last three flipped
+2026-07-07); **report-only** — lux-main + lux-dev (responsive debt outstanding).
+
+Landmark selectors resolve **first-match-wins**, so a precise selector and a gate
+that catches markup regressions pull against each other — the reasoning, the
+measured fleet data, and the standing call are in
+[`verify-homepage/README.md`](verify-homepage/README.md) →
+"Selector precision vs. catching markup regressions". Open call as of 2026-07-30;
+the recommendation there is to keep scoped selectors and let the v1.8.0 advisory
+carry the regression signal.
 
 ## Roadmap
 

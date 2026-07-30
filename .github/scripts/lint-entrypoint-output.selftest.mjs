@@ -164,15 +164,15 @@ let live = 0;
 for (const rel of found) live += lintSource(fs.readFileSync(path.join(root, rel), 'utf8'), rel).length;
 check(`all ${found.length} entrypoints lint clean`, live === 0, `(${live} finding(s))`);
 
-// The six exempt selftests must stay exempt AND stay small — the exemption is
-// "2-4 KB of output cannot reach a 64 KiB pipe buffer", not "selftests are
+// The exempt selftests must stay exempt AND stay small — the exemption is
+// "1-4 KB of output cannot reach a 64 KiB pipe buffer", not "selftests are
 // special". If one ever grows a large report, this is where that shows up.
 say('\n# the selftest exemption still holds');
 const selftests = fs.readdirSync(root, { withFileTypes: true })
   .filter((d) => d.isDirectory() && fs.existsSync(path.join(root, d.name, 'scripts', 'selftest.mjs')))
   .map((d) => path.join(d.name, 'scripts', 'selftest.mjs'));
-check('six action selftests exist and are out of scope',
-  selftests.length === 6 && !found.some((f) => selftests.includes(f)), `(${selftests.length})`);
+check('seven action selftests exist and are out of scope',
+  selftests.length === 7 && !found.some((f) => selftests.includes(f)), `(${selftests.length})`);
 
 say(failed === 0 ? '\n✅ all lint-entrypoint-output self-tests passed\n' : `\n❌ ${failed} self-test(s) failed\n`);
 process.exit(failed === 0 ? 0 : 1);

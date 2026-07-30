@@ -90,16 +90,22 @@ for (const u of URLS) {
 // ---- nav inventory ----
 let navSpec = null;
 let navSkipReason = '';
-if (CHECKS.has('nav')) {
-  if (NAV_FILE && fs.existsSync(NAV_FILE)) {
-    try {
-      navSpec = JSON.parse(fs.readFileSync(NAV_FILE, 'utf8'));
-    } catch (e) {
-      navSkipReason = `nav-file unparseable (${e.message})`;
-    }
-  } else {
-    navSkipReason = NAV_FILE ? `nav-file not found at ${NAV_FILE}` : 'no nav-file configured';
+// Read the nav file whenever it exists — NOT only when `nav` is in `checks`.
+// It carries two independent things: the nav inventory (used by the nav check)
+// and `landmarks` (used by the render check). Gating the read on the nav check
+// meant `checks: render` silently fell back to the DEFAULT `header/main/footer`
+// selectors, measuring different elements than the caller's verify-nav.json
+// declares — the same failure mode as an ambiguous selector, one level up. No
+// fleet caller sets `checks:` today (all take the `render,nav` default), so this
+// disarms a trap rather than changing any live verdict.
+if (NAV_FILE && fs.existsSync(NAV_FILE)) {
+  try {
+    navSpec = JSON.parse(fs.readFileSync(NAV_FILE, 'utf8'));
+  } catch (e) {
+    navSkipReason = `nav-file unparseable (${e.message})`;
   }
+} else {
+  navSkipReason = NAV_FILE ? `nav-file not found at ${NAV_FILE}` : 'no nav-file configured';
 }
 const LANDMARKS =
   (navSpec && Array.isArray(navSpec.landmarks) && navSpec.landmarks.length && navSpec.landmarks) ||
@@ -189,22 +195,84 @@ const MEASURE = (args) => {
       }
     }
   }
+  // A landmark selector resolves the way `document.querySelector` does — FIRST
+  // MATCH IN DOCUMENT ORDER — so an unscoped selector can silently measure
+  // something that is not the landmark at all: a drawer's chrome `<footer>`, a
+  // `<blockquote><footer>` citation, an `<article><header>`. Record WHICH element
+  // was resolved, how many others matched, and the two containers that explain
+  // a wrong resolution, so the report can name the element instead of only the
+  // selector. All report-only — none of these fields reaches a verdict.
+  //
+  // Identifiers are rendered `‹tag id="x" class="y"›`, NOT `<tag …>`: the
+  // reporter's safe() strips `<`, `>` and `#` (page-controlled text must not be
+  // able to inject HTML into the markdown step summary), and HTML-entity
+  // escaping would leave `&lt;footer&gt;` litter in the job-log mirror — which is
+  // the sink you actually read this in. Do not "restore" angle brackets.
+  const ident = (n) => {
+    if (!n || !n.tagName) return '';
+    const tag = n.tagName.toLowerCase();
+    const id = n.id ? ` id="${String(n.id).slice(0, 40)}"` : '';
+    const raw = (n.getAttribute && n.getAttribute('class')) || '';
+    const cls = raw.replace(/\s+/g, ' ').trim().slice(0, 40);
+    return `‹${tag}${id}${cls ? ` class="${cls}"` : ''}›`;
+  };
+  // The nearest display:none ancestor. THE single most useful fact about a
+  // 0-height landmark: an element inside a display:none subtree keeps its OWN
+  // computed display (`block`) while its rect collapses to 0×0, so it trips the
+  // collapse test with nothing in the message pointing at the real cause.
+  // (lampakia 2026-07-01→07-30: a `lg:hidden` drawer wrapper at ≥1024px, one
+  // month of "collapsed landmark footer" that was never the site footer.)
+  const hiddenAncestor = (n) => {
+    for (let p = n.parentElement; p; p = p.parentElement) {
+      if (getComputedStyle(p).display === 'none') return p;
+    }
+    return null;
+  };
+  // Containers whose descendants are chrome or content, never page structure —
+  // if the "landmark" sits inside one of these, the selector resolved wrong.
+  const WRAP_SEL =
+    'aside,dialog,[role="dialog"],[aria-modal="true"],[inert],[aria-hidden="true"],blockquote,figure,article,section';
   for (const sel of landmarks) {
-    let el = null;
+    let els = [];
     try {
-      el = document.querySelector(sel);
+      // querySelectorAll()[0] === querySelector(): same element, same document
+      // order — the resolution is unchanged, only now we can see the runners-up.
+      els = Array.from(document.querySelectorAll(sel));
     } catch {
       /* bad selector */
     }
+    const el = els[0] || null;
     if (!el) {
-      res.landmarks.push({ sel, present: false });
+      res.landmarks.push({ sel, present: false, matchCount: 0 });
       continue;
     }
     const r = el.getBoundingClientRect();
     const st = getComputedStyle(el);
+    const hid = hiddenAncestor(el);
+    // Start at parentElement so a landmark that IS an `<aside>`/`<section>`
+    // doesn't report itself as its own wrapper.
+    const wrapEl = el.parentElement ? el.parentElement.closest(WRAP_SEL) : null;
+    // The runner-up that is probably the element the author meant: the first
+    // other match that actually renders. Turns "the selector is ambiguous" into
+    // "here is the one you wanted".
+    let alt = null;
+    for (let k = 1; k < els.length && k < 12; k++) {
+      const rk = els[k].getBoundingClientRect();
+      if (rk.height > 0 && rk.width > 0) {
+        alt = { n: k + 1, ident: ident(els[k]), h: Math.round(rk.height) };
+        break;
+      }
+    }
     res.landmarks.push({
       sel,
       present: true,
+      matchCount: els.length,
+      ident: ident(el),
+      hiddenAnc: hid ? ident(hid) : '',
+      // Suppress the wrapper when it IS the display:none ancestor — one clause
+      // naming that element is the useful message, two is noise.
+      wrap: wrapEl && wrapEl !== hid ? ident(wrapEl) : '',
+      alt,
       h: Math.round(r.height),
       w: Math.round(r.width),
       top: Math.round(r.top),
@@ -217,6 +285,48 @@ const MEASURE = (args) => {
   }
   return res;
 };
+
+// ---- landmark identification (report-only) ----
+// A landmark verdict that names only the SELECTOR is unactionable when the
+// selector is ambiguous: `collapsed landmark footer (0-height)` cost a month on
+// lampakia because nothing in it said the flagged element was a mobile drawer's
+// chrome `<footer>` (first in document order), not the site footer. These three
+// clauses turn the same finding into a two-minute fix. Composition order is
+// fixed: WHAT resolved → WHY it measured that way → WHAT ELSE matched.
+
+// Does this landmark's resolution need explaining? True when the selector is
+// ambiguous, or when the resolved element sits inside a container that means it
+// is not the landmark (a drawer, a blockquote, a display:none subtree).
+const needsIdent = (l) => !!(l && l.present && (l.matchCount > 1 || l.wrap || l.hiddenAnc));
+
+// `resolved to ‹footer class="border-t px-5"›, whose ancestor ‹aside
+//  id="mobile-menu"› is display:none — that ancestor is the cause, not this element`
+function resolvedClause(l) {
+  if (!l || !l.ident) return '';
+  let s = `resolved to ${safe(l.ident, 72)}`;
+  if (l.hiddenAnc) s += `, whose ancestor ${safe(l.hiddenAnc, 56)} is display:none — that ancestor is the cause, not this element`;
+  else if (l.wrap) s += ` inside ${safe(l.wrap, 56)}`;
+  return s;
+}
+
+// `3 elements match "footer" (first match in document order wins) — match 3 of 3
+//  ‹footer class="site-footer"› renders 412px tall`
+//
+// Ordinals are spelled "match 3 of 3", never "#3": the composed problem string
+// is passed through safe() again at the note() call, which strips `#` along with
+// every other markdown-hostile character — so a `#` here silently becomes a bare
+// digit. Same reason the identifiers use ‹…› instead of <…>.
+function ambiguityClause(l) {
+  if (!l || !(l.matchCount > 1)) return '';
+  let s = `${l.matchCount} elements match "${safe(l.sel, 28)}" (first match in document order wins)`;
+  if (l.alt) s += ` — match ${l.alt.n} of ${l.matchCount} ${safe(l.alt.ident, 56)} renders ${l.alt.h}px tall`;
+  return s;
+}
+
+// The full "which element, and why" tail for one landmark.
+function identTail(l) {
+  return [resolvedClause(l), ambiguityClause(l)].filter(Boolean).join('; ');
+}
 
 function overlapFailures(landmarks) {
   // Only consider in-flow (static/relative), present, sized landmarks. Fixed /
@@ -233,11 +343,35 @@ function overlapFailures(landmarks) {
       const dx = Math.min(a.right, b.right) - Math.max(a.left, b.left);
       const dy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
       if (dx > OVERLAP_TOL && dy > OVERLAP_TOL) {
-        fails.push(`${safe(a.sel, 28)} ∩ ${safe(b.sel, 28)} (${dx}×${dy}px)`);
+        // Overlap needs identification MORE than collapse does, because an
+        // ambiguous selector here produces a false FAIL rather than a
+        // mis-attributed one: `main#main ∩ footer` reads as broken layout when
+        // the truth is that `footer` resolved to a `<blockquote><footer>`
+        // citation nested inside main, so of course the boxes intersect.
+        // (prevedourou.gr is one populated `author` field away from exactly
+        // this — landmarks ["header","main#main","footer"], gate ENFORCING.)
+        // Annotate only the ambiguous side(s): two clean selectors that really
+        // do overlap keep the terse original message.
+        const why = [a, b]
+          .filter(needsIdent)
+          .map((l) => `${safe(l.sel, 28)} ${identTail(l)}`)
+          .join(' · ');
+        fails.push(`${safe(a.sel, 28)} ∩ ${safe(b.sel, 28)} (${dx}×${dy}px)${why ? ` — ${why}` : ''}`);
       }
     }
   }
   return fails;
+}
+
+// Ambiguous / mis-resolved landmark selectors seen anywhere in the run, deduped.
+// Reported once at the end even when every check PASSED: a selector quietly
+// measuring the wrong element is a latent false verdict in both directions, and
+// a green run is exactly when nobody goes looking. Pass/fail is untouched.
+const ambiguous = new Map();
+function noteAmbiguity(url, vp, l) {
+  if (!needsIdent(l)) return;
+  const key = `${l.sel}|${l.ident}|${l.matchCount}|${l.hiddenAnc}|${l.wrap}`;
+  if (!ambiguous.has(key)) ambiguous.set(key, { l, url, vp });
 }
 
 // ---- run ----
@@ -330,13 +464,15 @@ for (const url of targets) {
           problems.push(`horizontal overflow: scrollW ${m.scrollW} > ${m.vw}${who}`);
         }
         for (const l of m.landmarks) {
+          noteAmbiguity(url, vp.name, l);
           if (!l.present) {
             problems.push(`missing landmark ${safe(l.sel, 28)}`);
           } else if (l.display !== 'none' && l.display !== 'contents' && l.h <= 0) {
             // display:contents generates no box (height 0) but its children
             // render — not a collapse. (overlapFailures already skips it: its
             // 0×0 rect fails the h>0/w>0 in-flow filter.)
-            problems.push(`collapsed landmark ${safe(l.sel, 28)} (0-height)`);
+            const tail = identTail(l);
+            problems.push(`collapsed landmark ${safe(l.sel, 28)} (0-height)${tail ? ` — ${tail}` : ''}`);
           }
         }
         for (const f of overlapFailures(m.landmarks)) problems.push(`overlap ${f}`);
@@ -349,7 +485,11 @@ for (const url of targets) {
       if (fail) overallFail = true;
       rows.push({ url, viewport: vp.name, kind: 'render', fail, detail: problems.join('; ') });
       note(
-        `- **${vp.name}** (${vp.width}×${vp.height}) ${fail ? '❌' : '✅'}${fail ? ' — ' + problems.map((p) => safe(p, 200)).join(' · ') : ''}`
+        // 320, not the original 200: a landmark finding now carries the resolved
+        // element + its wrapper + the runner-up match, and truncating that tail
+        // would cut off exactly the part that makes the finding actionable.
+        // Still a bounded length — safe() caps every page-derived fragment too.
+        `- **${vp.name}** (${vp.width}×${vp.height}) ${fail ? '❌' : '✅'}${fail ? ' — ' + problems.map((p) => safe(p, 320)).join(' · ') : ''}`
       );
     }
   }
@@ -357,6 +497,38 @@ for (const url of targets) {
 }
 
 await browser.close();
+
+// ---- landmark-resolution advisory (report-only, printed on PASS too) ----
+if (ambiguous.size) {
+  const seen = [...ambiguous.values()];
+  note('---');
+  note('');
+  note('#### ⚠️ landmark selectors that did not resolve cleanly (advisory — no verdict effect)');
+  note('');
+  note(
+    'Landmarks resolve with `document.querySelector` — **first match in document order wins**. ' +
+      'Each row below measured an element that is either one of several matches, or nested in a ' +
+      'container that means it is not the landmark. That makes the geometry asserts (collapse, ' +
+      'overlap) fire on — or silently pass over — the wrong box.'
+  );
+  note('');
+  for (const { l, url, vp } of seen.slice(0, 8)) {
+    const bits = [`${l.matchCount} match${l.matchCount === 1 ? '' : 'es'}`, `resolved ${safe(l.ident, 72)}`];
+    if (l.hiddenAnc) bits.push(`ancestor ${safe(l.hiddenAnc, 56)} is display:none`);
+    else if (l.wrap) bits.push(`inside ${safe(l.wrap, 56)}`);
+    if (l.alt) bits.push(`match ${l.alt.n} of ${l.matchCount} ${safe(l.alt.ident, 56)} is ${l.alt.h}px tall`);
+    note(`- \`${safe(l.sel, 40)}\` — ${bits.join(' · ')}  _(first seen: ${safe(url, 60)} @ ${safe(vp, 16)})_`);
+  }
+  if (seen.length > 8) note(`- …and ${seen.length - 8} more`);
+  note('');
+  note(
+    'Fix at the source: scope the selector in `verify-nav.json` (`body > footer`, `main#main`), ' +
+      'or stop using landmark elements for non-landmark chrome (drawer headers/footers, citation ' +
+      '`<footer>`s). A scoped selector is precise but only asserts what it names — see ' +
+      '`verify-homepage/README.md` → "Selector precision vs. catching markup regressions".'
+  );
+  note('');
+}
 
 // ---- verdict ----
 const failed = rows.filter((r) => r.fail);

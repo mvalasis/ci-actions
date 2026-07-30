@@ -38,12 +38,12 @@
 // of scope. The scan is NON-recursive, which also keeps test fixtures like
 // `test-suite/scripts/selftest/*/vitest-stub.mjs` out.
 //
-// The six `*/scripts/selftest.mjs` files legitimately end in `console.log(...)`
+// The seven `*/scripts/selftest.mjs` files legitimately end in `console.log(...)`
 // then `process.exit(...)`. They are exempt because they CANNOT hit the bug:
-// measured output is 2100–4117 bytes (contract-check 2534, seo-aeo 3043,
+// measured output is 1375–4117 bytes (contract-check 2534, seo-aeo 3043,
 // form-protection 3396, security-baseline 2100, deps-currency 2577, test-suite
-// 4117) — an order of magnitude under the 65,536-byte pipe buffer. Do not
-// "fix" them; the exemption is the finding, not an oversight.
+// 4117, verify-homepage 1375) — an order of magnitude under the 65,536-byte pipe
+// buffer. Do not "fix" them; the exemption is the finding, not an oversight.
 //
 // ALLOWANCES (both deliberate, both narrow)
 //   1. The sync-write fallback itself: a `console.*` that is the `catch` arm of

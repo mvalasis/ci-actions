@@ -15,7 +15,7 @@ inputs:
     description: 'Space/newline-separated live URLs to verify (production at cutover, never a preview host).'
     required: true
   nav-file:
-    description: 'Path (relative to the caller checkout) to the nav-inventory + landmarks file. Empty/missing = nav check skipped (render still runs).'
+    description: 'Path (relative to the caller checkout) to the nav-inventory + landmarks file. Empty/missing = nav check skipped AND landmarks fall back to header/main/footer (render still runs). Its `landmarks` apply regardless of `checks`.'
     required: false
     default: 'scripts/verify-nav.json'
   viewports:
