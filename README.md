@@ -181,6 +181,44 @@ History: **v1.2.1** was a `linkcheck` verify-token cross-origin leak fix
 (redirects followed manually, `X-Verify-Source` re-scoped per hop); **v1.2.0**
 was the `seo-aeo` parsed Node+cheerio rebuild (T0/T1/T2 + `critical-checks`).
 
+## Repo hygiene — action entrypoints never write to stdout asynchronously
+
+**Rule:** inside an action entrypoint (`<action>/scripts/*.mjs`, except
+`selftest.mjs`), all output goes through a **synchronous** write — a
+`say`/`sayErr` helper over `fs.writeSync`, or `fs.appendFileSync(summaryFile, …)`.
+No `console.*(…)`, no `process.std{out,err}.write(…)`.
+
+**Why:** those writes are ASYNC when the fd is a pipe on macOS (synchronous on
+Linux/Windows), and `process.exit()` does **not** drain a pending async write —
+so the report truncates at the 65,536-byte pipe buffer, silently, with a zero
+exit code. CI is Linux, so the bug is **latent** in CI and only bites on local
+runs; that is why it shipped twice. `test-suite` **v1.7.0** introduced the fix,
+and `verify-homepage` **v1.7.1** had to apply it again (a measured 78,083-byte
+report arrived as 65,536 bytes, losing the `---` verdict) — caught only because
+a sibling audit happened to look.
+
+```js
+const say    = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
+const sayErr = (s = '') => { try { fs.writeSync(2, `${s}\n`); } catch { console.error(s); } };
+```
+
+Mechanized by [`.github/scripts/lint-entrypoint-output.mjs`](.github/scripts/lint-entrypoint-output.mjs),
+run as a **blocking** job on every push and PR
+([`lint.yml`](.github/workflows/lint.yml)); its own 43-assertion fixture suite
+(`lint-entrypoint-output.selftest.mjs`) runs first, because a scrubber bug would
+fail permissively. Entrypoints are discovered from `action.yml` presence, so a
+new action is covered the day it lands. The lint flags **any** raw call, not just
+one adjacent to a `process.exit()` — in the v1.7.1 case the two sat lines apart.
+Two allowances: the `catch` fallback of an `fs.writeSync` on the same line, and
+`// lint-allow-raw-output: <reason>` (a reason is required).
+
+The six `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
+`console.log(…)` then `process.exit(…)`, but emit 2100–4117 bytes, an order of
+magnitude under the pipe buffer, so they cannot truncate. Don't "fix" them.
+
+Repo-internal only: no caller consumes this lint, so changing it needs **no
+version bump and no `v1` tag move**.
+
 ## `linkcheck` — full-site broken-link / image / outbound crawl
 
 Curl-based (not lychee — lychee 0.24.2 hard-panics on CF/Kinsta edges that

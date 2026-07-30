@@ -1,0 +1,45 @@
+name: lint
+
+# Repo-internal hygiene gate — NOT consumed by any caller, so a change here
+# needs no version bump and no `v1` tag move.
+#
+# Guards one defect class that has already been fixed by hand twice (test-suite
+# v1.7.0, verify-homepage v1.7.1): an action entrypoint that emits its report
+# with console.log/process.stdout.write and then calls process.exit(). Those
+# writes are ASYNC on macOS pipes and process.exit() does not drain them, so the
+# report truncates at the 65,536-byte pipe buffer — silently, with a zero exit
+# code. CI is Linux, where the writes are synchronous, so the bug is LATENT here
+# and only bites on local runs. That is exactly why it survived review twice, and
+# why this job is blocking rather than report-mode.
+#
+# No `paths:` filter, deliberately: the gate must also re-run when a NEW action
+# directory lands (entrypoints are discovered from `action.yml`, not a list) and
+# when the linter itself changes. ci-actions is public, so runner minutes on
+# GitHub-hosted standard runners are free.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  entrypoint-output:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+
+      # The linter's scrubber (comments/strings/regex blanking) fails in the
+      # PERMISSIVE direction when it is wrong — a desync silently hides every
+      # violation after it. Prove the linter works before trusting its verdict.
+      - name: Lint self-test (scrubber + matcher fixtures)
+        run: node .github/scripts/lint-entrypoint-output.selftest.mjs
+
+      - name: No async stdout/stderr writes in action entrypoints
+        run: node .github/scripts/lint-entrypoint-output.mjs
