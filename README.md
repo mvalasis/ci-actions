@@ -39,7 +39,36 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.8.0**.
+`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.9.0**.
+**v1.9.0** — `contract-check` gains a THIRD presence tier, **`requiredNullable`**
+(2026-08-01). The manifest could say "present and non-null" (`required`) or
+"tolerated absent" (`optional`), but not **"the producer always sends this key,
+and null is a legitimate value"** — the shape a consumer schema writes as
+`z.number().nullable()`, *nullable but not optional*, where an outright key
+omission fails its parse while null is expected. Both existing tiers mis-model
+it, and the failure is asymmetric: `optional` fires `optional-null` on **every
+healthy run** (a full-catalogue probe found lampakia's `sale_cents` null on
+**1712 / 1712** live products — a weekly WARN nobody can action, which trains the
+gate to be ignored), while the `types`-only workaround callers were using
+type-checks a non-null value but catches **neither the null nor the omission**,
+leaving the field silently unchecked for presence. That was live exposure, not a
+hypothetical: lampakia's `sale_cents` / `stock_qty` / `image` are hard-required
+by its content-collection schema, so the backend could have dropped any of them
+with the ENFORCING gate green and the break surfacing as a failed Zod parse
+mid-content-pull. An absent key now reports under the **existing**
+`required-present` id (the consumer breaks identically, so the documented T0 core
+neither grows nor changes meaning); a null is silent; a non-null value is still
+type-graded via `types`. `optional-null` is suppressed for any path also declared
+`requiredNullable`, and `required` wins — reported once — if a manifest
+contradicts itself by naming a path in both. **Additive and verdict-neutral:** a
+manifest without the key is graded identically, asserted in `selftest.mjs` and
+verified empirically by running the old and new engines over both live callers
+(`lampakia-astro`, `prevedourougr`) for **byte-identical** reports. Twelve new
+self-test assertions, each mutation-checked against a deliberately broken engine.
+Picking the tier is the part that goes wrong — see contract-check's README
+["Which presence tier?"](contract-check/README.md#which-presence-tier), including
+why *over*-tiering a field the consumer tolerates (lampakia's `short`) is its own
+false block.
 **v1.8.0** — `verify-homepage` **self-diagnosing landmark resolution** (2026-07-30).
 A landmark verdict named the *selector* and nothing else, which cost a month:
 lampakia's weekly run reported `collapsed landmark footer (0-height)` at desktop

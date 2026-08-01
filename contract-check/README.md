@@ -23,7 +23,7 @@ clean caller can ratchet individual checks up.
 
 | Tier | Behaviour | Checks |
 |---|---|---|
-| **T0 — CRITICAL** | blocks when `fail-on-critical: true` | `http-2xx` (endpoint resolves to 2xx — a WAF 403/429/5xx/timeout is downgraded to infra-WARN, not a block), `json-parse` (body is valid JSON), `required-present` (a declared required field is missing/null), `required-type` (a declared required field changed JS type), `invariant-price` (a declared money field present but ≤ 0 / non-numeric), `invariant-vat` (inc-VAT < ex-VAT when both present), `invariant-currency` (a price present but no currency field), `invariant-slug` (a slug/permalink field present but empty), `invariant-encoding` (a string field carries a double-encoded entity, e.g. `&amp;amp;` / `&amp;#039;`) |
+| **T0 — CRITICAL** | blocks when `fail-on-critical: true` | `http-2xx` (endpoint resolves to 2xx — a WAF 403/429/5xx/timeout is downgraded to infra-WARN, not a block), `json-parse` (body is valid JSON), `required-present` (a declared `required` field is missing/null, **or** a `requiredNullable` field's key is absent), `required-type` (a declared required field changed JS type), `invariant-price` (a declared money field present but ≤ 0 / non-numeric), `invariant-vat` (inc-VAT < ex-VAT when both present), `invariant-currency` (a price present but no currency field), `invariant-slug` (a slug/permalink field present but empty), `invariant-encoding` (a string field carries a double-encoded entity, e.g. `&amp;amp;` / `&amp;#039;`) |
 | **T1 — promotable WARN** | reports; a caller may elevate to CRITICAL via `critical-checks` | `invariant-declared` (an invariant referenced a field absent from the payload), `optional-null` (a declared optional field came back null), `unexpected-field` (a top-level field appeared that the contract didn't declare), `array-empty` (an endpoint declared `nonEmpty` returned `[]`) |
 
 The number↔string flip is treated as a **serialization convention, not a break — only on money
@@ -93,7 +93,8 @@ an array of endpoint contracts:
       "name": "wc-product",
       "url": "https://cms.example.gr/wp-json/wc/store/products/412",
       "required": ["id", "name", "slug", "price", "currency", "stock_status"],
-      "types": { "id": "number", "name": "string", "slug": "string", "price": "string", "images": "array" },
+      "requiredNullable": ["sale_price_cents", "stock_qty"],
+      "types": { "id": "number", "name": "string", "slug": "string", "price": "string", "images": "array", "sale_price_cents": "number", "stock_qty": "number" },
       "money": ["price", "regular_price"],
       "slug": ["slug"],
       "invariants": ["price>0", "incVat>=exVat:price_including_tax,price_excluding_tax", "currency"],
@@ -111,6 +112,7 @@ an array of endpoint contracts:
 | `url` | The endpoint to fetch (required). A list endpoint returning a top-level array is validated against its **first** item. |
 | `name` | Friendly label in the report (defaults to the URL). |
 | `required` | Fields that MUST be present and non-null — missing/null ⇒ `required-present` CRITICAL. Dotted/bracketed paths supported (`a.b`, `images[0].src`). |
+| `requiredNullable` | Fields whose KEY must always be present, but for which `null` is a legitimate value — an absent key ⇒ `required-present` CRITICAL, a null is silent. Non-null values are still type-checked via `types`. See [Which presence tier?](#which-presence-tier) below. |
 | `types` | `path → JS type` (`string`/`number`/`boolean`/`object`/`array`). A wrong type ⇒ `required-type` CRITICAL (money fields exempt the number↔string flip). |
 | `money` | Fields that must be a number `> 0` (and trigger the currency-present check). Omit to auto-detect price-shaped keys for the encoding/ordering floors only. |
 | `slug` | Slug/permalink fields that must be a non-empty string. Auto-detected from `*slug*`/`permalink` keys if omitted. |
@@ -120,6 +122,40 @@ an array of endpoint contracts:
 | `expectFields` + `allowExtra` | When `expectFields` is set and `allowExtra` is not `true`, a top-level field outside the union of declared keys ⇒ `unexpected-field` WARN (backend added a field). |
 
 A runnable example lives at [`example-manifest.json`](example-manifest.json).
+
+### Which presence tier?
+
+Three tiers, and picking the wrong one is what turns a gate into noise. Choose by asking what the
+**consumer** does when the field is absent versus null — not by what the payload happens to look
+like today.
+
+| The producer… | The consumer… | Tier | Absent | Null |
+|---|---|---|---|---|
+| always sends it, never null | needs a value | `required` | CRITICAL | CRITICAL |
+| **always sends it, null is normal** | **needs the key; handles null** | **`requiredNullable`** | **CRITICAL** | **silent** |
+| may omit it entirely | tolerates absence | `optional` | silent | WARN (`optional-null`) |
+| — | doesn't read it | omit it, or `types` only | silent | silent |
+
+`requiredNullable` exists for the shape a consumer schema writes as `z.number().nullable()` —
+**nullable but not optional**, so an outright key omission fails its parse while `null` is expected
+and handled. Real examples: a `sale_price` that is null when nothing is on sale, a `stock_qty` that
+is null when stock isn't managed, an `image` that is null when there is none.
+
+Before this tier existed, both alternatives were wrong:
+
+- **`optional`** fires `optional-null` on every healthy run. On `lampakia-astro`, `sale_cents` is
+  null on **1712 / 1712** live products — a weekly WARN that can never be actioned, which trains
+  the gate to be ignored.
+- **`types` only** type-checks a non-null value but catches neither the null nor the omission, so
+  the field is effectively **unchecked for presence** — and an undeclared field is an unchecked
+  field.
+
+A field named in both `required` and `requiredNullable` is a contradictory manifest; `required`
+wins (it is strictly stronger) and the field is reported once, not twice.
+
+**Don't over-tier.** If the consumer defaults or tolerates an absent field, leave it in `types`
+only — a T0 block for something that doesn't break the consumer is exactly the false block the
+CRITICAL core is designed to avoid.
 
 ## Promoting checks per-caller (without forking)
 
@@ -141,8 +177,10 @@ money/encoding invariants) is always on and cannot be disabled.
 `node scripts/selftest.mjs` runs the engine against **offline JSON fixtures** (no network) and
 asserts each defect class — a good WC payload passes clean, and payloads with a missing required
 field / wrong type / negative price / inverted VAT / missing currency / empty slug / double-encoded
-name each trip the right CRITICAL. It's the regression guard, and it runs in CI
-(`.github/workflows/contract-check-selftest.yml`).
+name each trip the right CRITICAL. The `requiredNullable` block additionally pins that a null is
+**silent**, an absent key is **CRITICAL**, a wrong non-null type is still **CRITICAL**, and that a
+manifest which doesn't use the key is graded **identically** to before it existed. It's the
+regression guard, and it runs in CI (`.github/workflows/contract-check-selftest.yml`).
 
 ## Implementation
 

@@ -64,8 +64,9 @@ async function fetchJson(url) {
 }
 
 // ---- build the endpoint list: `endpoints` (name->url map) and/or a committed `manifest` file ----
-// manifest schema: { "endpoints": [ { "name", "url", "required":[], "types":{}, "invariants":[],
-//   "optional":[], "money":[], "slug":[], "nonEmpty":bool, "expectFields":[], "allowExtra":bool } ] }
+// manifest schema: { "endpoints": [ { "name", "url", "required":[], "requiredNullable":[],
+//   "types":{}, "invariants":[], "optional":[], "money":[], "slug":[], "nonEmpty":bool,
+//   "expectFields":[], "allowExtra":bool } ] }
 function loadEndpoints() {
   const items = [];
   // 1) inline endpoints map (name -> url) — contract is then minimal (encoding/transport floors only)
@@ -167,8 +168,11 @@ function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }
     if (fails.length) {
       for (const x of fails.sort((a, b) => sevRank(a.sev) - sevRank(b.sev))) note(`  - ${ICON[x.sev]} \`${x.id}\` — ${safe(x.msg, 300)}`);
     } else {
-      const reqN = (ep.contract.required || []).length;
-      note(`  - ✅ ${reqN} required field(s) present & typed · money/encoding invariants hold`);
+      // both presence tiers are asserted, so count both — otherwise a manifest that moved fields
+      // to `requiredNullable` would report a SHRINKING check count while checking strictly more.
+      const nullableN = (ep.contract.requiredNullable || []).length;
+      const reqN = (ep.contract.required || []).length + nullableN;
+      note(`  - ✅ ${reqN} required field(s) present & typed${nullableN ? ` (${nullableN} nullable)` : ''} · money/encoding invariants hold`);
     }
   }
 

@@ -4,9 +4,10 @@ description: >-
   committed contract — catch a backend change that silently breaks or mis-prices a live frontend.
   Fetches each endpoint as raw JSON (the consumer's-eye view, JS-disabled) and checks it against a
   manifest of required-fields / type-expectations / money & encoding invariants. CRITICAL core is
-  tiny and config-free (a required field MISSING or RE-TYPED, price<=0, inc-VAT<ex-VAT, missing
-  currency, empty slug, a double-encoded entity); softer drift (new field, null optional, empty
-  collection) is WARN, per-caller promotable. Air-gapped: only fetches the configured endpoints.
+  tiny and config-free (a required or required-nullable field MISSING, a required field RE-TYPED,
+  price<=0, inc-VAT<ex-VAT, missing currency, empty slug, a double-encoded entity); softer drift
+  (new field, null optional, empty collection) is WARN, per-caller promotable. Air-gapped: only
+  fetches the configured endpoints.
 
 inputs:
   endpoints:
@@ -20,9 +21,13 @@ inputs:
   manifest:
     description: >-
       Path (relative to the checkout, or absolute) to a committed JSON contract file:
-      {"endpoints":[{"name","url","required":[],"types":{path:type},"invariants":[],"optional":[],
-      "money":[],"slug":[],"nonEmpty":bool,"expectFields":[],"allowExtra":bool}]}. The contract lives
-      in the consumer repo so a backend shape-change is caught against what THIS frontend relies on.
+      {"endpoints":[{"name","url","required":[],"requiredNullable":[],"types":{path:type},
+      "invariants":[],"optional":[],"money":[],"slug":[],"nonEmpty":bool,"expectFields":[],
+      "allowExtra":bool}]}. The contract lives in the consumer repo so a backend shape-change is
+      caught against what THIS frontend relies on. Three presence tiers: `required` = present AND
+      non-null; `requiredNullable` = the key is always sent but null is a legitimate value (absent
+      key ⇒ CRITICAL, null ⇒ silent); `optional` = tolerated absent (null ⇒ WARN). See the README's
+      "Which presence tier?" table — mis-tiering is what turns this gate into ignorable noise.
     required: false
     default: ''
   fail-on-critical:

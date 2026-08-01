@@ -165,6 +165,88 @@ console.log('\n# minimal contract (endpoints-map mode): encoding/transport floor
   check('no-contract payload: empty-slug auto-detect still CRITICAL', sevOf(analyzePayload({ name: 'x', url: 'u', status: 200, json: { slug: '' }, contract: {} }).findings, 'invariant-slug').includes(SEV.CRIT));
 }
 
+console.log('\n# requiredNullable — the present-but-may-be-null tier');
+{
+  // Modelled on lampakia's hlek/v1: the producer ALWAYS sends these keys and null is their normal
+  // state (no sale / unmanaged stock / no image), while the consumer's Zod declares them
+  // `z.number().nullable()` — nullable but NOT optional, so an absent KEY fails its parse.
+  // Deliberately non-money field names: a price-shaped name would earn the number↔string
+  // exemption and mask the retype case below.
+  const NULLABLE_PRODUCT = { id: 7, slug: 'lamp', name: 'Lamp', sale_cents: 1005, stock_qty: null, image: null };
+  const NULLABLE_CONTRACT = {
+    required: ['id', 'slug', 'name'],
+    requiredNullable: ['sale_cents', 'stock_qty', 'image'],
+    types: { id: 'number', slug: 'string', name: 'string', sale_cents: 'number', stock_qty: 'number', image: 'string' },
+  };
+  const N = (json, contract = NULLABLE_CONTRACT) => A(json, contract);
+
+  // 1. present-and-null is the HEALTHY case — the whole reason the tier exists.
+  {
+    const fs = N(clone(NULLABLE_PRODUCT));
+    const noisy = fs.filter((x) => x.sev !== SEV.OK);
+    check('two of three nullable fields null → zero crit/warn (silent on null)', noisy.length === 0,
+      `got: ${JSON.stringify(noisy.map((x) => x.id + ':' + x.sev + ':' + x.msg))}`);
+  }
+  // 2. an absent KEY is the break — same severity as required-present, because the consumer's
+  //    `z.number().nullable()` rejects `undefined` exactly as it rejects a missing required field.
+  {
+    const p = clone(NULLABLE_PRODUCT); delete p.sale_cents;
+    const fs = N(p);
+    const miss = fs.find((x) => x.id === 'required-present' && x.sev === SEV.CRIT);
+    check('requiredNullable key ABSENT → required-present CRITICAL', !!miss);
+    check('  …and its id is in the T0 blocking core', !!miss && T0_CHECKS.has(miss.id));
+    check('  …and the message names the nullable tier, not plain required',
+      !!miss && /required-nullable/.test(miss.msg), `got: ${miss && miss.msg}`);
+  }
+  // 3. a non-null value is still type-graded — the tier relaxes NULLABILITY, never the type.
+  {
+    const p = clone(NULLABLE_PRODUCT); p.sale_cents = '1005'; // number → string on a NON-money field
+    check('requiredNullable present with wrong non-null type → required-type CRITICAL', sevOf(N(p), 'required-type').includes(SEV.CRIT));
+  }
+  {
+    const p = clone(NULLABLE_PRODUCT); p.image = 42; // string → number
+    check('requiredNullable string→number → required-type CRITICAL', sevOf(N(p), 'required-type').includes(SEV.CRIT));
+  }
+  // 4. the noise-suppression property: null must NOT produce optional-null even when a manifest
+  //    names the path in BOTH tiers. This is what makes the tier usable weekly.
+  {
+    const contract = { ...NULLABLE_CONTRACT, optional: ['stock_qty', 'image'] };
+    check('path in requiredNullable AND optional → null does NOT fire optional-null', !sevOf(N(clone(NULLABLE_PRODUCT), contract), 'optional-null').includes(SEV.WARN));
+  }
+  // 5. `required` is strictly stronger and wins when a manifest contradicts itself by naming a
+  //    path in both tiers — no downgrade of null, and ONE finding per defect.
+  {
+    const contract = { ...NULLABLE_CONTRACT, required: [...NULLABLE_CONTRACT.required, 'stock_qty'] };
+    const fs = N(clone(NULLABLE_PRODUCT), contract); // stock_qty present-but-null
+    check('path in BOTH required and requiredNullable → null still CRITICAL (required wins, no downgrade)', sevOf(fs, 'required-present').includes(SEV.CRIT));
+  }
+  {
+    // The ABSENT case is what actually exercises the de-dup guard: null short-circuits the
+    // nullable loop on its own, so only a missing key can produce two findings for one defect.
+    const contract = { ...NULLABLE_CONTRACT, required: [...NULLABLE_CONTRACT.required, 'stock_qty'] };
+    const p = clone(NULLABLE_PRODUCT); delete p.stock_qty;
+    const fs = N(p, contract);
+    check('path in BOTH tiers and ABSENT → exactly one required-present finding (no double-report)',
+      fs.filter((x) => x.id === 'required-present').length === 1,
+      `got: ${JSON.stringify(fs.filter((x) => x.id === 'required-present').map((x) => x.msg))}`);
+  }
+  // 6. a field declared ONLY as requiredNullable is a KNOWN field for the expectFields sweep.
+  {
+    const contract = { ...NULLABLE_CONTRACT, types: { id: 'number' }, expectFields: ['id', 'slug', 'name'], allowExtra: false };
+    check('requiredNullable field is not reported as an unexpected-field', !sevOf(N(clone(NULLABLE_PRODUCT), contract), 'unexpected-field').includes(SEV.WARN));
+  }
+  // 7. ADDITIVE-SAFETY: the tier is inert for every manifest that doesn't use it. This is what
+  //    lets the key ship as a v1 tag move across all callers instead of a v2 break.
+  {
+    const before = A(clone(GOOD_WC_PRODUCT), WC_CONTRACT);
+    const after = A(clone(GOOD_WC_PRODUCT), { ...WC_CONTRACT, requiredNullable: [] });
+    check('a manifest WITHOUT requiredNullable is graded identically (additive, not breaking)',
+      JSON.stringify(before) === JSON.stringify(after));
+    const p = clone(GOOD_WC_PRODUCT); delete p.sale_price; // optional, absent — still tolerated
+    check('  …and an absent OPTIONAL field is still tolerated (no new block)', !sevOf(A(p), 'required-present').includes(SEV.CRIT));
+  }
+}
+
 console.log('\n# T1 drift (WARN by default, promotable)');
 {
   const p = clone(GOOD_WC_PRODUCT); p.sale_price = null;

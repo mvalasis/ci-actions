@@ -16,7 +16,7 @@ export const SEV = { CRIT: 'critical', WARN: 'warn', INFO: 'info', OK: 'ok' };
 // break of the consumer contract: a missing/retyped required field, or a money/encoding
 // invariant. These are what a backend change must never silently do to a live consumer.
 export const T0_CHECKS = new Set([
-  'required-present',   // a declared required field is missing/null
+  'required-present',   // a declared required field is missing/null, OR a requiredNullable field's KEY is absent
   'required-type',      // a declared required field changed JS type
   'invariant-price',    // a price field is present but <= 0 (free items must be declared, not zero-by-accident)
   'invariant-vat',      // inc-VAT < ex-VAT when BOTH present (over-discounted / mis-ordered totals)
@@ -105,9 +105,9 @@ const PRICE_FIELD_RE = /(^|[._-])(price|regular_price|sale_price|total|subtotal|
 // ---------- the per-payload analyzer ----------
 
 // input: { name, url, status, contentType, json (parsed) OR parseError, contract }
-//   contract = { required?: string[], types?: {path:type}, invariants?: string[],
-//                optional?: string[], nonEmpty?: boolean, allowExtra?: boolean,
-//                expectFields?: string[], money?: string[], slug?: string[] }
+//   contract = { required?: string[], requiredNullable?: string[], types?: {path:type},
+//                invariants?: string[], optional?: string[], nonEmpty?: boolean,
+//                allowExtra?: boolean, expectFields?: string[], money?: string[], slug?: string[] }
 // Returns { name, url, status, findings }.
 export function analyzePayload(input) {
   const { name, url, status, contract = {} } = input;
@@ -183,8 +183,33 @@ export function analyzePayload(input) {
       if (got) add(f('required-type', SEV.CRIT, `required field \`${path}\` changed type: expected ${expected}, got ${got}`));
     }
   }
+  // ---- requiredNullable: the KEY must be present, but null is a legitimate VALUE (T0 on absence) ----
+  // The third presence tier. `required` = present AND non-null; `optional` = tolerated absent (and a
+  // present null is drift worth a WARN). Neither can say "the producer ALWAYS sends this key, and
+  // null is a normal value for it" — the shape a consumer declares as `z.number().nullable()`, where
+  // an outright key OMISSION fails the parse but null is expected and handled.
+  //
+  // Both existing tiers mis-model it. `optional` fires optional-null on every healthy run (lampakia's
+  // `sale_cents` is null on 1712/1712 live products), and a gate that cries wolf weekly gets ignored.
+  // `types`-only — the previous workaround — type-checks a non-null value but catches NEITHER the
+  // null NOR the omission, so the field is effectively unchecked for presence.
+  //
+  // Absence reports under the SAME id as `required` because the consumer breaks identically: one T0
+  // id per defect class, so the documented CRITICAL core neither grows nor changes meaning.
+  const requiredNullable = Array.isArray(contract.requiredNullable) ? contract.requiredNullable : [];
+  for (const path of requiredNullable) {
+    if (required.includes(path)) continue; // `required` is strictly stronger and already graded this path
+    const { found, value } = getPath(subject, path);
+    if (!found || value === undefined) {
+      add(f('required-present', SEV.CRIT, `required-nullable field \`${path}\` is MISSING — null is an accepted value for it, an absent key is not`));
+    }
+    // A non-null value is type-checked by the `types` loop below (which skips nulls) — so a retype
+    // is still caught, while a null passes silently. That skip IS the tier.
+  }
+
   // type expectations on NON-required fields: a declared type that's wrong is still a break,
-  // but a missing optional-typed field is fine (only flagged via optional-null below).
+  // but a missing optional-typed field is fine (only flagged via optional-null below). This is
+  // also what grades a requiredNullable field's non-null values.
   for (const [path, expected] of Object.entries(types)) {
     if (required.includes(path)) continue;
     const { found, value } = getPath(subject, path);
@@ -280,7 +305,11 @@ export function analyzePayload(input) {
 
   // ---- T1/T2 drift ----
   // optional fields that came back null (consumer should tolerate, but flag the drift)
+  const nullableSet = new Set(requiredNullable);
   for (const path of (Array.isArray(contract.optional) ? contract.optional : [])) {
+    // A path ALSO declared requiredNullable has null as its normal state, not drift — suppress,
+    // so a manifest that names it in both tiers still gets the quiet gate the tier exists for.
+    if (nullableSet.has(path)) continue;
     const { found, value } = getPath(subject, path);
     if (found && value === null) add(f('optional-null', SEV.WARN, `optional field \`${path}\` is null`));
   }
@@ -289,7 +318,7 @@ export function analyzePayload(input) {
   // a consumer's strict schema might reject, so WARN.
   const expectFields = Array.isArray(contract.expectFields) ? contract.expectFields : null;
   if (expectFields && contract.allowExtra !== true && subject && typeof subject === 'object' && !Array.isArray(subject)) {
-    const known = new Set([...expectFields, ...required, ...Object.keys(types), ...(contract.optional || []), ...declaredMoney, ...declaredSlug]);
+    const known = new Set([...expectFields, ...required, ...requiredNullable, ...Object.keys(types), ...(contract.optional || []), ...declaredMoney, ...declaredSlug]);
     const extra = Object.keys(subject).filter((k) => !known.has(k));
     if (extra.length) add(f('unexpected-field', SEV.WARN, `payload has ${extra.length} field(s) not in the contract: ${extra.slice(0, 8).join(', ')}`));
   }

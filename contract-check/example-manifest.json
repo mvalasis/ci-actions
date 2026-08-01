@@ -1,10 +1,11 @@
 {
-  "_comment": "Example committed contract for the WP/WC REST payloads a headless consumer reads. Copy into the CONSUMER repo (e.g. contract/wp-rest.json) and point the action's `manifest` input at it. Each entry describes ONE item's shape; a list endpoint is validated against its first element.",
+  "_comment": "Example committed contract for the WP/WC REST payloads a headless consumer reads. Copy into the CONSUMER repo (e.g. contract/wp-rest.json) and point the action's `manifest` input at it. Each entry describes ONE item's shape; a list endpoint is validated against its first element. Note the THREE presence tiers below — `required` (present AND non-null), `requiredNullable` (key always sent, null legitimate: absent ⇒ CRITICAL, null ⇒ silent), and `optional` (tolerated absent, null ⇒ WARN). Picking the wrong one is what turns the gate into weekly noise; see the README's 'Which presence tier?' table.",
   "endpoints": [
     {
       "name": "wc-store-product",
       "url": "https://cms.example.gr/wp-json/wc/store/products?per_page=1",
       "required": ["id", "name", "slug", "permalink", "prices", "is_in_stock"],
+      "requiredNullable": ["low_stock_remaining"],
       "types": {
         "id": "number",
         "name": "string",
@@ -12,6 +13,7 @@
         "permalink": "string",
         "prices": "object",
         "is_in_stock": "boolean",
+        "low_stock_remaining": "number",
         "images": "array"
       },
       "money": ["prices.price", "prices.regular_price"],
