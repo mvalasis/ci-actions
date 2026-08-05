@@ -41,7 +41,25 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.10.0**.
+`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.11.0**.
+
+**v1.11.0** — `deps-currency`'s crash guard was **dead code** from the action's
+first commit until 2026-08-05: `process.on('uncaughtException', …)` sat *below*
+the `main()` IIFE, which is evaluated at module load and exits, so the handler
+was never registered. A scanner fault therefore exited 1 regardless of
+`fail-on-vuln` **and** wrote nothing to the step summary (the report is appended
+at the end of `main`), losing the intended exit code and the diagnostic
+together. Hoisted, so a scanner fault now reports itself and exits
+`fail-on-vuln ? 1 : 0` — the report-mode-first rule the other five JS
+entrypoints already got for free from their `(async () => {…})().catch(…)`
+shape. **Caller-visible:** a report-mode caller whose scan crashes goes green
+instead of red; an enforcing caller is unchanged. The sibling sweep found the
+pattern was never copied — `deps-currency` was the only instance —
+and `verify-homepage` / `linkcheck` / `a11y-audit` keep no guard at all, which
+is honest rather than dead. Now blocked statically by `.github/workflows/lint.yml`
+(rule 2) and asserted behaviourally by `deps-currency/scripts/selftest.mjs`,
+which crashes the real scanner rather than grepping it for a line position.
+
 **v1.10.0** — `deps-currency` + `security-baseline` stop deriving "first-party"
 from the **caller's** owner, because the action's owner and the caller's owner
 are no longer the same account (2026-08-05). On **2026-08-02..04** eleven fleet

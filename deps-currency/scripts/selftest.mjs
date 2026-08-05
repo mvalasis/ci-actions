@@ -350,5 +350,63 @@ console.log('\n# report rendering is deterministic + spoof-safe');
   check('safe() caps length', safe('x'.repeat(500), 50).length === 50);
 }
 
+// ---------------------------------------------------------------------------
+// The crash guard is BEHAVIOURAL, so assert it by crashing the real scanner —
+// not by grepping scan.mjs for the handler's position. From the action's first
+// commit until 2026-08-05 the handler sat BELOW the `main()` IIFE, which runs at
+// module load and exits, so it was unreachable: a scanner fault exited 1
+// unconditionally and wrote NOTHING to the step summary. A textual assertion
+// would have to encode "above the IIFE" and would go vacuous the moment the file
+// is restructured; running it cannot.
+//
+// Still offline — the injected throw is main's FIRST statement, so no osv-scanner,
+// no gh, no network.
+console.log('\n# crash guard (real scan.mjs, injected fault)');
+{
+  const source = fs.readFileSync(path.join(HERE, 'scan.mjs'), 'utf8');
+  const ANCHOR = '(function main() {';
+
+  // Fail CLOSED: if the anchor is gone the mutation is silently a no-op and the
+  // assertions below would pass against a scanner that never crashed at all.
+  check('fault-injection anchor still present in scan.mjs', source.includes(ANCHOR),
+    `(expected to find ${JSON.stringify(ANCHOR)} — if main was renamed, update this test)`);
+
+  if (source.includes(ANCHOR)) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'deps-currency-crash-'));
+    try {
+      fs.copyFileSync(path.join(HERE, "engine.mjs"), path.join(tmp, "engine.mjs"));
+      fs.writeFileSync(path.join(tmp, 'scan.mjs'),
+        source.replace(ANCHOR, `${ANCHOR}\n  throw new Error('injected scanner fault');`));
+
+      const crash = (failOnVuln) => {
+        const summary = path.join(tmp, `summary-${failOnVuln}.md`);
+        fs.writeFileSync(summary, '');
+        const r = spawnSync(process.execPath, [path.join(tmp, 'scan.mjs')], {
+          encoding: 'utf8',
+          env: { ...process.env, GITHUB_STEP_SUMMARY: summary, FAIL_ON_VULN: String(failOnVuln), MANAGE_ISSUE: 'false' },
+        });
+        return { status: r.status, summary: fs.readFileSync(summary, 'utf8') };
+      };
+
+      const report = crash(false);
+      const enforce = crash(true);
+
+      // The guard ran at all — this is the assertion the shipped code failed.
+      check('a scanner fault is reported into the step summary',
+        report.summary.includes('deps-currency crashed') && report.summary.includes('injected scanner fault'),
+        `(got ${JSON.stringify(report.summary.slice(0, 120))})`);
+      // …and both exit codes, which is the half that is a product decision.
+      check('report mode: a crash exits 0 (a scanner fault must not block a green repo)',
+        report.status === 0, `(exit ${report.status})`);
+      check('fail-on-vuln: a crash exits 1 (conservative for an enforcing caller)',
+        enforce.status === 1, `(exit ${enforce.status})`);
+      check('fail-on-vuln crash is reported too',
+        enforce.summary.includes('deps-currency crashed'));
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+}
+
 console.log(failed === 0 ? '\n✅ all deps-currency engine self-tests passed\n' : `\n❌ ${failed} self-test(s) failed\n`);
 process.exit(failed === 0 ? 0 : 1);

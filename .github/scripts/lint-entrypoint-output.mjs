@@ -2,6 +2,11 @@
 // ---------------------------------------------------------------------------
 // lint-entrypoint-output — repo-internal hygiene gate (NOT a shipped action).
 //
+// TWO RULES, one theme: defects in action entrypoints that a green run cannot
+// distinguish from correct code.
+//   1. async stdout writes before process.exit()  — see below.
+//   2. crash guards registered after main runs     — see "rule 2" further down.
+//
 // THE DEFECT CLASS THIS EXISTS TO KILL
 // `process.stdout` / `process.stderr` writes are ASYNC when the fd is a pipe on
 // macOS (they are synchronous on Linux and Windows, and synchronous to a TTY or
@@ -178,6 +183,115 @@ export function blankNonCode(src) {
   return out.join('');
 }
 
+// ---------- rule 2: crash-guard ordering ----------
+// THE DEFECT CLASS: `process.on('uncaughtException', …)` registered BELOW the main
+// IIFE. The IIFE is evaluated at module load and every path through it ends in
+// `process.exit()`, so the registration is unreachable — the guard is dead code
+// that has never run. It reads as defensive and reviews as fine, which is exactly
+// why it survived from deps-currency's first commit to 2026-08-05.
+//
+// Two ways it stays dead, both silent:
+//   - main succeeds → process.exit() terminates before the registration line;
+//   - main throws   → module evaluation aborts at the throw, never reaching it.
+// Either way the crash exits 1 with a bare stack and writes NOTHING to the step
+// summary (the report is appended at the END of main), so the operator loses both
+// the intended exit code and the intended diagnostic.
+//
+// THE RULE: a top-level crash-guard registration must not be preceded by a
+// top-level statement that can terminate the process — a direct `process.exit(`
+// or an invoked top-level IIFE. Deliberately strict: hoisting the guard to the
+// top is always free and always correct, so there is no shape worth excusing and
+// no dataflow analysis needed. The five sibling entrypoints register via
+// `(async () => {…})().catch(…)`, which is ordering-immune and never trips this.
+const GUARD_EVENTS = /uncaughtException|unhandledRejection/;
+
+// Depth of each character, with closers already popped — so a character that
+// belongs to a top-level statement reads 0.
+function depthMap(code) {
+  const d = new Array(code.length);
+  let depth = 0;
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i];
+    if (c === ')' || c === ']' || c === '}') depth--;
+    d[i] = depth;
+    if (c === '(' || c === '[' || c === '{') depth++;
+  }
+  return d;
+}
+
+// Top-level `(…)()` invocations — the main-IIFE shape in both its sync
+// (`(function main(){…})();`) and async (`(async () => {…})();`) spellings.
+// Returns the index just past the trailing `()`.
+function iifeInvocations(code, d) {
+  const ends = [];
+  for (let i = 0; i < code.length; i++) {
+    if (code[i] !== ')' || d[i] !== 0) continue;
+    let k = i + 1;
+    while (k < code.length && /\s/.test(code[k])) k++;
+    if (code[k] !== '(') continue;
+    let m = k + 1;
+    while (m < code.length && /\s/.test(code[m])) m++;
+    if (code[m] !== ')') continue;
+    // Confirm the `)` at i actually closes a top-level group (balanced walk back).
+    let bal = 0, start = -1;
+    for (let b = i - 1; b >= 0; b--) {
+      const c = code[b];
+      if (c === ')' || c === ']' || c === '}') bal++;
+      else if (c === '(' || c === '[' || c === '{') {
+        if (bal === 0 && c === '(') { start = b; break; }
+        bal--;
+      }
+    }
+    if (start === -1) continue;
+    ends.push(m);
+    i = m;
+  }
+  return ends;
+}
+
+export function lintCrashGuardOrder(src, file = '<input>') {
+  const code = blankNonCode(src);
+  const d = depthMap(code);
+  const findings = [];
+
+  // Earliest top-level statement that can terminate the process.
+  const terminators = iifeInvocations(code, d);
+  const exitRe = /\bprocess\s*\.\s*exit\s*\(/g;
+  let m;
+  while ((m = exitRe.exec(code)) !== null) {
+    if (d[m.index] === 0) terminators.push(m.index);
+  }
+  if (terminators.length === 0) return findings;
+  const firstTerminator = Math.min(...terminators);
+
+  // Line starts, for translating an offset into line/col.
+  const lineAt = (idx) => {
+    let line = 1, col = idx + 1;
+    for (let i = 0; i < idx; i++) if (code[i] === '\n') { line++; col = idx - i; }
+    return { line, col };
+  };
+
+  const onRe = /\bprocess\s*\.\s*on\s*\(/g;
+  const rawLines = src.split('\n');
+  while ((m = onRe.exec(code)) !== null) {
+    if (d[m.index] !== 0) continue;               // registered inside a function — not our class
+    if (m.index < firstTerminator) continue;      // armed before anything runs — correct
+    // The event name lives in a string literal, which the scrubber blanked; read it raw.
+    const { line, col } = lineAt(m.index);
+    const raw = src.slice(m.index, m.index + 80);
+    if (!GUARD_EVENTS.test(raw)) continue;        // some other process.on — out of scope
+    const ev = raw.match(GUARD_EVENTS)[0];
+    const tl = lineAt(firstTerminator).line;
+    findings.push({
+      file, line, col, kind: 'dead-crash-guard',
+      what: `process.on('${ev}'`,
+      text: (rawLines[line - 1] || '').trim(),
+      detail: `registered at line ${line}, but the process can already have exited at line ${tl}`,
+    });
+  }
+  return findings;
+}
+
 // ---------- matcher ----------
 const BANNED = [
   { re: /\bconsole\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/g, name: (m) => `console.${m[1]}(` },
@@ -211,11 +325,12 @@ export function lintSource(src, file = '<input>') {
         // Pragma is read from the RAW line (it lives in a comment, which the
         // scrubber blanked) — same line, or the line directly above.
         if (PRAGMA.test(rawLines[i] || '') || PRAGMA.test(rawLines[i - 1] || '')) continue;
-        findings.push({ file, line: i + 1, col: m.index + 1, what: name(m), text: rawLines[i].trim() });
+        findings.push({ file, line: i + 1, col: m.index + 1, kind: 'raw-output', what: name(m), text: rawLines[i].trim() });
       }
     }
   }
-  return findings;
+  findings.push(...lintCrashGuardOrder(src, file));
+  return findings.sort((a, b) => a.line - b.line || a.col - b.col);
 }
 
 // ---------- entrypoint discovery ----------
@@ -235,6 +350,26 @@ export function discoverEntrypoints(root) {
   }
   return files.sort();
 }
+
+const REMEDY_GUARD = [
+  '',
+  'Why this is a finding:',
+  '  A crash guard registered below the main IIFE is DEAD CODE. The IIFE runs at',
+  '  module load and every path through it ends in process.exit(), so the line is',
+  '  never reached — and if main throws instead, module evaluation aborts at the',
+  '  throw, which does not reach it either. The crash then exits 1 with a bare',
+  '  stack and writes NOTHING to the step summary. Shipped this way in',
+  '  deps-currency from its first commit until 2026-08-05.',
+  '',
+  'Fix — hoist the registration above the invocation (always free, always correct):',
+  "  process.on('uncaughtException', (e) => { …report…; process.exit(FAIL_ON_X ? 1 : 0); });",
+  '',
+  '  (function main() { … })();',
+  '',
+  '  …or use the sibling shape, which is ordering-immune because the handler is',
+  '  attached to the promise rather than to the process:',
+  '  (async () => { … })().catch((e) => { …report…; process.exit(FAIL_ON_X ? 1 : 0); });',
+];
 
 const REMEDY = [
   '',
@@ -276,33 +411,41 @@ function main() {
   if (findings.length === 0) {
     // Name every file scanned: a green run has to be auditable, or "0 findings"
     // is indistinguishable from "scanned nothing".
-    say(`lint-entrypoint-output: ✅ clean — ${files.length} action entrypoint(s), no raw stdout/stderr writes`);
+    say(`lint-entrypoint-output: ✅ clean — ${files.length} action entrypoint(s), no raw stdout/stderr writes, no dead crash guards`);
     for (const f of files) say(`  · ${f}`);
     return 0;
   }
 
   say(`lint-entrypoint-output: ❌ ${findings.length} finding(s) across ${files.length} scanned entrypoint(s)`);
   say('');
+  const guards = findings.filter((f) => f.kind === 'dead-crash-guard');
+  const raws = findings.filter((f) => f.kind !== 'dead-crash-guard');
   for (const f of findings) {
     // Annotation content is derived from our own repo tree, never from input.
-    say(`::error file=${f.file},line=${f.line},col=${f.col}::${f.what} in an action entrypoint — output must go through a synchronous write (fs.writeSync), not an async stdout/stderr write. See .github/scripts/lint-entrypoint-output.mjs`);
+    const msg = f.kind === 'dead-crash-guard'
+      ? `${f.what} is registered AFTER the entrypoint's main invocation — ${f.detail}, so the guard is dead code and has never run. Hoist it above the invocation. See .github/scripts/lint-entrypoint-output.mjs`
+      : `${f.what} in an action entrypoint — output must go through a synchronous write (fs.writeSync), not an async stdout/stderr write. See .github/scripts/lint-entrypoint-output.mjs`;
+    say(`::error file=${f.file},line=${f.line},col=${f.col}::${msg}`);
     say(`  ${f.file}:${f.line}:${f.col}  ${f.what}`);
     say(`      ${f.text}`);
   }
-  for (const l of REMEDY) say(l);
+  if (raws.length) for (const l of REMEDY) say(l);
+  if (guards.length) for (const l of REMEDY_GUARD) say(l);
 
   const summary = process.env.GITHUB_STEP_SUMMARY;
   if (summary) {
     const md = [
       '### ❌ lint-entrypoint-output',
       '',
-      `${findings.length} raw stdout/stderr write(s) in action entrypoints. \`process.exit()\` does not drain an async write, so the output truncates at 64 KiB on macOS pipes.`,
+      raws.length ? `${raws.length} raw stdout/stderr write(s) in action entrypoints. \`process.exit()\` does not drain an async write, so the output truncates at 64 KiB on macOS pipes.` : '',
+      guards.length ? `${guards.length} crash guard(s) registered after the main invocation — dead code that has never run.` : '',
       '',
-      '| file | line | call |',
+      '| file | line | finding |',
       '| --- | --- | --- |',
-      ...findings.map((f) => `| \`${f.file}\` | ${f.line} | \`${f.what}\` |`),
+      ...findings.map((f) => `| \`${f.file}\` | ${f.line} | \`${f.what}\`${f.kind === 'dead-crash-guard' ? ' — dead crash guard' : ''} |`),
       '',
-      'Fix: emit through `say`/`sayErr` (`fs.writeSync`) or `fs.appendFileSync(summaryFile, …)`.',
+      raws.length ? 'Fix: emit through `say`/`sayErr` (`fs.writeSync`) or `fs.appendFileSync(summaryFile, …)`.' : '',
+      guards.length ? 'Fix: hoist the `process.on(...)` registration above the main IIFE invocation.' : '',
       '',
     ].join('\n');
     try { fs.appendFileSync(summary, md + '\n'); } catch { /* summary is best-effort */ }

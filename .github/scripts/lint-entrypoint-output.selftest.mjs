@@ -137,6 +137,71 @@ check('pragma two lines above does NOT excuse',
   count('// lint-allow-raw-output: stale', '', 'console.log(x);') === 1);
 
 // ---------------------------------------------------------------------------
+// Rule 2. The load-bearing fixture is the PAIR below: the same source differing
+// ONLY in where the guard sits. If the rule ever goes vacuous, the dead variant
+// stops firing while the live one still reads 0, and this pair catches it —
+// asserting one direction alone would not (ci-actions has already shipped a
+// 5-week-live defect behind a fixture that pinned only one direction).
+say('\n# rule 2 — crash guards registered after main is dead code');
+
+const IIFE_BODY = src(
+  'const summaryFile = process.env.GITHUB_STEP_SUMMARY;',
+  '(function main() {',
+  '  fs.appendFileSync(summaryFile, report);',
+  '  process.exit(blocked ? 1 : 0);',
+  '})();',
+);
+const GUARD = "process.on('uncaughtException', (e) => { process.exit(FAIL ? 1 : 0); });";
+
+check('DEAD — guard below the main IIFE fires (the deps-currency shape)',
+  count(IIFE_BODY, GUARD) === 1);
+check('LIVE — the same source with the guard hoisted is clean',
+  count(GUARD, IIFE_BODY) === 0,
+  '(if this and the line above are not 1/0, the rule has gone vacuous)');
+
+check('DEAD — guard below an async IIFE fires',
+  count('(async () => { process.exit(0); })();', GUARD) === 1);
+check('DEAD — unhandledRejection is covered too',
+  count(IIFE_BODY, "process.on('unhandledRejection', (e) => { process.exit(1); });") === 1);
+check('DEAD — guard below a top-level process.exit() fires',
+  count('process.exit(2);', GUARD) === 1);
+
+check('LIVE — the sibling .catch() shape never trips the rule',
+  count('(async () => { process.exit(0); })().catch((e) => { process.exit(FAIL ? 1 : 0); });') === 0);
+check('LIVE — a file with no terminator at all is clean',
+  count('const a = 1;', GUARD) === 0);
+check('LIVE — a benign top-level IIFE that cannot exit is still a terminator (strict by design)',
+  count('const v = (() => 1)();', GUARD) === 1,
+  '(hoisting is free, so the rule does not try to prove the IIFE exits)');
+
+check('scoped to top level — a guard registered inside a function is not flagged',
+  count(IIFE_BODY, 'function arm() {', `  ${GUARD}`, '}') === 0);
+check('non-crash process.on events are out of scope',
+  count(IIFE_BODY, "process.on('SIGINT', () => {});", "process.on('exit', () => {});") === 0);
+
+// The scrubber has to hold for rule 2 as well — the event name is read from the
+// RAW line precisely because the scrubber blanked the string literal it lives in.
+check('comment mentioning uncaughtException is not a registration',
+  count(IIFE_BODY, '// process.on(\'uncaughtException\') would be dead here') === 0);
+check('string containing the registration text is not a registration',
+  count(IIFE_BODY, 'const hint = "process.on(\'uncaughtException\', f)";') === 0);
+
+check('reports the guard line and the terminator line',
+  (() => {
+    const f = findings(IIFE_BODY, GUARD).find((x) => x.kind === 'dead-crash-guard');
+    return f && f.line === 6 && f.detail.includes('line 5') && f.what === "process.on('uncaughtException'";
+  })(),
+  JSON.stringify(findings(IIFE_BODY, GUARD)));
+
+check('rule 2 findings are tagged, and do not disturb rule 1 tagging',
+  (() => {
+    const f = findings(IIFE_BODY, 'console.log(x);', GUARD);
+    return f.length === 2
+      && f.filter((x) => x.kind === 'raw-output').length === 1
+      && f.filter((x) => x.kind === 'dead-crash-guard').length === 1;
+  })());
+
+// ---------------------------------------------------------------------------
 say('\n# discovery — action entrypoints, not selftests');
 
 const root = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');

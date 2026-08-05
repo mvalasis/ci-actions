@@ -3,14 +3,25 @@ name: lint
 # Repo-internal hygiene gate — NOT consumed by any caller, so a change here
 # needs no version bump and no `v1` tag move.
 #
-# Guards one defect class that has already been fixed by hand twice (test-suite
-# v1.7.0, verify-homepage v1.7.1): an action entrypoint that emits its report
-# with console.log/process.stdout.write and then calls process.exit(). Those
-# writes are ASYNC on macOS pipes and process.exit() does not drain them, so the
-# report truncates at the 65,536-byte pipe buffer — silently, with a zero exit
-# code. CI is Linux, where the writes are synchronous, so the bug is LATENT here
-# and only bites on local runs. That is exactly why it survived review twice, and
-# why this job is blocking rather than report-mode.
+# Guards two defect classes in action entrypoints. Both are INVISIBLE on a green
+# CI run, which is why they survived review and why this job blocks rather than
+# reports.
+#
+# 1. ASYNC STDOUT (fixed by hand twice: test-suite v1.7.0, verify-homepage
+#    v1.7.1) — an entrypoint that emits its report with
+#    console.log/process.stdout.write and then calls process.exit(). Those writes
+#    are ASYNC on macOS pipes and process.exit() does not drain them, so the
+#    report truncates at the 65,536-byte pipe buffer — silently, with a zero exit
+#    code. CI is Linux, where the writes are synchronous, so the bug is LATENT
+#    here and only bites on local runs.
+#
+# 2. DEAD CRASH GUARD (found 2026-08-05 in deps-currency, live since its first
+#    commit) — a `process.on('uncaughtException', …)` registered BELOW the main
+#    IIFE. The IIFE runs at module load and exits, so the registration is
+#    unreachable: the guard had never run, a scanner fault exited 1 regardless of
+#    fail-on-vuln, and nothing was written to the step summary. Nothing about a
+#    passing run distinguishes a working guard from a dead one — only a crash
+#    does, and by then the diagnostic is already lost.
 #
 # No `paths:` filter, deliberately: the gate must also re-run when a NEW action
 # directory lands (entrypoints are discovered from `action.yml`, not a list) and
@@ -41,5 +52,5 @@ jobs:
       - name: Lint self-test (scrubber + matcher fixtures)
         run: node .github/scripts/lint-entrypoint-output.selftest.mjs
 
-      - name: No async stdout/stderr writes in action entrypoints
+      - name: No async stdout writes, no dead crash guards, in action entrypoints
         run: node .github/scripts/lint-entrypoint-output.mjs

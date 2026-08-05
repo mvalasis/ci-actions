@@ -32,6 +32,13 @@ blocking only after it has cleared its backlog.
   **`deps-currency: dependency advisories`** tracking issue, auto-closing it when the next run is
   clean — the same issue lifecycle as `linkcheck`.
 - Exits non-zero **only** when `fail-on-vuln: true` **and** an advisory at/above the floor exists.
+- **A scanner fault is not a finding.** If the scan itself crashes, the report says so
+  (`❌ deps-currency crashed: …` in the job summary) and the exit code follows the same
+  report-mode-first rule: **0** under the default, **1** only under `fail-on-vuln: true`. A broken
+  scanner therefore never newly-blocks a report-mode caller — matching every sibling action. (This
+  guard was dead code from the action's first commit until 2026-08-05: it was registered *below* the
+  `main()` IIFE, which exits, so it never ran. `.github/workflows/lint.yml` now blocks that ordering
+  statically, and `scripts/selftest.mjs` asserts it by crashing the real scanner.)
 
 ## Use it — on a SCHEDULE (this is a cron action)
 

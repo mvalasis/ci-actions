@@ -143,6 +143,22 @@ function manageIssue(decision, body) {
 }
 
 // ============================ main ============================
+// Defensive crash guard: a scan engine fault must not block a green repo unless we're an enforcing
+// caller AND there were no findings to evaluate (we can't know) — so a crash exits 0 in report
+// mode, 1 only under fail-on-vuln (conservative for an enforcing caller). Matches the crash
+// semantics the five sibling entrypoints already ship via `(async () => {…})().catch(…)`.
+//
+// ORDERING IS LOAD-BEARING — this MUST stay above the `main()` invocation below. It sat BELOW it
+// from the action's first commit until 2026-08-05: the IIFE is evaluated at module load and every
+// path through it ends in process.exit(), so the registration was unreachable and the guard had
+// never once run. A crash exited 1 unconditionally with a bare stack trace and — because the
+// report is appended only at the END of main — wrote NOTHING to the step summary. Statically
+// enforced now by .github/scripts/lint-entrypoint-output.mjs (crash-guard ordering rule).
+process.on('uncaughtException', (e) => {
+  try { fs.appendFileSync(summaryFile, `\n- ❌ deps-currency crashed: ${safe(String((e && e.stack) || e), 400)}\n`); } catch { /* ignore */ }
+  process.exit(FAIL_ON_VULN ? 1 : 0);
+});
+
 (function main() {
   const { ecosystems, lockfiles } = resolveEcosystems();
   const { findings } = runOsv();
@@ -190,11 +206,3 @@ function manageIssue(decision, body) {
 
   process.exit(blocked ? 1 : 0);
 })();
-
-// Defensive crash guard: a scan engine fault must not block a green repo unless we're an enforcing
-// caller AND there were no findings to evaluate (we can't know) — so a crash exits 0 in report
-// mode, 1 only under fail-on-vuln (conservative for an enforcing caller).
-process.on('uncaughtException', (e) => {
-  try { fs.appendFileSync(summaryFile, `\n- ❌ deps-currency crashed: ${safe(String((e && e.stack) || e), 400)}\n`); } catch { /* ignore */ }
-  process.exit(FAIL_ON_VULN ? 1 : 0);
-});
