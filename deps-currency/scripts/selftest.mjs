@@ -1,13 +1,29 @@
 // Offline self-test for the deps-currency engine. No network, no osv-scanner, no gh — feeds a
 // SAVED osv-scanner JSON output fixture (one CRITICAL vuln, one LOW vuln) + workflow-text fixtures
 // to the pure engine and asserts: severity-floor filtering, issue open/close decision, clean→close,
-// block decision (fail-on-vuln), unpinned-action detection, and the report-spoofing/disclosure
-// guard. Run: node scripts/selftest.mjs (also runs in CI). Exits non-zero on any regression —
-// the action's own regression guard, mirroring security-baseline/selftest.mjs.
+// block decision (fail-on-vuln), unpinned-action detection, the first-party OWNER-SET derivation
+// (caller ∪ action ∪ declared extras — the 2026-08 ownership split), and the
+// report-spoofing/disclosure guard. Run: node scripts/selftest.mjs (also runs in CI). Exits
+// non-zero on any regression — the action's own regression guard, mirroring
+// security-baseline/selftest.mjs.
+//
+// FIXTURE RULE learned from that split (see the "ownership split" block below): when a fixture
+// models a RELATIONSHIP between two values, the two must be DIFFERENT literals. The original
+// owner-exclusion fixture used 'mvalasis' as both the action owner in the workflow text and the
+// owner passed in, so it passed no matter which one the engine actually consulted — and it stayed
+// green through the entire defect.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import {
   SEV, normalizeFloor, bucketFor, atOrAboveFloor, parseOsv, filterByFloor,
-  scanUnpinnedActions, issueDecision, blockDecision, renderReport, safe,
+  scanUnpinnedActions, normalizeOwners, resolveFirstPartyOwners, issueDecision, blockDecision,
+  renderReport, safe,
 } from './engine.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 let failed = 0;
 function check(name, cond, detail = '') { if (cond) console.log(`  ✅ ${name}`); else { console.log(`  ❌ ${name} ${detail}`); failed++; } }
@@ -153,16 +169,166 @@ jobs:
   check('does NOT flag a local ./action', scanUnpinnedActions([{ path: 'x.yml', text: 'uses: ./local\nsecrets.FOO' }]).length === 0);
   check('empty input → []', scanUnpinnedActions([]).length === 0 && scanUnpinnedActions(null).length === 0);
 
-  // self-owner exclusion: the repo's OWN org is first-party (e.g. mvalasis/ci-actions@v1,
-  // deliberately floating-tag-pinned by the fleet policy) — must NOT be flagged.
+  // first-party-owner exclusion: an owner in the first-party set is ours (e.g. mvalasis/ci-actions@v1,
+  // deliberately floating-tag-pinned by the fleet policy) — must NOT be flagged. The single-STRING
+  // form is the pre-2026-08 call signature and is asserted here so it keeps working for any caller
+  // that still passes one owner.
   const selfOrg = [{ path: '.github/workflows/x.yml',
     text: 'jobs:\n  a:\n    steps:\n      - uses: mvalasis/ci-actions/linkcheck@v1\n      - uses: oven-sh/setup-bun@v2\n    env:\n      T: ${{ secrets.CF_TOKEN }}' }];
-  const sOff = scanUnpinnedActions(selfOrg);            // no selfOwner → flags BOTH
-  const sOn = scanUnpinnedActions(selfOrg, 'mvalasis'); // selfOwner set → only the real third-party
-  check('without selfOwner, own-org action IS flagged', sOff.some((u) => u.uses.includes('mvalasis/ci-actions')));
-  check('selfOwner excludes own-org action', !sOn.some((u) => u.uses.includes('mvalasis/ci-actions')));
-  check('selfOwner still flags the genuine third-party (oven-sh)', sOn.length === 1 && sOn[0].uses === 'oven-sh/setup-bun@v2', JSON.stringify(sOn));
-  check('selfOwner is case-insensitive', scanUnpinnedActions([{ path: 'x.yml', text: 'uses: MVALASIS/ci-actions@v1\nsecrets.X' }], 'mvalasis').length === 0);
+  const sOff = scanUnpinnedActions(selfOrg);            // no owners → flags BOTH
+  const sOn = scanUnpinnedActions(selfOrg, 'mvalasis'); // owner set (string form) → only the real third-party
+  check('without a first-party owner, own-org action IS flagged', sOff.some((u) => u.uses.includes('mvalasis/ci-actions')));
+  check('first-party owner (string form) excludes own-org action', !sOn.some((u) => u.uses.includes('mvalasis/ci-actions')));
+  check('first-party owner still flags the genuine third-party (oven-sh)', sOn.length === 1 && sOn[0].uses === 'oven-sh/setup-bun@v2', JSON.stringify(sOn));
+  check('owner match is case-insensitive', scanUnpinnedActions([{ path: 'x.yml', text: 'uses: MVALASIS/ci-actions@v1\nsecrets.X' }], 'mvalasis').length === 0);
+}
+
+console.log('\n# first-party owner SET — the 2026-08 caller/action ownership split');
+{
+  // WHY THIS BLOCK EXISTS. The fixture above uses `mvalasis` as BOTH the action owner in the
+  // workflow text AND the owner passed in — the same literal twice, so it passes whether
+  // "first-party" is derived from the caller, the action, or a coin flip. That is precisely why it
+  // could not catch the split defect: when 11 repos moved to `creme-ypsilon` and ci-actions stayed
+  // on `mvalasis`, the caller-derived owner stopped matching the action's owner and every
+  // `mvalasis/ci-actions/*@v1` ref became an "unpinned third-party action" on every org caller.
+  // These fixtures keep the two owners DELIBERATELY DIFFERENT so the union is doing real work.
+  const CALLER = 'creme-ypsilon';   // github.repository owner, post-move (e.g. creme-ypsilon/lampakia-astro)
+  const ACTION = 'mvalasis';        // github.action_repository owner — ci-actions did NOT move
+  // A caller workflow shaped like the live ones: one of OUR shared actions, one genuine
+  // third-party action, and a secret in the file (the consuming-secrets qualifier).
+  const split = [{ path: '.github/workflows/linkcheck-weekly.yml',
+    text: 'jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n      - uses: mvalasis/ci-actions/linkcheck@v1\n      - uses: oven-sh/setup-bun@v2.2.0\n        env:\n          T: ${{ secrets.CF_API_TOKEN }}' }];
+
+  // (1) caller owner ONLY = the pre-fix behaviour = the live defect, asserted rather than assumed.
+  // This is also what proves the exemption is NOT vacuous: drop the action owner and the ref really
+  // does get flagged, so assertion (2) below is testing a mechanism and not a tautology.
+  const callerOnly = scanUnpinnedActions(split, [CALLER]);
+  check('caller-owner-only (pre-fix) DOES flag our own ci-actions ref — the defect', callerOnly.some((u) => u.uses.includes('mvalasis/ci-actions')), JSON.stringify(callerOnly));
+
+  // (2) the union — caller ∪ action — is the fix.
+  const union = scanUnpinnedActions(split, [CALLER, ACTION]);
+  check('caller ∪ action owner does NOT flag mvalasis/ci-actions on a creme-ypsilon caller', !union.some((u) => u.uses.includes('mvalasis/ci-actions')), JSON.stringify(union));
+  check('…and STILL flags the genuine third-party in the same file', union.length === 1 && union[0].uses === 'oven-sh/setup-bun@v2.2.0', JSON.stringify(union));
+  check('…and still ignores actions/checkout', !union.some((u) => u.uses.includes('actions/checkout')));
+
+  // (3) local `./` invocation: github.action_repository is EMPTY, so ownerOf('') === '' is really
+  // in the list. The set must degrade to caller-only — and the '' must NOT become an owner that
+  // matches everything (an exemption matching by accident is the whole defect class).
+  const localRef = scanUnpinnedActions(split, [CALLER, '']);
+  check("empty action_repository → caller-only set (own ci-actions ref flagged again, not exempted)", localRef.length === 2 && localRef.some((u) => u.uses.includes('mvalasis/ci-actions')), JSON.stringify(localRef));
+  check('empty-string owner does NOT exempt the third-party either', localRef.some((u) => u.uses.includes('oven-sh')));
+  // the direct probe: an owner-less `uses:` must stay flagged even with '' handed in
+  check("'' in the owner list never matches an owner-less uses:", scanUnpinnedActions([{ path: 'x.yml', text: 'uses: @v1\nsecrets.X' }], ['', '  ']).length === 1);
+
+  // (4) case-insensitivity survives the widening, on BOTH owners of the union.
+  check('union owner match is case-insensitive', scanUnpinnedActions(split, ['CREME-Ypsilon', 'MVALASIS']).length === 1);
+  check('mixed-case owner in the workflow text is matched too', scanUnpinnedActions([{ path: 'x.yml', text: 'uses: MVALASIS/ci-actions/linkcheck@v1\nsecrets.X' }], ['creme-ypsilon', 'mvalasis']).length === 0);
+
+  // (5) the third leg of the contract: caller-declared extra owners.
+  check('a declared extra owner exempts a third account', scanUnpinnedActions([{ path: 'x.yml', text: 'uses: some-other-org/tool@v3\nsecrets.X' }], [CALLER, ACTION, 'some-other-org']).length === 0);
+}
+
+console.log('\n# owner-set derivation (resolveFirstPartyOwners / normalizeOwners)');
+{
+  const r = resolveFirstPartyOwners({ callerRepo: 'creme-ypsilon/lampakia-astro', actionRepo: 'mvalasis/ci-actions' });
+  check('derives caller ∪ action owner from the two repo slugs', r.join(',') === 'creme-ypsilon,mvalasis', JSON.stringify(r));
+  const withExtra = resolveFirstPartyOwners({ callerRepo: 'creme-ypsilon/lux-pm', actionRepo: 'mvalasis/ci-actions', extraOwners: 'acme, Other-Org' });
+  check('first-party-owners input adds extras (split on space/comma, lowercased)', withExtra.join(',') === 'creme-ypsilon,mvalasis,acme,other-org', JSON.stringify(withExtra));
+  // local `./` ref — the case the selftest workflows actually exercise
+  const localRef = resolveFirstPartyOwners({ callerRepo: 'mvalasis/ci-actions', actionRepo: '' });
+  check("empty action_repository contributes NOTHING (no '' owner)", localRef.length === 1 && localRef[0] === 'mvalasis', JSON.stringify(localRef));
+  check('same caller+action owner de-duplicates to one entry', resolveFirstPartyOwners({ callerRepo: 'mvalasis/epn-astro', actionRepo: 'mvalasis/ci-actions' }).join(',') === 'mvalasis');
+  check('no env at all (both empty) → EMPTY set, not a set containing ""', resolveFirstPartyOwners({}).length === 0);
+  check('normalizeOwners drops empty/whitespace tokens', normalizeOwners(['', '   ', null, undefined, ',']).size === 0);
+  check('normalizeOwners parses a single string, an array, and a separated string identically', normalizeOwners('mvalasis').has('mvalasis') && normalizeOwners(['mvalasis']).has('mvalasis') && normalizeOwners('mvalasis creme-ypsilon').size === 2 && normalizeOwners('mvalasis,creme-ypsilon').size === 2);
+  check('normalizeOwners lowercases', [...normalizeOwners('MVALASIS')][0] === 'mvalasis');
+}
+
+console.log('\n# END-TO-END wiring: action.yml env → scan.mjs → report (still offline)');
+{
+  // The unit tests above prove the ENGINE's policy. They cannot prove the CLI reads the owners
+  // from the env keys action.yml actually sets — and a name drift between the two files
+  // (ACTION_REPOSITORY here, `github.action_repository` there) would silently restore the
+  // exact 2026-08 defect with every assertion above still green. So: run the real entrypoint with
+  // a synthetic env, no network. osv-scanner/gh are pointed at a nonexistent binary and
+  // MANAGE_ISSUE is off, so nothing dials out; the lockfile-less workdir just yields "(none found)".
+  const actionYml = fs.readFileSync(path.join(HERE, '..', 'action.yml'), 'utf8');
+  check('action.yml declares the first-party-owners input', /^\s*first-party-owners:/m.test(actionYml));
+  check('action.yml passes github.action_repository as ACTION_REPOSITORY', /^\s*ACTION_REPOSITORY:\s*\$\{\{\s*github\.action_repository\s*\}\}/m.test(actionYml));
+  // …and must NOT write the `GITHUB_` spelling, which would shadow the runner's ambient copy of the
+  // same value and leave the derivation with a single, undocumented point of failure. This is the
+  // assertion that keeps the redundancy from being "tidied away" by a later editor who reads the
+  // two names as a duplicate.
+  check('action.yml does NOT shadow the ambient GITHUB_ACTION_REPOSITORY', !/^\s*GITHUB_ACTION_REPOSITORY:/m.test(actionYml));
+  check('action.yml passes the input as FIRST_PARTY_OWNERS', /FIRST_PARTY_OWNERS:\s*\$\{\{\s*inputs\.first-party-owners\s*\}\}/.test(actionYml));
+
+  // A caller tree shaped like lampakia-astro post-move: our own shared action + a real third party.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'deps-currency-selftest-'));
+  fs.mkdirSync(path.join(tmp, '.github', 'workflows'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, '.github', 'workflows', 'linkcheck-weekly.yml'),
+    'jobs:\n  a:\n    steps:\n      - uses: mvalasis/ci-actions/linkcheck@v1\n      - uses: oven-sh/setup-bun@v2.2.0\n        env:\n          T: ${{ secrets.CF_API_TOKEN }}\n');
+
+  const runCli = (env) => {
+    const summaryPath = path.join(tmp, `summary-${Math.random().toString(36).slice(2)}.md`);
+    fs.writeFileSync(summaryPath, '');
+    const r = spawnSync(process.execPath, [path.join(HERE, 'scan.mjs')], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        WORKING_DIRECTORY: tmp,
+        GITHUB_STEP_SUMMARY: summaryPath,
+        MANAGE_ISSUE: 'false',          // no gh, no GitHub API
+        OSV_BIN: path.join(tmp, 'no-such-osv-scanner'),
+        GH_BIN: path.join(tmp, 'no-such-gh'),
+        FIRST_PARTY_OWNERS: '',
+        // BOTH action-repo sources are blanked by default so a case must opt into the one it is
+        // exercising — otherwise an ambient value leaking in from the real CI runner (which sets
+        // GITHUB_ACTION_REPOSITORY) would silently satisfy the local-`./` cases below.
+        ACTION_REPOSITORY: '',
+        GITHUB_ACTION_REPOSITORY: '',
+        ...env,
+      },
+    });
+    return { exit: r.status, summary: fs.readFileSync(summaryPath, 'utf8'), stderr: r.stderr || '' };
+  };
+
+  // (1) the live post-split shape: org caller, personal-account action.
+  const split = runCli({ GITHUB_REPOSITORY: 'creme-ypsilon/lampakia-astro', ACTION_REPOSITORY: 'mvalasis/ci-actions' });
+  check('CLI runs clean with no osv-scanner present (report mode)', split.exit === 0, `exit=${split.exit} ${split.stderr.slice(0, 200)}`);
+  check('CLI exempts our own ci-actions ref on an org caller', !split.summary.includes('mvalasis/ci-actions'), split.summary.slice(0, 400));
+  check('CLI still reports the genuine third-party', split.summary.includes('oven-sh/setup-bun@v2.2.0'));
+  check('CLI reports exactly 1 unpinned advisory', /unpinned-action advisories: 1\b/.test(split.summary), split.summary.slice(-200));
+  check('CLI names both derived owners in the report', split.summary.includes('creme-ypsilon') && split.summary.includes('`mvalasis`'));
+
+  // (1b) THE AMBIENT FALLBACK. GitHub documents `github.action_repository` and the runner's
+  // GITHUB_ACTION_REPOSITORY identically — and documents NEITHER for a composite action's own
+  // steps, which is the only shape this action ever runs in. So the CLI reads both, and this case
+  // proves the second one actually works: context source blank, ambient populated, exemption still
+  // correct. Without it the redundancy would be decorative — present in the wiring, never executed,
+  // and therefore free to rot.
+  const ambientOnly = runCli({ GITHUB_REPOSITORY: 'creme-ypsilon/lampakia-astro', ACTION_REPOSITORY: '', GITHUB_ACTION_REPOSITORY: 'mvalasis/ci-actions' });
+  check('ambient GITHUB_ACTION_REPOSITORY alone still exempts our own ref', /unpinned-action advisories: 1\b/.test(ambientOnly.summary), ambientOnly.summary.slice(-200));
+  check('…and the ambient owner is named in the report', ambientOnly.summary.includes('`mvalasis`'));
+
+  // (1c) precedence when the two disagree: the context value wins, the ambient is only a fallback.
+  // Asserted so the `||` is a deliberate rule rather than an accident of ordering.
+  const bothSet = runCli({ GITHUB_REPOSITORY: 'creme-ypsilon/lampakia-astro', ACTION_REPOSITORY: 'mvalasis/ci-actions', GITHUB_ACTION_REPOSITORY: 'oven-sh/setup-bun' });
+  check('context ACTION_REPOSITORY wins over the ambient when both are set', /unpinned-action advisories: 1\b/.test(bothSet.summary) && bothSet.summary.includes('oven-sh/setup-bun@v2.2.0'), bothSet.summary.slice(-200));
+
+  // (2) local `./` invocation — BOTH sources are empty. Caller-only set: our own ref is
+  // (correctly) flagged, and crucially the empty value has NOT exempted everything.
+  const localRef = runCli({ GITHUB_REPOSITORY: 'creme-ypsilon/lampakia-astro' });
+  check('both action-repo sources empty → caller-only, own ref flagged, third-party still flagged', /unpinned-action advisories: 2\b/.test(localRef.summary), localRef.summary.slice(-200));
+
+  // (3) this repo running its OWN selftest workflow: caller IS ci-actions, action ref is local.
+  const selfHosted = runCli({ GITHUB_REPOSITORY: 'mvalasis/ci-actions' });
+  check('ci-actions scanning itself via a local ./ ref still exempts its own owner', /unpinned-action advisories: 1\b/.test(selfHosted.summary), selfHosted.summary.slice(-200));
+
+  // (4) the escape hatch reaches the engine through the input.
+  const extra = runCli({ GITHUB_REPOSITORY: 'creme-ypsilon/lampakia-astro', FIRST_PARTY_OWNERS: 'mvalasis oven-sh' });
+  check('first-party-owners input reaches the scan (both refs exempted)', /unpinned-action advisories: 0\b/.test(extra.summary), extra.summary.slice(-200));
+
+  fs.rmSync(tmp, { recursive: true, force: true });
 }
 
 console.log('\n# report rendering is deterministic + spoof-safe');
@@ -171,6 +337,10 @@ console.log('\n# report rendering is deterministic + spoof-safe');
   check('report names the floor', report.includes('floor: **HIGH**'));
   check('report lists the CRITICAL package', report.includes('lodash'));
   check('clean report says ✅ no advisories', renderReport([], [], { floor: 'HIGH' }).includes('✅ no dependency advisories'));
+  // the exemption set is DIAGNOSABLE from the report — a mis-derived owner set was invisible before
+  check('report names the first-party owners it exempted', renderReport([], [], { floor: 'HIGH', firstPartyOwners: ['creme-ypsilon', 'mvalasis'] }).includes('first-party owners (exempt'));
+  check('report omits the owners line entirely when the CLI supplies none', !renderReport([], [], { floor: 'HIGH' }).includes('first-party owners'));
+  check('empty owner set renders explicitly, not as a blank', renderReport([], [], { floor: 'HIGH', firstPartyOwners: [] }).includes('(none — every non-'));
   // disclosure/spoof guard: a hostile package name with markdown + a fake verdict line is neutralized
   const evil = [{ ecosystem: 'npm', source: 's', name: '`|\nBLOCKED](http://evil.tld)', version: '1', ids: ['x'], score: 9.9, severity: SEV.CRITICAL, abandoned: false }];
   const er = renderReport(evil, [], { floor: 'HIGH' });

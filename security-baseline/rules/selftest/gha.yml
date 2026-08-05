@@ -14,6 +14,24 @@ jobs:
       - uses: webfactory/ssh-agent@v0.10.0
       # ok: gha-unpinned-third-party-action
       - uses: cloudflare/wrangler-action@5a3bc0e8b6f0f1a2b3c4d5e6f708192a3b4c5d6e
+      # THREE-SEGMENT REFS (`owner/repo/subdir@ref`). These were invisible to the rule until the
+      # regex grew `(?:/…)*`: the segment class cannot cross a `/`, so the match died before the
+      # `@` and never reached the SHA test. gradle/actions/setup-gradle is the real-world victim —
+      # live in luxairport-frontend on a mutable tag, silently unflagged for the rule's whole life.
+      # ruleid: gha-unpinned-third-party-action
+      - uses: gradle/actions/setup-gradle@v4
+      # ok: gha-unpinned-third-party-action
+      - uses: some-org/some-actions/setup@1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d
+      # ok: gha-unpinned-third-party-action
+      - uses: github/codeql-action/analyze@v3
+      # A FIRST-PARTY shared action MUST still fire here. Ownership is not knowable to a static
+      # semgrep rule, so suppression happens downstream in scripts/firstparty.mjs against the
+      # runtime owner set; annotating this as a GOOD fixture instead would push an owner constant
+      # into the rule file — the one thing the rule's header forbids. (Phrased around the literal
+      # annotation token on purpose: `semgrep --test` finds annotations by scanning each comment
+      # for the bare substring, so prose that spells one out can register as a real annotation.)
+      # ruleid: gha-unpinned-third-party-action
+      - uses: mvalasis/ci-actions/security-baseline@v1
       # ruleid: gha-script-injection
       - run: echo "title is ${{ github.event.issue.title }}"
       - name: safe

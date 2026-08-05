@@ -9,19 +9,34 @@
 
 rules:
   # ---- CWE-829: a third-party action pinned to a mutable tag/branch, not a 40-char SHA ----
+  # An action ref is `owner/repo@ref` PLUS any number of SUBDIRECTORY segments — `gradle/actions/
+  # setup-gradle@v4` is one action in a subdirectory, not two path components. The original pattern
+  # stopped at `owner/repo@`, and since `[A-Za-z0-9._-]` cannot consume a second `/`, a three-segment
+  # ref never reached the `@` at all: it was not exempted, it was INVISIBLE. That silently unflagged
+  # `gradle/actions/setup-gradle@v4` in luxairport-frontend — a genuine third-party action on a
+  # mutable tag, in a workflow that handles secrets — for the whole life of the rule. `(?:/…)*` below
+  # is that false NEGATIVE closed; the `(?!actions/)`/`(?!github/)` exemptions are unchanged and now
+  # also cover the three-segment forms of those (e.g. `github/codeql-action/analyze@v3`).
+  #
+  # OWNERSHIP IS NOT DECIDED HERE. This is static YAML evaluated by semgrep — no inputs, no env, no
+  # workflow context — so it flags every mutable-tag ref including the caller's own shared actions.
+  # scripts/firstparty.mjs drops the first-party ones at runtime, where the owners are knowable.
+  # Never hard-code an owner into this file: it becomes a lie the day that owner changes (which is
+  # exactly what happened on 2026-08-02..04 when 11 callers moved org and ci-actions did not).
   - id: gha-unpinned-third-party-action
     languages: [yaml]
     severity: WARNING
     message: >-
       Third-party action pinned to a mutable ref (a tag/branch can be re-pointed by a
       compromised upstream and runs with this workflow's secrets) — pin to a full 40-char
-      commit SHA (CWE-829). First-party actions/* and github/* are exempt.
+      commit SHA (CWE-829). actions/* and github/* are exempt here; first-party owners (the
+      caller's org, this action's own org, plus `first-party-owners`) are filtered downstream.
     metadata: { checkId: gha-unpinned-action, cwe: "CWE-829", tier: T1 }
     patterns:
       - pattern: 'uses: $USES'
       - metavariable-regex:
           metavariable: $USES
-          regex: '^(?!\./)(?!actions/)(?!github/)[A-Za-z0-9._-]+/[A-Za-z0-9._-]+@(?![0-9a-f]{40}\b)'
+          regex: '^(?!\./)(?!actions/)(?!github/)[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*@(?![0-9a-f]{40}\b)'
 
   # ---- CWE-94: untrusted github.event.* interpolated into a run: shell block ----
   - id: gha-script-injection

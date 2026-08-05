@@ -1,8 +1,10 @@
 # ci-actions
 
-Shared GitHub Actions for the `mvalasis/*` site ecosystem. One canonical
-copy of cross-cutting CI tooling, referenced by each repo with a thin
-caller workflow — so the logic lives **here**, not duplicated per repo.
+Shared GitHub Actions for the fleet's site ecosystem — whose callers span
+**more than one GitHub owner** since the 2026-08 split (see v1.10.0), so no
+line here names an owner as if it were the only one. One canonical copy of
+cross-cutting CI tooling, referenced by each repo with a thin caller
+workflow — so the logic lives **here**, not duplicated per repo.
 
 > Public on purpose: these actions carry **no secrets** (env-var *names*
 > only; sitemap URLs, hosts, and tokens come from each caller). GitHub
@@ -39,7 +41,76 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.9.0**.
+`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.10.0**.
+**v1.10.0** — `deps-currency` + `security-baseline` stop deriving "first-party"
+from the **caller's** owner, because the action's owner and the caller's owner
+are no longer the same account (2026-08-05). On **2026-08-02..04** eleven fleet
+repos moved from the personal account `mvalasis` into the org `creme-ypsilon`;
+`mvalasis/ci-actions` did **not** move. Both actions read first-party off
+`github.repository` alone — a definition that was only ever right while one
+account owned everything — so from the moment of the split every
+`mvalasis/ci-actions/<action>@v1` ref inside an org-owned caller scanned as an
+unpinned **third-party** action: `deps-currency` would have gone 2 → 6 rows on
+`lampakia-astro` and 2 → 5 on `prevedourougr` at the next Monday cron.
+`security-baseline` was spared that symptom only by a SECOND defect: its `uses:`
+pattern could not match a three-segment ref at all (below), so all **32** of our
+own refs across the six migrated callers stayed **invisible** rather than
+mis-reported — measured, the pre-widening pattern matches **0 of 55**. Its
+ownership filter is therefore PREVENTIVE, and has to ship in the same release as
+the widening, which would otherwise surface every one of those 32 as third-party
+noise on the first push. (Every number here measured by replaying the shipped
+engine and the live rule over those repos' default-branch workflows, not
+estimated.) Nothing blocks — both signals are WARN — but
+`deps-currency`'s tracking issue only auto-closes at **zero** advisories, so the
+noise pins it open permanently, and an issue that can never close is one people
+stop reading. **First-party is now the union of** the caller's owner, **the
+action's own owner** (`github.action_repository` — the clause that survives an
+ownership split), and a new optional **`first-party-owners`** input (space/comma
+separated) for a third account you also control. Matching is lowercased;
+`actions/*` and `github/*` stay exempt as before; both reports now print the
+resolved owner set, because the defect was undiagnosable from a report that just
+looked like four extra rows of real debt.
+**A real false NEGATIVE closes in the same release.** An action ref may carry
+**subdirectory segments** — `gradle/actions/setup-gradle@v4` is one action in a
+subdirectory, not two path components — and `gha-unpinned-third-party-action`'s
+`uses:` pattern stopped at `owner/repo@`. Since `[A-Za-z0-9._-]` cannot consume
+a second `/`, a three-segment ref never reached the `@` and was never tested for
+a SHA pin at all: not exempt, **invisible**, from the day the rule shipped in
+v1.3.0. That silently unflagged `gradle/actions/setup-gradle@v4` at
+`mvalasis/luxairport-frontend` `.github/workflows/e2e.yml:76` — a genuine
+third-party action on a mutable tag — for the rule's **entire life**: the ref
+landed 2026-06-24 (363dde6), five days *before* the rule that was supposed to
+catch it, so there is no window in which it was ever seen. The widened pattern and
+the ownership filter ship **together** on purpose: widening alone would have
+added 55 of our own refs as noise, which is how a fix becomes the reason the
+signal gets ignored.
+**Newly-blocks nobody — verified, not argued.** Both signals are WARN
+(`deps-currency`'s unpinned rows never feed its block decision;
+`gha-unpinned-action` is T1 and, checked live across all ten callers, promoted
+by none — the only `critical-checks` anywhere in the fleet are
+`wp-rest-error-detail` ×4 and `robots-sitemap-directive` ×2, the latter on
+`seo-aeo`); the new input defaults empty, so **no caller workflow changes**; and
+the exemption set can only ever GROW, so a row count can only shrink. Replayed
+over every live caller's default-branch workflows: `deps-currency` (**7**
+callers — four `creme-ypsilon`, three `mvalasis`) 6 → 2 and 5 → 2 on two of the
+org callers, byte-identical on the other five;
+`security-baseline` suppresses 55 first-party refs, loses **zero** existing
+warnings, and adds exactly **one** — the gradle ref above. Two traps are
+recorded in the code rather than left to be rediscovered: (1) the action's own
+owner is read from **both** `${{ github.action_repository }}` (passed as
+`ACTION_REPOSITORY`, deliberately **not** the `GITHUB_`-prefixed name, which
+would *shadow* the runner's ambient copy) and the ambient
+`GITHUB_ACTION_REPOSITORY` — GitHub documents neither for a **composite**
+action's own steps, the only shape these ever run in, and a single-source read
+that turned out wrong would revert to the pre-split defect silently, on a weekly
+cron, with nothing red; reading both can only add an owner, never remove one.
+(2) `github.action_repository` is **empty** for a local `./` invocation (this
+repo's own selftest workflows), so empties are dropped rather than admitted as
+an `''`-owner that would match every ref. **36** and **45** new offline
+self-test assertions respectively, each mutation-checked — and the owner
+fixtures deliberately use **different** literals for the caller and the action,
+since the original fixture used the same literal for both, which is exactly why
+it stayed green straight through the split.
 **v1.9.0** — `contract-check` gains a THIRD presence tier, **`requiredNullable`**
 (2026-08-01). The manifest could say "present and non-null" (`required`) or
 "tolerated absent" (`optional`), but not **"the producer always sends this key,
@@ -213,7 +284,10 @@ reported 0). **v1.4.1** — `deps-currency`'s
 unpinned-action scan now excludes the repo's **own org** (`mvalasis/*`) as
 first-party (it was flagging the fleet's own `mvalasis/ci-actions@v1` callers,
 which are deliberately floating-tag-pinned by policy — pure noise on every
-caller; surfaced by the EPN pilot). **v1.4.0** — three NEW actions for the
+caller; surfaced by the EPN pilot). *(Historical, and **superseded by v1.10.0**
+— do not read it as current behaviour: "own org" here meant the **caller's**
+owner, which stopped being the action's owner at the 2026-08 split. First-party
+is now an owner **set**.)* **v1.4.0** — three NEW actions for the
 disciplines rethink (the 8 software-house lifecycle lenses): **`test-suite`**
 (per-stack node/php test runner; a repo with no tests stays green),
 **`contract-check`** (live WP/WC REST JSON probe vs a committed manifest —

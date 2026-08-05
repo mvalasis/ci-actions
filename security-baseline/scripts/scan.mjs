@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { SEV, evaluate, parsePromote, groupByCheck, sevRank, CHECKS, safe, redact } from './tiers.mjs';
+import { firstPartyOwners, filterFirstPartyGha } from './firstparty.mjs';
 
 const env = process.env;
 const ACTION_PATH = env.GITHUB_ACTION_PATH || path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -28,6 +29,23 @@ const VERIFIED_SECRETS = (env.VERIFIED_SECRETS || 'auto').trim();   // auto | on
 const ENABLE_SCA = (env.ENABLE_SCA || 'true').trim() !== 'false';
 const ENABLE_HISTORY = (env.ENABLE_SECRETS_HISTORY || 'true').trim() !== 'false';
 const { promote, ignored } = parsePromote(env.CRITICAL_CHECKS || '');
+// First-party owners for the GHA supply-chain rule = caller's owner ∪ THIS action's own owner ∪
+// whatever the caller declares. The action's own owner is the 2026-08 addition: the fleet's callers
+// no longer share an account with ci-actions, so deriving "first-party" from the caller alone would
+// report every `mvalasis/ci-actions/<action>@v1` ref on the six migrated callers.
+//
+// The action's own owner has TWO sources with the same documented meaning, and both are read
+// because GitHub documents NEITHER for the shape this runs in (a composite action's own step):
+// ACTION_REPOSITORY is `${{ github.action_repository }}` handed over by action.yml, and
+// GITHUB_ACTION_REPOSITORY is the runner's ambient copy — which survives only because action.yml
+// deliberately does not write the `GITHUB_` name and shadow it (see the comment there). Either
+// source being EMPTY (a local `./` invocation empties both — this repo's own smoke job) just drops
+// out: firstPartyOwners() filters empties rather than admitting an ''-owner that matches all.
+const FIRST_PARTY = firstPartyOwners({
+  repository: env.GITHUB_REPOSITORY,
+  actionRepository: env.ACTION_REPOSITORY || env.GITHUB_ACTION_REPOSITORY,
+  extra: env.FIRST_PARTY_OWNERS,
+});
 
 const BIN = {
   semgrep: env.SEMGREP_BIN || 'semgrep',
@@ -110,9 +128,13 @@ function collectSemgrep() {
     }
   }
   // GitHub Actions supply-chain — always over .github/workflows (small, high value).
+  // The rule pack is static YAML and cannot know whose actions these are, so it flags the caller's
+  // OWN shared actions too (55 `<owner>/ci-actions/<action>@v1` refs across the 10 callers). Those
+  // are first-party and deliberately floating-tag-pinned by the fleet's versioning policy; drop
+  // them here, where the owner set is knowable. Anything unrecoverable stays — see firstparty.mjs.
   if (fs.existsSync('.github/workflows')) {
     const gha = semgrepRun([path.join(RULES_DIR, 'gha.yaml')], ['.github/workflows']);
-    if (gha.ran) for (const r of gha.results) {
+    if (gha.ran) for (const r of filterFirstPartyGha(gha.results, FIRST_PARTY)) {
       const id = r.extra && r.extra.metadata && r.extra.metadata.checkId;
       if (id) out.push(sgFinding(r, id));
     }
@@ -237,6 +259,9 @@ function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }
   note(`- scope: ${DIFF ? `diff (\`${safe(BASE)}\`…HEAD, ${CHANGED ? CHANGED.length : 0} changed file(s))` : 'full tree'}`);
   if (promote.length) note(`- promoted to critical (this caller): \`${promote.join('`, `')}\``);
   if (ignored.length) note(`- ⚠️ ignored \`critical-checks\` (not promotable T1 ids): \`${ignored.join('`, `')}\``);
+  // Print the owner set: "why is MY org's action not flagged?" (and its inverse) must be answerable
+  // from the report alone, without reading the source of the filter that made the decision.
+  if (FIRST_PARTY.size) note(`- first-party owners (exempt from \`gha-unpinned-action\`): \`${[...FIRST_PARTY].map((o) => safe(o, 40)).join('`, `')}\``);
   note('');
 
   let findings = [];

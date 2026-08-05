@@ -84,18 +84,66 @@ export function filterByFloor(findings, floor) {
 // under you), so it belongs in the scheduled currency sweep. Pure text scan of a
 // single workflow YAML body — no YAML lib (zero-dep), heuristic but FP-disciplined:
 //   - only flags steps whose `uses:` is a third-party `owner/repo@ref` (skips local
-//     `./...`, `docker://`, first-party `actions/*` / `github/*`, AND the repo's OWN
-//     org `selfOwner/*` — your own shared actions, e.g. `mvalasis/ci-actions@v1`, are
-//     first-party + deliberately floating-tag-pinned by the fleet's versioning policy;
-//     flagging them on every caller is pure noise),
+//     `./...`, `docker://`, first-party `actions/*` / `github/*`, AND any owner in the
+//     FIRST-PARTY OWNER SET — our own shared actions, e.g. `mvalasis/ci-actions@v1`,
+//     are first-party + deliberately floating-tag-pinned by the fleet's versioning
+//     policy; flagging them on every caller is pure noise),
 //   - only when the ref is NOT a full 40-char hex SHA,
 //   - AND only when a secret is referenced anywhere in the same workflow file
 //     (`secrets.*` or `${{ secrets… }}`) — the consuming-secrets qualifier.
 // Conservative-by-design: file-level secret co-presence (not step-level dataflow),
 // so it can over-report within a file but never crosses files. WARN-only signal.
+//
+// WHY A SET AND NOT ONE OWNER (the 2026-08-02..04 ownership split). This used to take a
+// single `selfOwner`, derived from `github.repository` — i.e. "first-party == whoever owns
+// the CALLER". That held only while one account owned everything. Then 11 repos moved from
+// the personal account `mvalasis` into the org `creme-ypsilon` and `mvalasis/ci-actions`
+// did NOT move, so on every org-owned caller each `mvalasis/ci-actions/<action>@v1` ref
+// started reading as an unpinned THIRD-PARTY action: lampakia-astro 2 → 6 rows,
+// prevedourougr 2 → 5. WARN-tier, so nothing blocked — but `issueDecision` returns 'close'
+// only when `unpinnedCount === 0`, so the tracking issues (lampakia-astro#41,
+// prevedourougr#28) would have become impossible to EVER close, and a tracking issue that
+// can never close is a signal everyone learns to ignore. First-party is now the UNION of
+// caller owner ∪ action owner ∪ caller-declared extras (see `resolveFirstPartyOwners`).
+// A bare string is still accepted so existing call sites keep working.
 const SHA40 = /^[0-9a-f]{40}$/i;
-export function scanUnpinnedActions(workflowFiles, selfOwner = '') {
-  const self = String(selfOwner || '').toLowerCase();
+const ownerOf = (slug) => String(slug == null ? '' : slug).split('/')[0].trim();
+
+// Normalize a first-party owner spec — an array, or a space/comma-separated string, so the
+// `first-party-owners` action input and a bare single owner both parse through ONE path — into a
+// lowercased Set. EMPTY TOKENS ARE DROPPED, and that is load-bearing rather than tidiness:
+// `github.action_repository` is EMPTY when the action is invoked by a local `./` ref (which is how
+// this repo's own selftest workflows invoke actions), so `ownerOf('')` → `''` genuinely lands in
+// the input list on those runs. An `''` left in the set would make `owners.has(ownerLc)` true for
+// an owner-less `uses:` — an exemption that matches by accident, which is the exact defect class
+// this change exists to fix. Empty in ⇒ nothing exempted, never everything exempted.
+export function normalizeOwners(spec) {
+  const out = new Set();
+  for (const entry of (Array.isArray(spec) ? spec : [spec])) {
+    for (const tok of String(entry == null ? '' : entry).split(/[\s,]+/)) {
+      const v = tok.trim().toLowerCase();
+      if (v) out.add(v);
+    }
+  }
+  return out;
+}
+
+// Resolve the first-party owner set per the ownership-split contract — the union of:
+//   (a) the CALLER's owner — from `github.repository` (e.g. `creme-ypsilon/lampakia-astro`)
+//   (b) the ACTION's own owner — from `github.action_repository` (e.g. `mvalasis/ci-actions`).
+//       This is the part that fixes the split. It is EMPTY for a local `./` invocation, and an
+//       empty value must contribute NOTHING (never an `''` owner) — the set then correctly
+//       degrades to caller-only, which is the right answer when the action IS the caller's repo.
+//   (c) any owners named in the optional `first-party-owners` input — the escape hatch for a
+//       fleet that later spans a third account, so nobody has to cut an action release for it.
+// Returns an ARRAY in caller → action → extras order (deterministic, and it reads that way in the
+// report). Pure: the CLI supplies the env, this decides the policy.
+export function resolveFirstPartyOwners({ callerRepo = '', actionRepo = '', extraOwners = '' } = {}) {
+  return [...normalizeOwners([ownerOf(callerRepo), ownerOf(actionRepo), extraOwners])];
+}
+
+export function scanUnpinnedActions(workflowFiles, firstPartyOwners = '') {
+  const owners = normalizeOwners(firstPartyOwners);
   const out = [];
   for (const wf of asArray(workflowFiles)) {
     const path = (wf && wf.path) || '';
@@ -116,7 +164,7 @@ export function scanUnpinnedActions(workflowFiles, selfOwner = '') {
       const owner = repo.split('/')[0] || '';
       const ownerLc = owner.toLowerCase();
       if (ownerLc === 'actions' || ownerLc === 'github') continue; // first-party — trusted, GitHub-pinned
-      if (self && ownerLc === self) continue; // the repo's own org — first-party (e.g. mvalasis/ci-actions@v1)
+      if (owners.has(ownerLc)) continue; // first-party owner — the caller's, the action's own, or a declared extra
       if (SHA40.test(pin)) continue; // immutably pinned — safe
       out.push({ path, line: i + 1, uses: ref, pin });
     }
@@ -163,6 +211,12 @@ export function renderReport(floorFindings, unpinned, meta = {}) {
   p('');
   p(`- floor: **${normalizeFloor(meta.floor)}** · ecosystems: ${meta.ecosystems && meta.ecosystems.length ? meta.ecosystems.map((e) => safe(e, 24)).join(', ') : '(none detected)'}`);
   p(`- lockfiles scanned: ${meta.lockfiles && meta.lockfiles.length ? meta.lockfiles.map((f) => '`' + safe(f, 80) + '`').join(', ') : '(none found)'}`);
+  // Print the first-party owner set. The 2026-08 ownership-split defect was invisible in this
+  // report — it just showed four extra "unpinned third-party" rows for our OWN actions, with
+  // nothing saying which owners the scan had exempted, so the row looked like real debt rather
+  // than a mis-derived exemption. Rendered only when the CLI supplies it (older/pure callers of
+  // renderReport, incl. the selftest's rendering assertions, are unaffected).
+  if (Array.isArray(meta.firstPartyOwners)) p(`- first-party owners (exempt from the unpinned-action scan): ${meta.firstPartyOwners.length ? meta.firstPartyOwners.map((o) => '`' + safe(o, 40) + '`').join(', ') : '(none — every non-`actions`/`github` owner is third-party)'}`);
   if (Number.isFinite(meta.totalFindings)) p(`- advisories in tree: **${meta.totalFindings}** total · **${floorFindings.length}** at/above floor`);
   p('');
 

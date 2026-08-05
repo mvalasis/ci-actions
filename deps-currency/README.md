@@ -1,7 +1,9 @@
 # deps-currency
 
-The **TIME-axis** dependency check for the `mvalasis/*` fleet — the scheduled complement to
-`security-baseline`'s diff-scoped osv. `security-baseline` answers *"did THIS change introduce a
+The **TIME-axis** dependency check for the fleet — the scheduled complement to
+`security-baseline`'s diff-scoped osv. (Deliberately no owner glob here: the callers span two
+GitHub owners since the 2026-08 split, and the set is resolved at runtime, not written down —
+see §Who counts as "first-party".) `security-baseline` answers *"did THIS change introduce a
 vuln?"* on every PR/push; `deps-currency` answers *"is the committed dependency tree carrying a
 known-vuln or abandoned dep RIGHT NOW?"* on a schedule — scanning the **full** committed lockfiles,
 not a diff. Because advisories land **after** code does (a CVE is published against a version you
@@ -23,7 +25,9 @@ blocking only after it has cleared its backlog.
 - Also flags **unpinned third-party GitHub Actions that consume secrets** — a step that `uses:` an
   `owner/repo@<mutable-tag>` (not a 40-hex SHA) *and* references `secrets.*` in the same workflow.
   A mutable tag can be re-pointed upstream at code that exfiltrates the secret — a time-axis
-  supply-chain risk that belongs in a currency sweep. **WARN-only — never blocks.**
+  supply-chain risk that belongs in a currency sweep. **WARN-only — never blocks.** *Third-party*
+  means "outside the **first-party owner set**" — see below; our own `@v1`-pinned shared actions are
+  first-party by policy and are not flagged.
 - Renders one report to the job summary, and (if `manage-issue`) opens/updates a single
   **`deps-currency: dependency advisories`** tracking issue, auto-closing it when the next run is
   clean — the same issue lifecycle as `linkcheck`.
@@ -75,6 +79,42 @@ jobs:
 | `fail-on-vuln` | `false` | `true` = BLOCK when a ≥floor advisory exists. Default `false` (report-only). Unpinned-action advisories never block regardless. |
 | `issue-title` | `deps-currency: dependency advisories` | Stable title so the same issue is reused / closed. |
 | `osv-version` | `v2.4.0` | Pinned osv-scanner release (mirrors `security-baseline`). |
+| `first-party-owners` | *(empty)* | **Extra** owners to treat as first-party in the unpinned-action scan, space/comma separated. The caller's owner and this action's own owner are already included — see below. Only needed for a third account you also control. |
+
+## Who counts as "first-party" (the owner set)
+
+The unpinned-action scan exempts `actions/*`, `github/*`, and every owner in the **first-party owner
+set**, which is the union of:
+
+1. the **caller's** owner — from `github.repository`;
+2. **this action's own** owner — from `github.action_repository` (`mvalasis`, for `mvalasis/ci-actions`);
+3. anything listed in **`first-party-owners`**.
+
+Owners are matched case-insensitively. The report prints the resolved set, so an unexpected row can
+be diagnosed without re-deriving it by hand.
+
+> **Why (2) exists.** It used to be (1) alone — "first-party == whoever owns the caller" — which held
+> only while one account owned everything. In **2026-08** 11 repos moved from the personal account
+> `mvalasis` into the org `creme-ypsilon` while `mvalasis/ci-actions` stayed put, and every
+> `mvalasis/ci-actions/<action>@v1` ref in an org-owned caller immediately read as an unpinned
+> *third-party* action: `lampakia-astro` 2 → 6 rows, `prevedourougr` 2 → 5. Nothing blocked (this
+> signal is WARN-only), but the tracking issue only auto-closes at **zero** advisories, so the noise
+> would have pinned it open forever — and an issue that can never close is a signal people stop
+> reading. Deriving trust from the *caller's* owner is the bug; the action's own owner is the fix.
+
+For a **local `./` invocation** (this repo's own selftest workflows) `github.action_repository` is
+empty; it then contributes nothing and the set degrades to the caller's owner — it never becomes an
+empty owner that would match everything.
+
+The action's own owner is read from **two** sources — `${{ github.action_repository }}`, passed by
+`action.yml` as `ACTION_REPOSITORY`, and the runner's ambient `GITHUB_ACTION_REPOSITORY` as the
+fallback. They mean the same thing, but GitHub documents that meaning only as *"for a step executing
+an action, the owner and repository name of the action"* — it says nothing about whether either is
+populated inside a **composite** action's own steps, which is the only shape this action ever runs
+in. `action.yml` therefore avoids the `GITHUB_`-prefixed name on purpose: writing the context value
+there would shadow the runner's copy and stake the fix on a single undocumented behaviour, failing
+silently (a shorter owner list on a weekly cron) if it were wrong. Reading both can only add an
+owner, never remove one.
 
 ## Report-mode-first → flip to blocking
 
@@ -115,8 +155,11 @@ it (mirrors `security-baseline`'s SCA honesty):
   `MAL-`/`UNMAINTAINED` marker; it is additive report context, not a separate gate.
 - **Unpinned-action scan is file-level**, not step-level dataflow: it flags an unpinned third-party
   `uses:` when *any* `secrets.*` appears in the **same** workflow file (conservative — it can
-  over-report within a file, never across files). First-party `actions/*` / `github/*`, local
-  `./...`, `docker://`, and SHA-pinned refs are excluded.
+  over-report within a file, never across files). `actions/*` / `github/*`, every owner in the
+  [first-party owner set](#who-counts-as-first-party-the-owner-set), local `./...`, `docker://`, and
+  SHA-pinned refs are excluded. The exemption is by **owner**, not by ref: a first-party owner's
+  action is trusted at whatever tag it is pinned to, which is the deliberate trade for the fleet's
+  floating-`@v1` policy.
 - **This is the time-axis half of SCA.** The diff-scoped half ("did this PR add a vuln?") stays in
   `security-baseline`. Run both: the diff gate on every PR, this sweep on a cron.
 
@@ -126,14 +169,24 @@ it (mirrors `security-baseline`'s SCA honesty):
 osv-scanner JSON fixture (one CRITICAL, one LOW, one MODERATE) + workflow-text fixtures to the pure
 engine and asserts: CVSS→bucket mapping, severity-floor filtering, the issue open/close decision
 (open on findings, close when clean), the block decision (`fail-on-vuln`, report-mode-first), the
-unpinned-secret-consuming-action detection, and the report-spoofing/disclosure guard. No network,
-no osv-scanner, no `gh` — the parse/filter/decision engine only (like `security-baseline`'s
-`selftest.mjs`). Runs in CI on `deps-currency/**`.
+unpinned-secret-consuming-action detection, the **first-party owner-set derivation** (caller ∪
+action ∪ declared extras, empty-`action_repository` fallback, case-insensitivity), and the
+report-spoofing/disclosure guard. It also runs `scan.mjs` **end-to-end** with a synthetic env and
+stub `osv-scanner`/`gh` paths — still offline — because the owner-set unit tests cannot see a name
+drift between `action.yml`'s `env:` block and the keys `scan.mjs` reads, and that drift alone would
+restore the 2026-08 defect with every other assertion green. Runs in CI on `deps-currency/**`.
+
+> The owner-set fixtures deliberately use **different** literals for the caller's owner and the
+> action's owner (`creme-ypsilon` vs `mvalasis`). The original fixture used the same literal for
+> both, so it passed no matter which one the engine consulted — which is exactly why it stayed green
+> through the ownership split. When a fixture models a relationship between two values, the two
+> values have to differ.
 
 ## Implementation
 
 `scripts/engine.mjs` — pure, network-free engine (CVSS bucketing, floor filter, issue/block
-decisions, unpinned-action text scan, spoof-safe report rendering; unit-tested by `selftest.mjs`).
+decisions, first-party owner-set resolution, unpinned-action text scan, spoof-safe report rendering;
+unit-tested by `selftest.mjs`).
 `scripts/scan.mjs` — CLI: discovers lockfiles, runs osv-scanner over the full tree, normalizes its
 output into findings, filters + decides via the engine, renders to `GITHUB_STEP_SUMMARY`, manages
 the tracking issue, exits non-zero only on a ≥floor advisory under `fail-on-vuln`. **Zero npm

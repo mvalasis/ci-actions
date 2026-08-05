@@ -47,6 +47,15 @@ inputs:
     description: 'Pinned osv-scanner release (with "v"). Mirrors security-baseline''s pin.'
     required: false
     default: 'v2.4.0'
+  first-party-owners:
+    description: >-
+      EXTRA GitHub owners (space/comma separated) to treat as first-party in the unpinned-action
+      scan, on top of the two derived automatically: the CALLER's owner (github.repository) and
+      this ACTION's own owner (github.action_repository). Those two cover the normal fleet — set
+      this only when your workflows `uses:` shared actions from a THIRD account you also control.
+      Owners are matched case-insensitively; `actions/*` and `github/*` are always exempt.
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -75,7 +84,28 @@ runs:
         FAIL_ON_VULN: ${{ inputs.fail-on-vuln }}
         ISSUE_TITLE: ${{ inputs.issue-title }}
         GH_TOKEN: ${{ github.token }}
+        FIRST_PARTY_OWNERS: ${{ inputs.first-party-owners }}
         GITHUB_REPOSITORY: ${{ github.repository }}
+        # The ACTION's own repo — `mvalasis/ci-actions` here — which is NOT derivable from
+        # github.repository since the 2026-08 ownership split moved the callers to `creme-ypsilon`
+        # while ci-actions stayed on `mvalasis`. It is EMPTY for a local `./` invocation (this
+        # repo's own selftest workflows); the resolver drops empties, so that degrades to
+        # caller-only rather than minting a bogus ''-owner that would exempt everything.
+        #
+        # DELIBERATELY NOT SPELLED `GITHUB_ACTION_REPOSITORY`. The runner exports an ambient
+        # GITHUB_ACTION_REPOSITORY with the identical documented meaning, and scan.mjs reads THIS
+        # key first with that one as the fallback. Writing the context value into the `GITHUB_`
+        # name instead — the obvious spelling — would SHADOW the ambient copy and stake the whole
+        # fix on two behaviours GitHub does not actually document (checked 2026-08-05: the docs
+        # define `github.action_repository` / `GITHUB_ACTION_REPOSITORY` only as "for a step
+        # executing an action, the owner and repository name of the action", and say nothing about
+        # either case we depend on): whether the context is populated inside a COMPOSITE action's
+        # own steps, and whether a step-level `env:` may override a `GITHUB_*` default at all. If
+        # either assumption is wrong, that spelling silently reverts this action to the pre-split
+        # defect — on a weekly cron, with the only symptom a shorter owner list in the report.
+        # Reading both sources can only ever ADD an owner, never remove one, so it cannot make a
+        # caller newly-block.
+        ACTION_REPOSITORY: ${{ github.action_repository }}
         GITHUB_SERVER_URL: ${{ github.server_url }}
         GITHUB_RUN_ID: ${{ github.run_id }}
       run: node "${{ github.action_path }}/scripts/scan.mjs"

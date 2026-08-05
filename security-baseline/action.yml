@@ -29,6 +29,17 @@ inputs:
       CRITICAL core only, so a caller is never newly-blocked by an upgrade.
     required: false
     default: ''
+  first-party-owners:
+    description: >-
+      Comma/space list of EXTRA GitHub owners to treat as first-party for the `gha-unpinned-action`
+      supply-chain check (their `owner/repo@tag` refs are yours, not an untrusted upstream, and are
+      deliberately floating-tag-pinned by the fleet's versioning policy). Already first-party without
+      configuring anything: `actions`/`github`, the CALLER's own owner (`github.repository`), and
+      THIS action's own owner (`github.action_repository`) — the last of which is what keeps a
+      caller quiet after an ownership split moves it away from the action's account. Use this input
+      only for a THIRD owner, e.g. a second org that publishes actions you also control.
+    required: false
+    default: ''
   report-mode:
     description: 'Onboarding escape hatch: true = report even T0 criticals without blocking (loud banner). Must stay false for an enforcing caller.'
     required: false
@@ -143,6 +154,25 @@ runs:
         GITHUB_EVENT_BEFORE: ${{ github.event.before }}
         FAIL_ON_CRITICAL: ${{ inputs.fail-on-critical }}
         CRITICAL_CHECKS: ${{ inputs.critical-checks }}
+        # First-party ownership for the GHA supply-chain rule. Passed EXPLICITLY rather than relying
+        # on the runner's ambient defaults, so the contract is readable here and the scan behaves
+        # identically under `act`/local runs. `github.action_repository` is EMPTY when the action is
+        # invoked by a local `./` ref (this repo's own selftest smoke job does exactly that) —
+        # scan.mjs drops empty owners instead of admitting an ''-owner that matches all.
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        # DELIBERATELY NOT SPELLED `GITHUB_ACTION_REPOSITORY`, which is the obvious spelling and the
+        # wrong one. The runner already exports an ambient GITHUB_ACTION_REPOSITORY with the same
+        # documented meaning; writing the context value into that same name SHADOWS it, so the whole
+        # split fix would rest on two things GitHub does not document — that the context is populated
+        # inside a COMPOSITE action's own steps, and that a step `env:` may override a `GITHUB_*`
+        # default. If either is false the shadow writes an empty string over a correct ambient value
+        # and this action silently reverts to caller-owner-only: 32 first-party refs come back as
+        # third-party WARN noise on the six org callers, i.e. exactly the symptom the change exists
+        # to remove, with nothing red anywhere. scan.mjs reads THIS key first and the ambient one as
+        # a fallback — reading both can only ever ADD an owner, never remove one, so it cannot make
+        # a caller newly-block. (Same reasoning, same spelling, as deps-currency's `ACTION_REPOSITORY`.)
+        ACTION_REPOSITORY: ${{ github.action_repository }}
+        FIRST_PARTY_OWNERS: ${{ inputs.first-party-owners }}
         REPORT_MODE: ${{ inputs.report-mode }}
         REPORT_MODE_REASON: ${{ inputs.report-mode-reason }}
         SEMGREP_CONFIG: ${{ inputs.semgrep-config }}

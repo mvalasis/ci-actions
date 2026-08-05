@@ -15,8 +15,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
-  parseOsv, filterByFloor, scanUnpinnedActions, issueDecision, blockDecision, renderReport,
-  normalizeFloor, safe,
+  parseOsv, filterByFloor, scanUnpinnedActions, resolveFirstPartyOwners, issueDecision,
+  blockDecision, renderReport, normalizeFloor, safe,
 } from './engine.mjs';
 
 const env = process.env;
@@ -147,10 +147,27 @@ function manageIssue(decision, body) {
   const { ecosystems, lockfiles } = resolveEcosystems();
   const { findings } = runOsv();
   const floorFindings = filterByFloor(findings, FLOOR);
-  const unpinned = scanUnpinnedActions(loadWorkflows(), (process.env.GITHUB_REPOSITORY || '').split('/')[0]);
+  // FIRST-PARTY owner set for the unpinned-action scan — NOT just the caller's owner. This read
+  // `GITHUB_REPOSITORY.split('/')[0]` until the 2026-08 ownership split (callers moved to the org
+  // `creme-ypsilon`, `mvalasis/ci-actions` stayed put), after which every one of our OWN
+  // `mvalasis/ci-actions/<action>@v1` refs scanned as an unpinned third-party action on every org
+  // caller — pinning the tracking issue permanently open (engine.mjs, `resolveFirstPartyOwners`).
+  // The action's own owner has TWO independent sources with the same documented meaning, and we
+  // read both because neither is documented for the shape we run in (a composite action's own
+  // step): ACTION_REPOSITORY is `${{ github.action_repository }}` passed from action.yml, and
+  // GITHUB_ACTION_REPOSITORY is the runner's ambient copy — which survives only because action.yml
+  // deliberately does NOT write the `GITHUB_` name and shadow it. Either being EMPTY (a local `./`
+  // invocation empties both) just drops out, so the set degrades to caller-only rather than
+  // exempting everything.
+  const firstParty = resolveFirstPartyOwners({
+    callerRepo: env.GITHUB_REPOSITORY,          // (a) e.g. creme-ypsilon/lampakia-astro
+    actionRepo: env.ACTION_REPOSITORY || env.GITHUB_ACTION_REPOSITORY, // (b) e.g. mvalasis/ci-actions — '' on a local `./` ref
+    extraOwners: env.FIRST_PARTY_OWNERS,        // (c) `first-party-owners` input, space/comma separated
+  });
+  const unpinned = scanUnpinnedActions(loadWorkflows(), firstParty);
 
   const report = renderReport(floorFindings, unpinned, {
-    floor: FLOOR, ecosystems, lockfiles, totalFindings: findings.length,
+    floor: FLOOR, ecosystems, lockfiles, totalFindings: findings.length, firstPartyOwners: firstParty,
   });
 
   const lines = [report];

@@ -1,7 +1,8 @@
 # security-baseline
 
-Air-gapped **security gate** for the `mvalasis/*` fleet — the one CI check that **blocks on
-every repo**. Rebuilt from a 2-tool script (semgrep + gitleaks) into a **tiered** gate that adds
+Air-gapped **security gate** for the fleet — the one CI check that **blocks on
+every repo** (the callers span two GitHub owners since the 2026-08 split, so this line names
+none; ownership is resolved at runtime — see §First-party ownership). Rebuilt from a 2-tool script (semgrep + gitleaks) into a **tiered** gate that adds
 verified-live secrets, dependency/SCA, custom WordPress & Astro/TS rules, and GitHub-Actions
 supply-chain auditing — while keeping the **blocking core tiny** so a strict upgrade never
 newly-blocks a currently-green repo. **No source ever leaves the runner** (see §Sovereignty for
@@ -66,6 +67,7 @@ keeps those working with zero edits**; the new WARN tiers ride along automatical
 | `base-ref` | _(auto)_ | PR base → push `event.before` (full pushed range) → `HEAD~1`. |
 | `fail-on-critical` | `true` | `true` = BLOCK on any CRITICAL (T0 or a promoted T1). |
 | `critical-checks` | `''` | Comma/space list of **T1** ids to elevate to CRITICAL for **this** caller. T0 ids are already critical; T2/unknown ids are reported and ignored. |
+| `first-party-owners` | `''` | **Extra** owners exempt from `gha-unpinned-action`. Already exempt with no config: `actions`/`github`, the caller's own owner, and **this action's own owner**. Only needed for a *third* owner (a second org whose actions you also control). |
 | `report-mode` | `false` | Onboarding escape hatch: report even T0 without blocking (loud banner). Must stay `false` for an enforcing caller. Pair with `report-mode-reason`. |
 | `semgrep-config` | `p/security-audit` | Community SAST ruleset (registry id or a vendored local path for full air-gap). The custom rule packs are always vendored-local. |
 | `semgrep-severity` | `ERROR` | Community-rule severity that blocks. |
@@ -119,12 +121,40 @@ carries a stable `metadata.checkId`, and is **FP-disciplined** against the real 
   `child_process` is receiver-constrained so `RegExp.exec` doesn't false-fire. The
   `PUBLIC_*_SITE_KEY` (a Turnstile *site* key is public by design) is excluded.
 - **GHA** rules audit the fleet's own CI: a third-party `uses:` not SHA-pinned, `github.event.*`
-  in a `run:` block, the `pull_request_target` trigger.
+  in a `run:` block, the `pull_request_target` trigger. An action ref may carry **subdirectory
+  segments** (`gradle/actions/setup-gradle@v4` is one action, not two path components); the
+  original pattern stopped at `owner/repo@`, so every three-segment ref was **invisible** — a false
+  NEGATIVE that silently unflagged a genuine mutable-tag third-party action in
+  `luxairport-frontend`. Fixed; the `actions/*` and `github/*` exemptions now cover their
+  three-segment forms too (`github/codeql-action/analyze@v3`).
+
+### First-party ownership (why the rule flags your own actions, and what removes them)
+
+`rules/gha.yaml` is **static YAML evaluated by semgrep** — no inputs, no env, no workflow context —
+so it cannot know whose actions these are, and it flags the caller's own shared actions along with
+everything else. Hard-coding an owner into the rule is not an option: it becomes a lie the day that
+owner changes. So ownership is decided at **runtime** by `scripts/firstparty.mjs`, which drops
+`gha-unpinned-action` findings whose `uses:` ref belongs to the union of:
+
+1. the **caller's** owner (`github.repository`),
+2. **this action's own** owner (`github.action_repository`),
+3. any owners named in **`first-party-owners`**.
+
+Clause 2 is what survives an ownership split. On 2026-08-02..04 eleven repos moved from `mvalasis`
+into the org `creme-ypsilon` while `mvalasis/ci-actions` stayed put — deriving "first-party" from
+the caller alone would report all 32 `mvalasis/ci-actions/<action>@v1` refs on those six callers as
+unpinned third-party actions. Owner comparison is lowercased. `github.action_repository` is **empty**
+for a local `./` invocation (this repo's own smoke job): empty owners are dropped rather than
+admitted as an `''`-owner that would match everything. Every uncertain branch — unrecoverable ref,
+unparseable owner, empty owner set — **keeps** the finding: a spurious warning is a nuisance, a
+silently dropped supply-chain finding defeats the rule.
 
 The packs already surface **real findings** the old gate missed — e.g. exception detail leaked in
 hlek-headless REST 500s (`wp-rest-error-detail`), a request-derived `fetch` in lampakia's
 newsletter route (`ts-ssrf`), and the fleet's unpinned `webfactory/ssh-agent` / `wrangler-action`
-/ `pnpm/action-setup` (`gha-unpinned-action`) — all as **WARN**. A 2026-06-30 dataflow re-audit of
+/ `pnpm/action-setup` — joined in v1.10.0 by `gradle/actions/setup-gradle@v4` in
+`luxairport-frontend`, which the pre-v1.10.0 two-segment pattern could not see at all
+(`gha-unpinned-action`) — all as **WARN**. A 2026-06-30 dataflow re-audit of
 lux-main found two **laundered** CWE-209 leaks the plain accessor-grep called clean —
 `array_merge($payload, $err->get_error_data())` normalized into a REST 502 (flight-confirm), and a
 provider `error_description` reflected via `add_query_arg`/`wp_safe_redirect` on the public `/login/`
@@ -168,11 +198,24 @@ page — now caught by **`wp-rest-error-detail-laundered`** (see §Honest limits
 - **The live-probe class is a separate gate.** Turnstile/server-reject end-to-end checks need a
   live HTTP probe of the deployed site → the proposed `form-protection` action, NOT this
   air-gapped static scan. `turnstile-test-key` here only catches a literal test key in *source*.
+- **First-party exemption is by OWNER, not by ref.** `gha-unpinned-action` trusts *every* action
+  under a first-party owner at *whatever* tag it is pinned to — not just `ci-actions`. That is the
+  deliberate trade for the fleet's floating-`@v1` policy (the whole point of `@v1` is that it
+  moves), and it is the one place v1.10.0 made the gate weaker rather than stronger: a compromised
+  action published under one of your own owners is not caught here. Keep the set as small as the
+  fleet actually needs — the two derived owners cover it today, and `first-party-owners` exists for
+  a third account you control, not as a general silencer.
 
 ## Self-test
 
 - `node scripts/selftest.mjs` — offline tier-engine test (block-by-default, never-newly-block,
-  promotion, T2-not-promotable, report-mode, redaction). The regression guard.
+  promotion, T2-not-promotable, report-mode, redaction) **plus** first-party owner resolution, the
+  `gha-unpinned-action` post-filter, and the `rules/gha.yaml` `uses:` regex — the last read **live
+  out of the rule file**, so the three-segment behaviour is provable on a machine with no semgrep
+  installed (CI still runs the real `semgrep --test`). It also asserts the ownership **wiring**
+  (`scan.mjs`'s three clauses + the `action.yml` env) against those files' source, because
+  `firstparty.mjs` can be perfect while the CLI feeds it the caller's owner alone — which is the
+  2026-08 bug restored, with every unit assertion still green. The regression guard.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
 
@@ -181,7 +224,9 @@ Both run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a repor
 ## Implementation
 
 `scripts/tiers.mjs` — pure, network-free tier engine (the `CHECKS` map is the single source of
-truth; unit-tested by `selftest.mjs`). `scripts/scan.mjs` — CLI: resolves the diff base, runs the
+truth; unit-tested by `selftest.mjs`). `scripts/firstparty.mjs` — pure first-party owner resolution
+and the `gha-unpinned-action` post-filter (see §First-party ownership); kept out of `tiers.mjs`
+because it is an ownership question, not a severity one. `scripts/scan.mjs` — CLI: resolves the diff base, runs the
 scanners, normalizes their output into `{checkId, file, line, msg}` findings, tiers + promotes via
 the engine, renders a per-check report to `GITHUB_STEP_SUMMARY`, exits non-zero only on a CRITICAL
 under `fail-on-critical`. Zero npm dependencies (pure Node 22). Tools are pinned binaries installed
