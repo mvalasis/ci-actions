@@ -169,5 +169,107 @@ check('unscoped + ENFORCING still exits 1 on the collapse',
   enforcing.exit === 1 && /❌ \*\*FAIL\*\*/.test(enforcing.stdout),
   `exit=${enforcing.exit} :: ${enforcing.stdout.slice(-400)}`);
 
+// ---------------------------------------------------------------------------
+// CRASH GUARD — asserted BEHAVIOURALLY, by crashing the real entrypoint.
+//
+// Never by grepping render-check.mjs for `process.on(` or for a line position: a
+// textual assertion goes vacuous the moment the file is restructured, and it
+// cannot distinguish a registered handler from a dead one — which is the exact
+// defect that shipped in deps-currency for the action's entire life.
+//
+// No Chromium and no network here: the fault is injected at (or before) the first
+// const, so the browser is never launched. `playwright` is stubbed in the temp
+// dir purely so the bare-specifier import resolves — that keeps this block
+// runnable on a bare checkout, without `npm ci`, unlike the fixture tests above.
+console.log('\n# crash guard (real render-check.mjs, injected fault)');
+{
+  const source = fs.readFileSync(RUN, 'utf8');
+  const ANCHOR = 'const env = process.env;';
+
+  // Fail CLOSED: if the anchor is gone the mutation is a silent no-op and the
+  // `early` assertions below would pass against an entrypoint that never crashed.
+  check('fault-injection anchor still present in render-check.mjs', source.includes(ANCHOR),
+    `(expected to find ${JSON.stringify(ANCHOR)} — if the const block was renamed, update this test)`);
+
+  if (source.includes(ANCHOR)) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vh-crash-'));
+    try {
+      // Minimal ESM stub so `import { chromium } from 'playwright'` resolves — and
+      // so `launch()` throws, which IS the `launch` variant's fault. No injection.
+      const stub = path.join(tmp, 'node_modules', 'playwright');
+      fs.mkdirSync(stub, { recursive: true });
+      fs.writeFileSync(path.join(stub, 'package.json'),
+        JSON.stringify({ name: 'playwright', version: '0.0.0-stub', type: 'module', main: 'index.js' }));
+      fs.writeFileSync(path.join(stub, 'index.js'),
+        'export const chromium = { launch() { throw new Error("injected launch fault"); } };\n');
+
+      // Two faults at deliberately different points in module evaluation, because
+      // they exercise genuinely different states — and only the pair pins the design.
+      //
+      //  LAUNCH — the entrypoint is UNMODIFIED; the stub throws at
+      //           `await chromium.launch()` (line ~195), long after every const is
+      //           initialised. This is the realistic production crash: Chromium
+      //           failing to start on the runner. Needs no anchor, so it cannot be
+      //           silently disarmed by restructuring the const block.
+      //
+      //  EARLY  — the const initialiser itself throws, so `FAIL`, `summaryFile`,
+      //           `safe` and friends are all still in the TEMPORAL DEAD ZONE when
+      //           the handler runs. This is the case that keeps the handler reading
+      //           `process.env`: "tidy" it to read the `FAIL` const and the handler
+      //           faults inside ITSELF with a ReferenceError — node exits 7 having
+      //           written nothing, losing the diagnostic and the exit code together,
+      //           which is precisely the failure the guard exists to prevent.
+      //           (Verified by mutation: swapping the env read for `FAIL` turns this
+      //           block red. Without this case the env read reads as a redundant
+      //           spelling of `FAIL` and is free to be refactored away.)
+      const variants = {
+        launch: source,
+        early: source.replace(ANCHOR, "const env = (() => { throw new Error('injected init fault'); })();"),
+      };
+
+      const crash = (variant, failOnStructure) => {
+        const file = path.join(tmp, `render-${variant}.mjs`);
+        fs.writeFileSync(file, variants[variant]);
+        const summaryPath = path.join(tmp, `sum-${variant}-${failOnStructure}.md`);
+        fs.writeFileSync(summaryPath, '');
+        const r = spawnSync(process.execPath, [file], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GITHUB_STEP_SUMMARY: summaryPath,
+            FAIL_ON_STRUCTURE: String(failOnStructure),
+            URLS: 'https://example.invalid/',
+          },
+        });
+        return { status: r.status, summary: fs.readFileSync(summaryPath, 'utf8'), stderr: r.stderr || '' };
+      };
+
+      for (const variant of ['launch', 'early']) {
+        const report = crash(variant, false);
+        const enforce = crash(variant, true);
+        const expected = variant === 'launch' ? 'injected launch fault' : 'injected init fault';
+
+        // The guard ran at all — the assertion the shipped code would have failed.
+        check(`[${variant}] a tool fault is reported into the step summary`,
+          report.summary.includes('verify-homepage crashed') && report.summary.includes(expected),
+          `(got ${JSON.stringify(report.summary.slice(0, 200))})`);
+        // …and the exit codes, which are the half that is a product decision.
+        check(`[${variant}] report mode: a crash exits 0 (must not block a report-mode caller)`,
+          report.status === 0, `(exit ${report.status}) ${report.stderr.slice(0, 200)}`);
+        check(`[${variant}] fail-on-structure: a crash exits 1 (conservative for an enforcing caller)`,
+          enforce.status === 1, `(exit ${enforce.status})`);
+        check(`[${variant}] the enforcing crash is reported too`,
+          enforce.summary.includes('verify-homepage crashed'));
+        // The report must say it is a TOOL fault, not a verdict on the page —
+        // this is what stops an operator triaging a scanner bug as a layout bug.
+        check(`[${variant}] the report disclaims being a verdict on the page`,
+          /not a verdict on the page/.test(report.summary), report.summary.slice(0, 200));
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+}
+
 console.log(failed === 0 ? '\n✅ all verify-homepage self-tests passed\n' : `\n❌ ${failed} self-test(s) failed\n`);
 process.exit(failed === 0 ? 0 : 1);

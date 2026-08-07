@@ -278,4 +278,41 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # ---- crash guard ----
+    # A fault in this CRAWLER (a curl invocation that blows up, an encoding error,
+    # a worker thread raising) is a fault in the TOOL, not a broken link on the
+    # caller's site. linkcheck has no report mode — it is structurally always
+    # enforcing — so unlike the JS siblings there is no exit code to soften: a
+    # crash still exits non-zero. What the guard fixes is ATTRIBUTION, which is
+    # the half that actually bit:
+    #
+    #   * exit 1 means "I crawled the site and found broken links" — a verdict.
+    #   * exit 2 means "I could not produce a verdict" — a tool fault. (2 was
+    #     already this file's code for the unset-LINKCHECK_HOST config error,
+    #     which is the same class, so the two unify rather than collide.)
+    #
+    # This split is what lets action.yml stop filing a "Weekly link check: broken
+    # links found" issue against the caller's repo when it was OUR scanner that
+    # died. Before it, the issue steps keyed on `failure()`, so a crash opened a
+    # bug report blaming the site for links that were never checked, with the body
+    # "(report unavailable — open the run log)".
+    #
+    # The report goes to STDOUT as well as stderr on purpose: action.yml pipes
+    # stdout through `tee linkcheck-report.txt` and appends that file to the step
+    # summary, so stdout is the only path that reaches an operator reading the run
+    # summary. stderr carries the full traceback for the raw job log.
+    #
+    # `except Exception` deliberately does NOT catch SystemExit (it derives from
+    # BaseException), so every verdict exit above — sys.exit(0/1/2) — passes
+    # through untouched and is never relabelled as a crash. KeyboardInterrupt is
+    # left uncaught for the same reason.
+    try:
+        main()
+    except Exception:  # noqa: BLE001 — deliberate catch-all; re-reported, not swallowed
+        import traceback
+        detail = traceback.format_exc()
+        print("\n=== linkcheck CRASHED — the TOOL faulted; this is NOT a link verdict ===")
+        print(detail)
+        print("link check: CRASH (exit 2 — no verdict; links were not fully checked)")
+        sys.stderr.write(detail)
+        sys.exit(2)

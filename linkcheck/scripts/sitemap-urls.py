@@ -12,6 +12,19 @@ bypass) ONLY to the internal host (LINKCHECK_HOST, or the seed sitemap
 hosts) and its subdomains, re-scoped per redirect hop — never to a
 cross-host child-sitemap <loc> or redirect target. Uses a real-browser
 UA so the fetch isn't challenged on cloud-runner IPs.
+
+# lint-allow-no-crash-guard: this is a PIPELINE STAGE, not a gate, and it has no
+# report-mode input to consult. Its whole output is the URL list the crawl runs
+# on, so a fault here means the page set is UNKNOWN — continuing would hand the
+# crawler an empty or partial list and produce a false-clean run over pages that
+# were never checked, which is strictly worse than stopping. It is also already
+# attributed correctly: action.yml asserts `[ "$N" -gt 0 ]` on this script's
+# output and fails with `::error::sitemap expansion produced no URLs (sitemap
+# down?)`, naming the real cause. Nothing here is laundered into a verdict about
+# the caller's links — and misattribution, not the exit code, is what rule 3
+# exists to catch. Contrast linkcheck.py, which IS guarded despite equally having
+# no report mode, because its wrapper DID misattribute (it filed a false
+# "broken links found" issue on a crawler crash).
 """
 import gzip
 import os

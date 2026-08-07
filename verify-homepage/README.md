@@ -184,6 +184,35 @@ shapes above, at a desktop width (drawer hidden → collapse) and a mobile width
 (drawer visible → overlap), and assert that scoped selectors stay silent on the
 *identical* markup. Requires `npm ci && npx playwright install chromium`.
 
+The crash-guard block at the end of the same file needs **neither** — it stubs
+`playwright` in a temp dir, so it runs on a bare checkout.
+
+## A gate fault is not a page verdict
+
+If `render-check.mjs` itself faults — Chromium failing to launch, a malformed
+`verify-nav.json`, a driver timeout escaping an await — it reports
+**`verify-homepage crashed`** into the step summary and the job log, says in as
+many words that this is *not a verdict on the page*, and exits
+`fail-on-structure ? 1 : 0`. A report-mode caller is therefore never newly-BLOCKED
+by a bug in this action. Before v1.12.0 any throw exited 1 regardless, with a bare
+stack and nothing in the summary.
+
+Two implementation notes, both load-bearing:
+
+- The handler is registered **above every other top-level statement**. This is a
+  top-level-await module whose terminal paths are bare `process.exit()` calls, so
+  it gets none of the ordering-immunity the sibling
+  `(async () => {…})().catch(…)` entrypoints have for free.
+- It reads `FAIL_ON_STRUCTURE` from **`process.env`**, not from the `FAIL` const.
+  The likeliest crash site is const initialisation itself, and at that moment
+  `FAIL` is in the **temporal dead zone** — reading it there throws
+  `ReferenceError` *inside the crash handler*, so node exits 7 having written
+  nothing, losing the diagnostic and the exit code together. `typeof` is no
+  escape; it throws in the TDZ too. `scripts/selftest.mjs` pins this with a fault
+  injected into the const block, and that case goes red under exactly that
+  "tidy-up" — verified by mutation, so the env read cannot be refactored away as
+  a redundant spelling of `FAIL`.
+
 ## Honest limits
 
 Catches **structure + render breakage**, not visual taste. It does not judge

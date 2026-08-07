@@ -41,7 +41,47 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.11.0**.
+`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.12.0**.
+
+**v1.12.0** — the three entrypoints that had **no crash guard at all** now have
+one, closing the split v1.11.0 left open. A fault in a scanner is a fault in the
+GATE, and it must not arrive in a caller's repo dressed as a finding about their
+site:
+
+| entrypoint | language | before | after |
+| --- | --- | --- | --- |
+| `verify-homepage/scripts/render-check.mjs` | top-level-await ESM | any throw → exit 1 | reports the fault, exits `fail-on-structure ? 1 : 0` |
+| `linkcheck/scripts/linkcheck.py` | plain `main()` | traceback → exit 1, **and a false "broken links found" issue filed** | exit **2** = "no verdict", distinct from 1 = "links are broken"; issue steps key on the crawler's rc, so no issue is filed or closed on a crash |
+| `a11y-audit/scripts/audit.sh` | bash | abort → exit 1; any non-zero `pa11y-ci` rc reported as **"WCAG errors found"** | reports the fault, exits `fail-on-violations ? 1 : 0`; a scanner that never produced a per-URL result is no longer reported as accessibility debt |
+
+**Caller-visible:** a report-mode caller whose scanner crashes now goes green
+instead of red; an enforcing caller still blocks. `linkcheck` is unchanged in
+exit-code terms (it has no report mode — it is structurally always-enforcing);
+what changed there is **attribution**, which is what actually bit: a crashed
+crawler used to open a bug report blaming the caller's site for links that were
+never checked, with the body "(report unavailable — open the run log)".
+
+Three languages, so three behavioural regression suites — each injects a fault
+into the **real** entrypoint and runs it, never grepping the source for a
+handler's position (a textual assertion goes vacuous the moment the file is
+restructured, and cannot tell a live guard from a dead one):
+`verify-homepage/scripts/selftest.mjs` (two faults — one at `chromium.launch`,
+one inside the const block, which is what pins the handler to reading
+`process.env` instead of a TDZ const), `linkcheck/scripts/selftest.py`, and the
+new `a11y-audit/scripts/selftest.sh` + `a11y-audit-selftest.yml` (a11y-audit had
+no self-test at all before this; the workflow runs it on **bash 5 and bash 3.2**,
+because the guard is built out of `trap … EXIT` and `set -u` abort semantics).
+
+Statically, `lint-entrypoint-output.mjs` grew **rule 3** — crash-guard presence
+across `.mjs` / `.py` / `.sh`, scoped to the scripts an `action.yml` actually
+executes (pure library modules cannot set an exit code, so a guard in one would
+be noise). Two entrypoints carry a documented `lint-allow-no-crash-guard:`
+exemption: `linkcheck/scripts/sitemap-urls.py` and
+`verify-homepage/scripts/link-crawl.sh`. **The test for the exemption is
+misattribution, not the exit code** — both are wrapped by steps that already
+report their failure for what it is, so there is nothing to realign; `linkcheck.py`
+is guarded despite equally having no report mode precisely because its wrapper
+did misattribute.
 
 **v1.11.0** — `deps-currency`'s crash guard was **dead code** from the action's
 first commit until 2026-08-05: `process.on('uncaughtException', …)` sat *below*
@@ -59,6 +99,10 @@ and `verify-homepage` / `linkcheck` / `a11y-audit` keep no guard at all, which
 is honest rather than dead. Now blocked statically by `.github/workflows/lint.yml`
 (rule 2) and asserted behaviourally by `deps-currency/scripts/selftest.mjs`,
 which crashes the real scanner rather than grepping it for a line position.
+_(Superseded by **v1.12.0**: "honest rather than dead" was the right call about
+the COMMENT and the wrong call about the BEHAVIOUR — an absent guard still
+blocks a report-mode caller, and in `linkcheck`'s case still filed a false issue.
+All three are guarded as of v1.12.0.)_
 
 **v1.10.0** — `deps-currency` + `security-baseline` stop deriving "first-party"
 from the **caller's** owner, because the action's owner and the caller's owner
@@ -333,6 +377,33 @@ History: **v1.2.1** was a `linkcheck` verify-token cross-origin leak fix
 (redirects followed manually, `X-Verify-Source` re-scoped per hop); **v1.2.0**
 was the `seo-aeo` parsed Node+cheerio rebuild (T0/T1/T2 + `critical-checks`).
 
+## A tool fault is never a finding about the caller's site
+
+**Rule:** when an action's own scanner faults, it reports the fault **as a
+fault** and exits under the caller's own enforcement setting —
+`FAIL_ON_<X> ? 1 : 0`. Our bug must never newly-BLOCK a caller who asked for
+report mode, and must never arrive dressed as a verdict about their site.
+
+The six JS entrypoints that use `(async () => {…})().catch(…)` get this shape for
+free. Everything else has to arm a guard explicitly, and **before any statement
+that can fault** — which in practice means reading the enforcement setting from
+the *environment* rather than from the program's own state:
+
+| language | guard | why the env read matters |
+| --- | --- | --- |
+| `.mjs` | `process.on('uncaughtException'/'unhandledRejection', …)` hoisted above the main invocation | a crash during const init leaves module consts in the **temporal dead zone**; reading one there throws `ReferenceError` *inside the handler*, which loses the diagnostic and the exit code together (node then exits 7) |
+| `.py` | `try/except` around `main()` under `if __name__` | `SystemExit` is not an `Exception`, so deliberate verdict exits pass through untouched and are never relabelled a crash |
+| `.sh` | `trap … EXIT` on the **first** executable line + a sentinel that deliberate exits set | **not `trap … ERR`**: `set -u` aborts *without* firing `ERR`, and with errexit off `ERR` fires on commands that are not faults |
+
+Mechanized as **rule 3** of the entrypoint lint (below) and asserted
+behaviourally by each action's self-test, which crashes the real entrypoint
+rather than grepping it for a handler. An entrypoint may opt out with
+`lint-allow-no-crash-guard: <reason>`, but the test is **misattribution, not the
+exit code**: `sitemap-urls.py` and `link-crawl.sh` are exempt because their
+wrapper steps already report their failure for what it is, while `linkcheck.py`
+is guarded despite equally having no report-mode input, because its wrapper
+filed a false "broken links found" issue on a crawler crash.
+
 ## Repo hygiene — action entrypoints never write to stdout asynchronously
 
 **Rule:** inside an action entrypoint (`<action>/scripts/*.mjs`, except
@@ -356,13 +427,30 @@ const sayErr = (s = '') => { try { fs.writeSync(2, `${s}\n`); } catch { console.
 
 Mechanized by [`.github/scripts/lint-entrypoint-output.mjs`](.github/scripts/lint-entrypoint-output.mjs),
 run as a **blocking** job on every push and PR
-([`lint.yml`](.github/workflows/lint.yml)); its own 43-assertion fixture suite
+([`lint.yml`](.github/workflows/lint.yml)); its own fixture suite
 (`lint-entrypoint-output.selftest.mjs`) runs first, because a scrubber bug would
 fail permissively. Entrypoints are discovered from `action.yml` presence, so a
 new action is covered the day it lands. The lint flags **any** raw call, not just
 one adjacent to a `process.exit()` — in the v1.7.1 case the two sat lines apart.
 Two allowances: the `catch` fallback of an `fs.writeSync` on the same line, and
 `// lint-allow-raw-output: <reason>` (a reason is required).
+
+It carries **three** rules, all of the same shape — defects a green run cannot
+distinguish from correct code:
+
+1. **raw async stdout writes** (above) — `.mjs` only.
+2. **crash guards registered after `main` runs** — dead code that has never run;
+   `.mjs` only. Added v1.11.0 after `deps-currency` shipped one for its whole life.
+3. **no crash guard at all** — `.mjs` / `.py` / `.sh`, added v1.12.0. Scoped to
+   the scripts an `action.yml` actually **executes** (`discoverExecuted`), since a
+   pure library module cannot set an exit code. Both discovery passes fail
+   **closed** on an empty result: a rule that has silently switched itself off
+   looks exactly like a rule with nothing to report.
+
+Known limit, stated rather than papered over: for bash, rule 3 matches any
+`trap … EXIT`, so a pure **cleanup** trap reads as a guard. That is why
+`link-crawl.sh` carries an explicit pragma instead of relying on detection, and
+why the behavioural self-tests — not this lint — are the load-bearing layer.
 
 The seven `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
 `console.log(…)` then `process.exit(…)`, but emit 1375–4117 bytes, an order of
@@ -433,6 +521,29 @@ every hop) so the token is never carried to a cross-origin redirect target —
 regression guard: it stands up two loopback servers on different hostnames and
 asserts the token never reaches the external host across a redirect chain
 (`python3 linkcheck/scripts/selftest.py`; also runs in CI on `linkcheck/**`).
+
+The same self-test also pins the **crash-guard attribution** added in v1.12.0.
+
+### Exit codes, and why the issue lifecycle keys on them
+
+`linkcheck` has no report mode — a broken internal link is always fatal — so
+there is no exit code to soften when the crawler faults. What matters is telling
+a **verdict** apart from a **fault**:
+
+| exit | meaning | issue lifecycle |
+| --- | --- | --- |
+| `0` | crawled clean | close the tracking issue |
+| `1` | crawled, found broken links | open / comment on it |
+| `2` | **could not crawl** — the tool faulted, or `LINKCHECK_HOST` is unset | do **neither** |
+
+Before v1.12.0 the issue steps keyed on `failure()`, which cannot see the
+difference: a crashed crawler filed a "Weekly link check: broken links found"
+issue against the caller's repo, blaming their site for links that were never
+checked, with the body `(report unavailable — open the run log)`. The crawl step
+now publishes its own `rc` as a step output and the issue steps key on that, so a
+fault leaves the tracking issue untouched in **both** directions — it is not
+opened on a crash, and just as importantly not *closed*, because a run that never
+checked the links is not evidence that they are healthy.
 
 ## Adding the action to a new repo
 

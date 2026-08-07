@@ -4,13 +4,79 @@
 # VERIFY_TOKEN (optional) → X-Verify-Source header, to clear a WAF/CF bot-challenge.
 set -uo pipefail
 
+# ---- crash guard — armed before EVERY other statement ---------------------
+# A fault in this SCRIPT or in pa11y-ci is a fault in the GATE, not WCAG debt on
+# the caller's page. It is reported as such and exits under the caller's own
+# `fail-on-violations` setting, so our bug never newly-BLOCKS a report-mode
+# caller — the report-mode-first rule the JS entrypoints already follow.
+#
+# WHY `trap … EXIT` AND NOT `trap … ERR`. Measured, not assumed:
+#   * `set -u` (line 5) aborts the shell on an unbound variable with status 1
+#     even though errexit is off — and it does NOT fire the ERR trap, only EXIT.
+#     An unbound variable is the single most likely fault in this script, so an
+#     ERR trap would miss precisely the class it was written for.
+#   * With errexit off, ERR fires on every non-zero command while the script
+#     carries on regardless — including the deliberate `grep -q` probes below —
+#     so an ERR trap would also report crashes that never happened.
+# EXIT fires exactly once, on every path, and can rewrite the status. It is the
+# only hook that is both complete and non-spurious here.
+#
+# ORDER AND ENV-IMMUNITY, both the hard way. The first draft of this guard sat
+# below the config block and read the script's own `$FAIL_ON_VIOLATIONS` — and a
+# behavioural test injecting an unbound variable into that block walked straight
+# past it: an abort ABOVE the `trap` line never reaches the handler, and a handler
+# that dereferences a not-yet-assigned variable would re-abort inside itself under
+# `set -u`. So the guard is armed on the first executable line, and every value it
+# needs is read as `${VAR:-default}` from the ENVIRONMENT, never from a script
+# variable that may not be assigned yet. That is the same rule, for the same
+# reason, as render-check.mjs reading `process.env` instead of its TDZ consts.
+#
+# The sentinel separates a deliberate verdict from an abort: every intentional
+# exit goes through `finish`, which sets it. Anything reaching the trap without it
+# aborted early.
+summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+# `|| true`: the crash reporter runs THROUGH note, so note must never be the thing
+# that fails while reporting that something failed (an unwritable summary sink is
+# itself one of the faults worth reporting). The stderr mirror in report_fault is
+# what guarantees the diagnostic survives that case.
+note() { printf '%s\n' "$*" >>"$summary" 2>/dev/null || true; }
+
+verdict_reached=0
+finish() { verdict_reached=1; exit "$1"; }
+
+report_fault() {   # $1 = one-line reason
+  note ""
+  note "- ❌ **a11y-audit crashed** — the GATE faulted. This is not a verdict on the page."
+  note "  - $1"
+  if [ "${FAIL_ON_VIOLATIONS:-false}" = "true" ]; then
+    note "  - \`fail-on-violations: true\` → exiting **1** (conservative for an enforcing caller)."
+  else
+    note "  - \`fail-on-violations: false\` → exiting **0** — a tool fault must not newly-block a report-mode caller."
+  fi
+  # Mirror to stderr: if the summary sink is what broke, this is the only copy.
+  printf 'a11y-audit crashed: %s\n' "$1" >&2
+}
+
+# Report a tool fault and exit under the caller's enforcement setting.
+crash() {
+  report_fault "$1"
+  if [ "${FAIL_ON_VIOLATIONS:-false}" = "true" ]; then finish 1; else finish 0; fi
+}
+
+on_exit() {
+  rc=$?
+  # A verdict was reached — pass its status through untouched.
+  if [ "$verdict_reached" -eq 1 ]; then exit "$rc"; fi
+  report_fault "unexpected exit $rc before any verdict was reached (unbound variable under \`set -u\`, an errexit abort, or a fatal signal)"
+  if [ "${FAIL_ON_VIOLATIONS:-false}" = "true" ]; then exit 1; fi
+  exit 0
+}
+trap on_exit EXIT
+
 STANDARD="${STANDARD:-WCAG2AA}"
 RUNNER="${RUNNER:-axe htmlcs}"
 FAIL_ON_VIOLATIONS="${FAIL_ON_VIOLATIONS:-false}"
 MAX_URLS="${MAX_URLS:-25}"
-
-summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
-note() { printf '%s\n' "$*" >>"$summary"; }
 
 # Header for sitemap fetch (pa11y gets it via the config below).
 # NOTE: this curl has NO -L, so a 3xx on the sitemap is not followed and the
@@ -31,7 +97,7 @@ fi
 urls=$(printf '%s\n' "$urls" | tr ' ' '\n' | sed '/^$/d' | sort -u | head -n "$MAX_URLS")
 
 note "## ♿ a11y-audit"
-if [ -z "$urls" ]; then note "- no URLs to audit — skipped"; exit 0; fi
+if [ -z "$urls" ]; then note "- no URLs to audit — skipped"; finish 0; fi
 count=$(printf '%s\n' "$urls" | wc -l | tr -d ' ')
 note "- standard: \`$STANDARD\` · runners: \`$RUNNER\` · URLs: $count"
 
@@ -113,15 +179,44 @@ if [ "$rc" -ne 0 ] \
   run_audit
   rc=$?
 fi
+# NB this ENABLES errexit rather than restoring it — line 5 sets `-uo pipefail`,
+# never `-e` — so the verdict block below runs under errexit that the rest of the
+# script does not. Left as-is (it is not this change's bug, and it only tightens
+# the tail), but it is no longer silent: an abort it triggers now lands in the
+# EXIT trap and is reported as a tool fault instead of vanishing into a bare
+# non-zero exit.
 set -e
 
 if [ "$rc" -eq 0 ]; then
   note "- ✅ no WCAG $STANDARD errors"
-  exit 0
+  finish 0
 fi
+
+# A non-zero rc is NOT automatically "WCAG errors found". pa11y-ci exits non-zero
+# for a fault too — a missing binary (127), an unwritable /tmp config, a Chromium
+# that will not launch — and until now every one of those was reported to the
+# operator as accessibility debt and BLOCKED an enforcing caller under a verdict
+# the tool never actually reached. The per-URL reporter lines are the evidence
+# that a verdict exists; without one there is nothing to report but the fault.
+# (Anchored on the leading ">" reporter shape, same as the retry logic above, so
+# the audited page's own HTML can never spoof its way into looking like one.)
+have_viol=0
+if grep -qE "$viol_errline" /tmp/pa11y-out.txt 2>/dev/null; then have_viol=1; fi
+have_runerr=0
+if grep -qE "$ran_errline" /tmp/pa11y-out.txt 2>/dev/null; then have_runerr=1; fi
+
+if [ "$have_viol" -eq 0 ]; then
+  if [ "$have_runerr" -eq 1 ]; then
+    crash "pa11y-ci could not load the target page(s) — every URL reported \`Failed to run\`, twice (site unreachable from the runner, or Chromium failed to start). No page was audited."
+  else
+    crash "pa11y-ci exited $rc without reporting a per-URL result (missing binary, unwritable config, or a Chromium launch failure). No page was audited."
+  fi
+fi
+
+# From here a real WCAG verdict exists.
 if [ "$FAIL_ON_VIOLATIONS" = "true" ]; then
   note "- ❌ WCAG errors found (see log) — BLOCKING"
-  exit 1
+  finish 1
 fi
 note "- ⚠️ WCAG errors found (see log) — report-only; set \`fail-on-violations: true\` to block once clean"
-exit 0
+finish 0

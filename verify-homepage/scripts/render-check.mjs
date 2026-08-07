@@ -21,6 +21,67 @@
 import fs from 'node:fs';
 import { chromium } from 'playwright';
 
+// ---- crash guard — MUST stay the first top-level statement after the imports ----
+// A fault in this tool (Chromium failing to launch, a malformed verify-nav.json, a
+// driver timeout escaping an await) is a fault in the GATE, not a finding about the
+// caller's page. It is reported as such and exits under the caller's OWN enforcement
+// setting, so our bug can never newly-BLOCK a report-mode caller. That is the
+// report-mode-first rule the six sibling JS entrypoints get for free from their
+// `(async () => {…})().catch(…)` shape; this module has no such shape — it is a
+// top-level-await module whose every terminal path is a bare `process.exit()` — so
+// the guard has to be an explicit registration, and it has to be armed before any
+// statement that can throw.
+//
+// ORDER-IMMUNE BY CONSTRUCTION, and that is not incidental. The handler reads
+// FAIL_ON_STRUCTURE and GITHUB_STEP_SUMMARY straight from `process.env` instead of
+// from the module's `FAIL` / `summaryFile` consts, because the most likely crash
+// site is const initialisation itself (a bad VIEWPORTS token, an unreadable
+// NAV_FILE) — and at that moment those consts are in the temporal dead zone, where
+// a read throws ReferenceError. That would fault the crash handler INSIDE the crash
+// handler and lose the diagnostic and the exit code together, which is the exact
+// failure this guard exists to prevent. `typeof` is no escape: it throws in the TDZ
+// too. `process.env` is readable at every point of module evaluation, so this
+// handler is correct even if it fires on the first line.
+//
+// BOTH events are registered because they catch different classes: a throw —
+// synchronous, or after an await — surfaces as `uncaughtException` (verified on
+// node 22.22), while a stray un-awaited rejection (a `page.goto` whose promise
+// escapes) surfaces as `unhandledRejection`. Registering only the first would leave
+// that second class exiting 1 regardless of `fail-on-structure`.
+const onCrash = (kind) => (err) => {
+  // Mirrors the `FAIL` const's rule (default true → BLOCK), read order-immunely.
+  const failing = (process.env.FAIL_ON_STRUCTURE || '') !== 'false';
+  // Inline sanitisation: the module's `safe()` is a const defined below and is in
+  // the TDZ for exactly the crashes most worth reporting. Strips the markdown
+  // structural chars (backtick included, so the fence below cannot be escaped).
+  const detail = String((err && err.stack) || err || 'unknown')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[`|<>[\]*_~#]/g, '')
+    .slice(0, 400);
+  const msg = [
+    '',
+    '---',
+    '',
+    `❌ **verify-homepage crashed** (${kind}) — the GATE faulted. This is not a verdict on the page.`,
+    '',
+    '```',
+    detail,
+    '```',
+    '',
+    failing
+      ? '`fail-on-structure: true` → exiting **1** (conservative for an enforcing caller).'
+      : '`fail-on-structure: false` → exiting **0** — a tool fault must not newly-block a report-mode caller.',
+    '',
+  ].join('\n');
+  try {
+    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY || '/dev/stdout', `${msg}\n`);
+  } catch { /* summary sink unwritable — the job-log mirror below still lands */ }
+  try { fs.writeSync(2, `${msg}\n`); } catch { console.error(msg); }
+  process.exit(failing ? 1 : 0);
+};
+process.on('uncaughtException', onCrash('uncaughtException'));
+process.on('unhandledRejection', onCrash('unhandledRejection'));
+
 const env = process.env;
 const URLS = (env.URLS || '').split(/\s+/).map((s) => s.trim()).filter(Boolean);
 const CHECKS = new Set((env.CHECKS || 'render,nav').split(/[\s,]+/).map((s) => s.trim()).filter(Boolean));

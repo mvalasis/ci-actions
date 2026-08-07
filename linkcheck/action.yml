@@ -47,16 +47,24 @@ runs:
         [ "$N" -gt 0 ] || { echo "::error::sitemap expansion produced no URLs (sitemap down?)"; exit 1; }
 
     - name: Crawl + check every link & image
+      id: crawl
       shell: bash
       env:
         LINKCHECK_HOST: ${{ inputs.host }}
         LINKCHECK_WORKERS: ${{ inputs.workers }}
         LINKCHECK_ALLOW: ${{ github.workspace }}/${{ inputs.allow-file }}
         VERIFY_HOMEPAGE_TOKEN: ${{ inputs.verify-token }}
+      # `rc` is published as a step OUTPUT so the issue steps below can tell a link
+      # VERDICT (rc 1) from a tool FAULT (rc 2) — `failure()` cannot, and keying on
+      # it is what used to file a false "broken links found" issue whenever our own
+      # crawler died. The write to $GITHUB_OUTPUT happens BEFORE `exit "$rc"`; a
+      # step's outputs are collected regardless of its exit status, so the value
+      # survives the deliberate non-zero exit that still fails the gate.
       run: |
         set -o pipefail
         python3 "${{ github.action_path }}/scripts/linkcheck.py" - < pages.txt | tee linkcheck-report.txt
         rc=${PIPESTATUS[0]}
+        echo "rc=$rc" >> "$GITHUB_OUTPUT"
         { echo '## Weekly full-site link & image check'; echo; echo '```'; cat linkcheck-report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
         exit "$rc"
 
@@ -69,8 +77,17 @@ runs:
         if-no-files-found: ignore
         retention-days: 14
 
+    # Issue lifecycle keys on the crawler's OWN exit code, never on `failure()`.
+    #   rc 1  → real broken links   → open/comment.
+    #   rc 0  → clean               → close.
+    #   rc 2  → the crawler crashed → do NEITHER. We did not check the links, so we
+    #           can neither report them broken nor declare them clean; the step is
+    #           already red and the crash detail is already in the step summary.
+    #   unset → the crawl step never ran (e.g. sitemap expansion failed) → also
+    #           neither, which falls out of the `== '1'` / `== '0'` comparison for
+    #           free rather than needing its own case.
     - name: Open / update the broken-links issue
-      if: ${{ failure() && inputs.manage-issue == 'true' }}
+      if: ${{ !cancelled() && steps.crawl.outputs.rc == '1' && inputs.manage-issue == 'true' }}
       continue-on-error: true
       shell: bash
       env:
@@ -92,7 +109,7 @@ runs:
         fi
 
     - name: Close the broken-links issue when clean
-      if: ${{ success() && inputs.manage-issue == 'true' }}
+      if: ${{ !cancelled() && steps.crawl.outputs.rc == '0' && inputs.manage-issue == 'true' }}
       continue-on-error: true
       shell: bash
       env:

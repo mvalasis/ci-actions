@@ -54,6 +54,19 @@ Rollout: start `fail-on-violations: false` (surface the backlog), fix it, then f
   prefer an origin-bound / IP-allowlisted WAF rule over a portable bearer token. The
   no-broadcast guarantee is a property of pa11y@9's interception code, so the `pa11y-ci@4`
   pin is a security control — re-audit before a major bump.
+- **A scanner fault is not accessibility debt** (v1.12.0). If the audit itself breaks —
+  `pa11y-ci` missing, an unwritable config, Chromium failing to start, or an abort inside
+  `audit.sh` — the step reports **`a11y-audit crashed`** and exits
+  `fail-on-violations ? 1 : 0`. So a report-mode caller is never newly-BLOCKED by a bug in
+  this action, and an enforcing caller still stops (conservatively) rather than going green
+  on an audit that never ran. Previously *any* non-zero `pa11y-ci` exit was reported as
+  **"WCAG errors found"**, which blocked enforcing callers under a verdict the tool had
+  never actually reached; a run where no URL produced a per-URL reporter line is now
+  reported as a fault, not as debt. The guard is a `trap … EXIT` armed on the first
+  executable line — **not** `trap … ERR`, because `set -u` aborts *without* firing `ERR` —
+  plus a sentinel so deliberate verdicts pass through untouched. Regression-tested
+  behaviourally in `scripts/selftest.sh` (stubs `pa11y-ci`, crashes the real script; runs on
+  bash 5 **and** bash 3.2 in `a11y-audit-selftest.yml`).
 - **Desktop viewport only** (pa11y default 1280×1024). Elements hidden at desktop width
   (e.g. a `md:hidden` mobile nav) are not exercised; audit a mobile URL separately if needed.
 - **Reload-on-load resilience.** Pages that navigate a beat after first load — **LiteSpeed

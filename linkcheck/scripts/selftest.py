@@ -208,11 +208,104 @@ def main():
     int_srv.shutdown()
     ext_srv.shutdown()
 
+    crash_guard_checks()
+
     print()
     if FAILS:
         print(f"FAIL — {len(FAILS)} check(s) failed: {', '.join(FAILS)}")
         raise SystemExit(1)
-    print("PASS — token never reaches a cross-origin host.")
+    print("PASS — token scoping + crash-guard attribution hold.")
+
+
+def crash_guard_checks():
+    """Crash guard — asserted BEHAVIOURALLY, by crashing the real crawler.
+
+    Never by grepping linkcheck.py for `except`: a textual assertion cannot tell a
+    live handler from a dead one, and goes vacuous the moment the file is
+    restructured. So we mutate a COPY of the real entrypoint, run it, and read the
+    exit code and the output an operator would actually see.
+
+    linkcheck has no report mode — it is structurally always-enforcing — so unlike
+    the JS siblings there is no exit code to soften. What is pinned here is
+    ATTRIBUTION, the half that bit: exit 1 means "I checked, links are broken",
+    exit 2 means "I could not check". That distinction is what lets action.yml
+    stop filing a false broken-links issue when it was our own scanner that died.
+    """
+    import subprocess
+    import sys
+    import tempfile
+
+    print("\n# crash guard (real linkcheck.py, injected fault)")
+    src = open(os.path.join(HERE, "linkcheck.py"), encoding="utf-8").read()
+    anchor = "def main():"
+
+    # Fail CLOSED: a missing anchor makes the mutation a silent no-op, and every
+    # assertion below would then pass against a crawler that never crashed.
+    check(f"fault-injection anchor {anchor!r} still present", anchor in src)
+    if anchor not in src:
+        return
+
+    def run(source, env_extra=None, stdin=""):
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "lc.py")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(source)
+            env = {"PATH": os.environ.get("PATH", ""), "LINKCHECK_HOST": "localhost"}
+            env.update(env_extra or {})
+            r = subprocess.run([sys.executable, p, "-"], input=stdin,
+                               capture_output=True, text=True, env=env)
+            return r
+
+    crashed = run(src.replace(anchor, anchor + "\n    raise RuntimeError('injected crawler fault')"))
+
+    # (1) exit 2 = "no verdict", distinct from 1 = "real broken links". This is the
+    #     single assertion the action.yml issue gating depends on.
+    check("a crawler fault exits 2 (tool fault), NOT 1 (a link verdict)", crashed.returncode == 2)
+
+    # (2) the crash must reach STDOUT, because action.yml pipes stdout through
+    #     `tee linkcheck-report.txt` and appends that file to the step summary —
+    #     stdout is the only path to an operator reading the run summary. A guard
+    #     that reported to stderr alone would be invisible where it matters.
+    check("the crash is reported on stdout (the path to the step summary)",
+          "linkcheck CRASHED" in crashed.stdout)
+    check("the crash names itself a TOOL fault, not a link verdict",
+          "NOT a link verdict" in crashed.stdout)
+    check("the injected reason is carried through", "injected crawler fault" in crashed.stdout)
+    check("the full traceback reaches stderr for the raw job log",
+          "injected crawler fault" in crashed.stderr and "Traceback" in crashed.stderr)
+
+    # (3) a crash must NEVER be mistaken for a clean run — the failure mode that
+    #     would silently close the tracking issue and declare a broken site healthy.
+    check("a crash never prints the PASS verdict", "link check: PASS" not in crashed.stdout)
+
+    # (4) SystemExit passes through untouched: `except Exception` does not catch it
+    #     (it derives from BaseException), so every deliberate verdict exit keeps its
+    #     own code and is never relabelled a crash. Asserted on the real config-error
+    #     path — no LINKCHECK_HOST — which already exits 2 for a genuine reason.
+    cfg = run(src, env_extra={"LINKCHECK_HOST": ""})
+    check("a deliberate config-error exit is not relabelled as a crash",
+          cfg.returncode == 2 and "CRASHED" not in cfg.stdout)
+
+    # (5) the clean path is untouched by the guard: zero pages in, PASS out, exit 0.
+    ok = run(src)
+    check("an empty clean run still exits 0 with PASS",
+          ok.returncode == 0 and "link check: PASS" in ok.stdout)
+
+    # (6) action.yml wiring. The exit-code split above is only worth anything if the
+    #     issue steps actually key on it. There is no runtime to exercise a GitHub
+    #     `if:` expression, so this is textual by necessity — but it is pinned to the
+    #     SEMANTIC claim (rc-keyed, and specifically NOT failure()-keyed), which is
+    #     the thing that regressed, rather than to formatting.
+    ay = open(os.path.join(HERE, "..", "action.yml"), encoding="utf-8").read()
+    open_step = ay.split("- name: Open / update the broken-links issue")[1].split("- name:")[0]
+    close_step = ay.split("- name: Close the broken-links issue when clean")[1].split("- name:")[0]
+    check("the crawl step publishes its rc as a step output", 'echo "rc=$rc" >> "$GITHUB_OUTPUT"' in ay)
+    check("open-issue keys on rc == '1' (a real link verdict)",
+          "steps.crawl.outputs.rc == '1'" in open_step)
+    check("open-issue no longer keys on failure() — the false-issue bug",
+          "failure()" not in open_step)
+    check("close-issue keys on rc == '0' (verified clean), not success()",
+          "steps.crawl.outputs.rc == '0'" in close_step and "success()" not in close_step)
 
 
 if __name__ == "__main__":

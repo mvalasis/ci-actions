@@ -14,6 +14,17 @@
 #   bash scripts/link-crawl.sh https://www.lux-airport.lu/ https://www.lux-airport.lu/fr/ https://www.lux-airport.lu/de/
 #
 # Exit codes: 0 = all green, 1 = at least one URL or one followed link failed.
+#
+# lint-allow-no-crash-guard: the `links` tier has no report-mode input to exit
+# under. `fail-on-structure` governs the render/nav checks only — action.yml says
+# so in as many words ("links always fails loud on a broken link") — and `links`
+# is itself opt-in via `checks`. So there is no caller setting to consult and
+# nothing to soften: a caller who asked for this tier asked for it to be loud.
+# Nor is anything misattributed; a fault surfaces as a failed step named "Link
+# crawl (T1)", which is what it is. Misattribution, not the exit code, is the
+# test rule 3 applies. NOTE the `trap … EXIT` below is a tempfile CLEANUP trap,
+# not a crash guard — it would satisfy rule 3's bash heuristic on its own, which
+# is exactly why this exemption is written down instead of left to the detector.
 
 set -uo pipefail
 

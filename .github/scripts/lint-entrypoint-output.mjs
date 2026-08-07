@@ -2,10 +2,16 @@
 // ---------------------------------------------------------------------------
 // lint-entrypoint-output — repo-internal hygiene gate (NOT a shipped action).
 //
-// TWO RULES, one theme: defects in action entrypoints that a green run cannot
+// THREE RULES, one theme: defects in action entrypoints that a green run cannot
 // distinguish from correct code.
 //   1. async stdout writes before process.exit()  — see below.
 //   2. crash guards registered after main runs     — see "rule 2" further down.
+//   3. no crash guard at all, in any language      — see "rule 3" further down.
+//
+// Rules 1 and 2 are JavaScript-shaped and apply to `*.mjs` only. Rule 3 applies
+// to every language an action ships an entrypoint in (.mjs, .py, .sh), and only
+// to the files an `action.yml` actually EXECUTES — the pure library modules
+// beside them cannot set an exit code, so a guard there would be noise.
 //
 // THE DEFECT CLASS THIS EXISTS TO KILL
 // `process.stdout` / `process.stderr` writes are ASYNC when the fd is a pipe on
@@ -36,12 +42,17 @@
 //   const sayErr = (s = '') => { try { fs.writeSync(2, `${s}\n`); } catch { console.error(s); } };
 //
 // SCOPE
-// Action entrypoints only: `<dir-with-an-action.yml>/scripts/*.mjs`, minus
-// `selftest.mjs`. Discovery is by `action.yml` presence rather than a hardcoded
+// Action scripts only: `<dir-with-an-action.yml>/scripts/*.{mjs,py,sh}`, minus
+// `selftest*`. Discovery is by `action.yml` presence rather than a hardcoded
 // list, so a new action's entrypoint is covered the day it lands — and so this
 // script's own directory (`.github/scripts/`, no action.yml) is structurally out
 // of scope. The scan is NON-recursive, which also keeps test fixtures like
 // `test-suite/scripts/selftest/*/vitest-stub.mjs` out.
+//
+// Rule 3 narrows further to the EXECUTED subset (discoverExecuted), read from the
+// `run:` lines of each action.yml. Both discovery passes fail CLOSED on an empty
+// result: a restructured tree must not silently pass a blocking gate, and a rule
+// that has switched itself off looks exactly like a rule with nothing to report.
 //
 // The seven `*/scripts/selftest.mjs` files legitimately end in `console.log(...)`
 // then `process.exit(...)`. They are exempt because they CANNOT hit the bug:
@@ -333,9 +344,127 @@ export function lintSource(src, file = '<input>') {
   return findings.sort((a, b) => a.line - b.line || a.col - b.col);
 }
 
+// ---------- rule 3: crash-guard PRESENCE, in every shipped language ----------
+// THE DEFECT CLASS: an entrypoint with no crash guard at all. A fault in the tool
+// then exits non-zero and BLOCKS a caller who explicitly asked for report mode —
+// our bug, charged to their repo, under a verdict the tool never actually reached.
+//
+// Rule 2 above covers only the JS ordering shape (a guard registered too late).
+// It cannot see the three actions that shipped with no guard whatsoever until
+// v1.12.0 — render-check.mjs (a top-level-await module ending in a bare
+// process.exit), linkcheck.py (a plain main() under `if __name__`), audit.sh
+// (`set -uo pipefail`, no trap). Two of those are not even JavaScript, which is
+// why discovery below covers .mjs, .py and .sh rather than a hardcoded list.
+//
+// Detection is per language, and deliberately shallow — it answers "is there a
+// guard here at all", not "is it correct". Correctness is asserted BEHAVIOURALLY
+// by each action's own selftest, which crashes the real entrypoint and reads the
+// exit code; a static check cannot do that and should not pretend to.
+//
+// KNOWN LIMIT, stated rather than papered over: for bash this matches any
+// `trap … EXIT`, so a pure CLEANUP trap (`trap 'rm -f "$TMP"' EXIT`) reads as a
+// guard. link-crawl.sh has exactly that shape. It carries an explicit exemption
+// pragma anyway, so its rationale is on the record and does not rest on this
+// heuristic — but a future bash entrypoint could satisfy the rule with a cleanup
+// trap and no guard. The behavioural selftests are the layer that catches that;
+// tightening this regex to guess intent would trade a known limit for a false
+// sense of one.
+const GUARD_PRESENT = {
+  '.mjs': (src) =>
+    // an explicit process-level handler …
+    /process\s*\.\s*on\s*\(\s*['"](?:uncaughtException|unhandledRejection)['"]/.test(src)
+    // … or the ordering-immune sibling shape: `(async () => {…})().catch(…)`
+    || /\)\s*\(\s*\)\s*\.\s*catch\s*\(/.test(src),
+  '.py': (src) => {
+    // The guard has to wrap the main invocation, so look only BELOW `if __name__`.
+    const i = src.search(/^if\s+__name__\s*==/m);
+    if (i === -1) return /^\s*try:/m.test(src) && /^\s*except\b/m.test(src);
+    const tail = src.slice(i);
+    return /^\s+try:/m.test(tail) && /^\s+except\b/m.test(tail);
+  },
+  '.sh': (src) => /^\s*trap\s+.*\bEXIT\b/m.test(src),
+};
+
+// `# lint-allow-no-crash-guard: <reason>` (or `//` for JS). A reason is REQUIRED,
+// same as the raw-output pragma — a bare pragma does not pass, because the point
+// is to record WHY an entrypoint is allowed to fail loud, not to switch the rule
+// off. The two exemptions in this repo are linkcheck/scripts/sitemap-urls.py and
+// verify-homepage/scripts/link-crawl.sh: neither has a report-mode input to
+// consult, and each one's wrapper already attributes its failure correctly, so
+// there is no misattribution to fix. That — misattribution, not the exit code —
+// is the test for whether an entrypoint needs this rule.
+// `[ \t]` and not `\s`: this regex is tested against the WHOLE file, so a `\s*`
+// here would happily cross the newline and let the next line's first character
+// satisfy the required `\S` — making a bare, reason-less pragma pass. (The
+// raw-output pragma above uses `\s*` safely only because it is tested one line at
+// a time.) Caught by the "a BARE pragma does not exempt" fixture.
+const NO_GUARD_PRAGMA = /(?:\/\/|#)[ \t]*lint-allow-no-crash-guard:[ \t]*\S/;
+
+export function lintCrashGuardPresence(src, file = '<input>', executed = false) {
+  // A guard only means anything in a file that is EXECUTED as a process. The
+  // pure library modules beside the entrypoints (engine.mjs, checks.mjs,
+  // tiers.mjs, detect.mjs, firstparty.mjs — "no network, no process exit" by
+  // their own headers) are imported, never spawned: they cannot set an exit code,
+  // so there is nothing for them to get wrong and a guard in one would be noise.
+  // Callers pass `executed` from discoverExecuted(); the default is false so a
+  // direct call cannot accidentally flag a library.
+  if (!executed) return [];
+  const ext = path.extname(file);
+  const detect = GUARD_PRESENT[ext];
+  if (!detect) return [];
+  if (NO_GUARD_PRAGMA.test(src)) return [];
+  if (detect(src)) return [];
+  return [{
+    file, line: 1, col: 1, kind: 'missing-crash-guard',
+    what: 'no crash guard',
+    text: (src.split('\n')[0] || '').trim(),
+    detail: `${ext} entrypoint has no crash guard, so a fault in the tool exits non-zero and blocks a report-mode caller`,
+  }];
+}
+
+// Dispatch the whole rule set for one entrypoint. The JS rules (raw output,
+// guard ordering) are JS-only — running the JS scrubber over Python or bash
+// would produce noise, not findings — while rule 3 applies to every language,
+// but only to files that action.yml actually executes.
+export function lintEntrypoint(src, file = '<input>', executed = false) {
+  const findings = path.extname(file) === '.mjs' ? lintSource(src, file) : [];
+  findings.push(...lintCrashGuardPresence(src, file, executed));
+  return findings.sort((a, b) => a.line - b.line || a.col - b.col);
+}
+
+// ---------- which scripts are actually EXECUTED ----------
+// Ground truth, read from each action.yml rather than guessed from the source: a
+// script is executed iff some action.yml names it, whether as `run: node
+// scripts/x.mjs` or `bash "${{ github.action_path }}/scripts/x.sh"`. Everything
+// else under scripts/ is a library module reached only by `import`.
+//
+// Deliberately over-inclusive: a filename mentioned in an action.yml COMMENT also
+// counts. The failure mode of over-inclusion is "we asked for a crash guard in a
+// file that did not need one", which surfaces immediately and loudly; the failure
+// mode of under-inclusion is an unguarded entrypoint shipping silently, which is
+// the whole defect class. Bias to the noisy side.
+export function discoverExecuted(root) {
+  const executed = new Set();
+  for (const dir of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!dir.isDirectory() || dir.name.startsWith('.')) continue;
+    const actionYml = path.join(root, dir.name, 'action.yml');
+    if (!fs.existsSync(actionYml)) continue;
+    const yml = fs.readFileSync(actionYml, 'utf8');
+    for (const m of yml.matchAll(/scripts\/([A-Za-z0-9_.-]+\.(?:mjs|py|sh))/g)) {
+      executed.add(path.posix.join(dir.name, 'scripts', m[1]));
+    }
+  }
+  return executed;
+}
+
 // ---------- entrypoint discovery ----------
-// An "action entrypoint" is any top-level `<action>/scripts/*.mjs` where
-// `<action>/action.yml` exists, except `selftest.mjs`. Non-recursive.
+// An "action entrypoint" is any top-level `<action>/scripts/*.{mjs,py,sh}` where
+// `<action>/action.yml` exists, except `selftest.*`. Non-recursive.
+//
+// Discovery is by `action.yml` presence rather than a hardcoded list, so a new
+// action's entrypoint is covered the day it lands — and so this script's own
+// directory (`.github/scripts/`, no action.yml) is structurally out of scope.
+const ENTRYPOINT_EXT = ['.mjs', '.py', '.sh'];
 export function discoverEntrypoints(root) {
   const files = [];
   for (const dir of fs.readdirSync(root, { withFileTypes: true })) {
@@ -344,7 +473,10 @@ export function discoverEntrypoints(root) {
     const scripts = path.join(root, dir.name, 'scripts');
     if (!fs.existsSync(scripts)) continue;
     for (const e of fs.readdirSync(scripts, { withFileTypes: true })) {
-      if (!e.isFile() || !e.name.endsWith('.mjs') || e.name === 'selftest.mjs') continue;
+      if (!e.isFile()) continue;
+      if (!ENTRYPOINT_EXT.includes(path.extname(e.name))) continue;
+      // Selftests are not shipped entrypoints — no caller ever runs one.
+      if (/^selftest(\.|-)/.test(e.name) || e.name.startsWith('selftest')) continue;
       files.push(path.posix.join(dir.name, 'scripts', e.name));
     }
   }
@@ -369,6 +501,33 @@ const REMEDY_GUARD = [
   '  …or use the sibling shape, which is ordering-immune because the handler is',
   '  attached to the promise rather than to the process:',
   '  (async () => { … })().catch((e) => { …report…; process.exit(FAIL_ON_X ? 1 : 0); });',
+];
+
+const REMEDY_MISSING = [
+  '',
+  'Why this is a finding:',
+  '  An entrypoint with no crash guard turns a fault in OUR tool into a red build',
+  '  in the CALLER\'s repo — even when that caller explicitly asked for report mode.',
+  '  The fault is also mis-attributed: it arrives looking like a finding about their',
+  '  site. Three actions shipped this way until v1.12.0 (verify-homepage, linkcheck,',
+  '  a11y-audit); linkcheck additionally filed a false "broken links found" issue.',
+  '',
+  'The rule: report the fault as a fault, and exit under the caller\'s own setting.',
+  '  JS    process.on(\'uncaughtException\', …) hoisted above the main invocation,',
+  '        or the ordering-immune `(async () => {…})().catch(…)` shape.',
+  '        Exit FAIL_ON_X ? 1 : 0. Read FAIL_ON_X from process.env, not from a',
+  '        module const — the const is in the TDZ if the crash happens during init.',
+  '  Python  try/except around main() under `if __name__`. SystemExit is not an',
+  '        Exception, so deliberate verdict exits pass through untouched.',
+  '  bash  `trap … EXIT` armed on the FIRST executable line, plus a sentinel that',
+  '        deliberate exits set. NOT `trap … ERR`: `set -u` aborts without firing',
+  '        ERR, and with errexit off ERR fires on commands that are not faults.',
+  '',
+  'Failing loud is genuinely right? Annotate it (a reason is required):',
+  '  # lint-allow-no-crash-guard: <why a fault here must not be softened>',
+  '  The test is MISATTRIBUTION, not the exit code: an entrypoint with no',
+  '  report-mode input whose wrapper already reports the fault correctly has',
+  '  nothing to align (see sitemap-urls.py, link-crawl.sh).',
 ];
 
 const REMEDY = [
@@ -403,15 +562,25 @@ function main() {
     return 2;
   }
 
+  const executed = discoverExecuted(root);
+
+  // Fail CLOSED again: every action ships at least one executed script, so an
+  // empty set means the action.yml parse broke and rule 3 has silently switched
+  // itself off — indistinguishable, in a green run, from "every guard is present".
+  if (executed.size === 0) {
+    say(`::error::lint-entrypoint-output: no executed scripts found in any action.yml under ${root} — rule 3 would pass vacuously, refusing to pass`);
+    return 2;
+  }
+
   const findings = [];
   for (const rel of files) {
-    findings.push(...lintSource(fs.readFileSync(path.join(root, rel), 'utf8'), rel));
+    findings.push(...lintEntrypoint(fs.readFileSync(path.join(root, rel), 'utf8'), rel, executed.has(rel)));
   }
 
   if (findings.length === 0) {
     // Name every file scanned: a green run has to be auditable, or "0 findings"
     // is indistinguishable from "scanned nothing".
-    say(`lint-entrypoint-output: ✅ clean — ${files.length} action entrypoint(s), no raw stdout/stderr writes, no dead crash guards`);
+    say(`lint-entrypoint-output: ✅ clean — ${files.length} action entrypoint(s), no raw stdout/stderr writes, no dead crash guards, no missing crash guards`);
     for (const f of files) say(`  · ${f}`);
     return 0;
   }
@@ -419,18 +588,25 @@ function main() {
   say(`lint-entrypoint-output: ❌ ${findings.length} finding(s) across ${files.length} scanned entrypoint(s)`);
   say('');
   const guards = findings.filter((f) => f.kind === 'dead-crash-guard');
-  const raws = findings.filter((f) => f.kind !== 'dead-crash-guard');
+  const missing = findings.filter((f) => f.kind === 'missing-crash-guard');
+  const raws = findings.filter((f) => f.kind !== 'dead-crash-guard' && f.kind !== 'missing-crash-guard');
   for (const f of findings) {
     // Annotation content is derived from our own repo tree, never from input.
-    const msg = f.kind === 'dead-crash-guard'
-      ? `${f.what} is registered AFTER the entrypoint's main invocation — ${f.detail}, so the guard is dead code and has never run. Hoist it above the invocation. See .github/scripts/lint-entrypoint-output.mjs`
-      : `${f.what} in an action entrypoint — output must go through a synchronous write (fs.writeSync), not an async stdout/stderr write. See .github/scripts/lint-entrypoint-output.mjs`;
+    let msg;
+    if (f.kind === 'dead-crash-guard') {
+      msg = `${f.what} is registered AFTER the entrypoint's main invocation — ${f.detail}, so the guard is dead code and has never run. Hoist it above the invocation. See .github/scripts/lint-entrypoint-output.mjs`;
+    } else if (f.kind === 'missing-crash-guard') {
+      msg = `${f.detail}. Add one, or annotate the file with \`lint-allow-no-crash-guard: <why failing loud is correct here>\`. See .github/scripts/lint-entrypoint-output.mjs`;
+    } else {
+      msg = `${f.what} in an action entrypoint — output must go through a synchronous write (fs.writeSync), not an async stdout/stderr write. See .github/scripts/lint-entrypoint-output.mjs`;
+    }
     say(`::error file=${f.file},line=${f.line},col=${f.col}::${msg}`);
     say(`  ${f.file}:${f.line}:${f.col}  ${f.what}`);
     say(`      ${f.text}`);
   }
   if (raws.length) for (const l of REMEDY) say(l);
   if (guards.length) for (const l of REMEDY_GUARD) say(l);
+  if (missing.length) for (const l of REMEDY_MISSING) say(l);
 
   const summary = process.env.GITHUB_STEP_SUMMARY;
   if (summary) {
@@ -439,13 +615,18 @@ function main() {
       '',
       raws.length ? `${raws.length} raw stdout/stderr write(s) in action entrypoints. \`process.exit()\` does not drain an async write, so the output truncates at 64 KiB on macOS pipes.` : '',
       guards.length ? `${guards.length} crash guard(s) registered after the main invocation — dead code that has never run.` : '',
+      missing.length ? `${missing.length} executed entrypoint(s) with no crash guard — a fault in the tool blocks a report-mode caller and arrives looking like a finding about their site.` : '',
       '',
       '| file | line | finding |',
       '| --- | --- | --- |',
-      ...findings.map((f) => `| \`${f.file}\` | ${f.line} | \`${f.what}\`${f.kind === 'dead-crash-guard' ? ' — dead crash guard' : ''} |`),
+      ...findings.map((f) => {
+        const label = { 'dead-crash-guard': ' — dead crash guard', 'missing-crash-guard': ' — missing crash guard' }[f.kind] || '';
+        return `| \`${f.file}\` | ${f.line} | \`${f.what}\`${label} |`;
+      }),
       '',
       raws.length ? 'Fix: emit through `say`/`sayErr` (`fs.writeSync`) or `fs.appendFileSync(summaryFile, …)`.' : '',
       guards.length ? 'Fix: hoist the `process.on(...)` registration above the main IIFE invocation.' : '',
+      missing.length ? 'Fix: add a guard that reports the fault and exits `FAIL_ON_X ? 1 : 0`, or annotate with `lint-allow-no-crash-guard: <reason>`.' : '',
       '',
     ].join('\n');
     try { fs.appendFileSync(summary, md + '\n'); } catch { /* summary is best-effort */ }

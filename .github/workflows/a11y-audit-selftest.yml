@@ -1,0 +1,63 @@
+name: a11y-audit engine self-test
+
+# Offline regression guard for the crash guard + fault ATTRIBUTION: stubs
+# `pa11y-ci` on PATH and runs the real audit.sh, asserting that a tool fault is
+# reported as a tool fault (never as WCAG debt) and exits
+# `fail-on-violations ? 1 : 0`, while a genuine WCAG verdict passes through
+# untouched. No network, no Chromium, no pa11y-ci install — deterministic.
+#
+# TWO LEGS ON PURPOSE. audit.sh ships to callers and runs wherever they run, and
+# the guard is built out of `trap … EXIT`, `set -u` abort semantics and `$?`
+# propagation — the exact areas where bash 3.2 (macOS, the operators' laptops)
+# and bash 5 (GNU, the CI runners) differ. A single Linux leg would validate the
+# guard under an interpreter half its audience never uses. Each leg asserts the
+# interpreter it actually got, so a silent toolchain change cannot quietly
+# collapse this back to one.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'a11y-audit/**'
+      - '.github/workflows/a11y-audit-selftest.yml'
+  pull_request:
+    paths:
+      - 'a11y-audit/**'
+      - '.github/workflows/a11y-audit-selftest.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  engine-selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            expect_major: '5'
+          - os: macos-latest
+            expect_major: '3'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Assert the interpreter this leg is meant to cover
+        shell: bash
+        env:
+          EXPECT_MAJOR: ${{ matrix.expect_major }}
+        # Fails CLOSED: if macOS ever ships bash 5 as /bin/bash (or the runner
+        # image puts GNU bash first on PATH), this leg is no longer testing the
+        # 3.2 class and the matrix has silently become one leg wearing two names.
+        run: |
+          major="${BASH_VERSINFO[0]}"
+          echo "bash $BASH_VERSION (major $major) on ${{ matrix.os }}"
+          [ "$major" = "$EXPECT_MAJOR" ] || {
+            echo "::error::expected bash major $EXPECT_MAJOR on ${{ matrix.os }}, got $major — this leg is no longer covering the interpreter it claims to"
+            exit 1
+          }
+
+      - name: Crash-guard + attribution self-test
+        shell: bash
+        run: bash a11y-audit/scripts/selftest.sh

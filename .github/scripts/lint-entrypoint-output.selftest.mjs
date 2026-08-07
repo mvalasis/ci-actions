@@ -15,7 +15,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { lintSource, discoverEntrypoints, blankNonCode } from './lint-entrypoint-output.mjs';
+import {
+  lintSource, lintEntrypoint, lintCrashGuardPresence,
+  discoverEntrypoints, discoverExecuted, blankNonCode,
+} from './lint-entrypoint-output.mjs';
 
 const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
 
@@ -223,11 +226,97 @@ check('covers every documented entrypoint basename',
     .every((b) => found.some((f) => f.endsWith(`/${b}`))));
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// RULE 3 — crash-guard presence, per language.
+//
+// Fixtures, not the live tree, so both directions are pinned: the rule must fire
+// on an unguarded executed entrypoint in each of the three shipped languages, and
+// must stay silent on every legitimate guarded shape. A rule that only ever runs
+// against a clean tree is indistinguishable from a rule that never fires.
+say('\n# rule 3: crash-guard presence (.mjs / .py / .sh)');
+
+const guard = (file, src, executed = true) => lintCrashGuardPresence(src, file, executed);
+const missing = (file, src, executed = true) =>
+  guard(file, src, executed).some((f) => f.kind === 'missing-crash-guard');
+
+// --- JavaScript: both accepted shapes, and the unguarded one.
+check('.mjs with a hoisted process.on(uncaughtException) is guarded',
+  !missing('a/scripts/x.mjs', src("process.on('uncaughtException', (e) => {});", '(function main(){})();')));
+check('.mjs with the ordering-immune `)().catch(` shape is guarded',
+  !missing('a/scripts/x.mjs', src('(async () => { await go(); })().catch((e) => { process.exit(0); });')));
+check('.mjs with unhandledRejection only is guarded',
+  !missing('a/scripts/x.mjs', src("process.on('unhandledRejection', (e) => {});")));
+check('.mjs with NO guard is a finding',
+  missing('a/scripts/x.mjs', src('const x = 1;', 'process.exit(0);')));
+
+// --- Python: the guard must wrap the main invocation, not merely exist.
+check('.py with try/except under `if __name__` is guarded',
+  !missing('a/scripts/x.py', src('def main():', '    pass', '', 'if __name__ == "__main__":',
+    '    try:', '        main()', '    except Exception:', '        raise SystemExit(2)')));
+check('.py with a bare main() call under `if __name__` is a finding',
+  missing('a/scripts/x.py', src('def main():', '    pass', '', 'if __name__ == "__main__":', '    main()')));
+// The load-bearing one: a try/except somewhere INSIDE the program does not guard
+// the entrypoint. sitemap-urls.py has exactly that shape (a per-child-sitemap
+// try/except in collect()) and must still be seen as unguarded, or its exemption
+// would be silently unnecessary and the rule would be lying about what it checks.
+check('.py with try/except only INSIDE a helper is still a finding',
+  missing('a/scripts/x.py', src('def collect():', '    try:', '        fetch()', '    except Exception:', '        return', '',
+    'def main():', '    collect()', '', 'if __name__ == "__main__":', '    main()')));
+
+// --- bash.
+check('.sh with a trap on EXIT is guarded',
+  !missing('a/scripts/x.sh', src('set -uo pipefail', 'on_exit() { :; }', 'trap on_exit EXIT')));
+check('.sh with no trap is a finding',
+  missing('a/scripts/x.sh', src('set -euo pipefail', 'echo hi', 'exit 0')));
+// The documented limit, asserted so it stays a KNOWN limit rather than a
+// surprise: a pure cleanup trap satisfies the bash heuristic. This is exactly why
+// link-crawl.sh carries an explicit pragma instead of relying on detection.
+check('.sh cleanup-only trap satisfies the heuristic (documented limit)',
+  !missing('a/scripts/x.sh', src('set -uo pipefail', 'trap \'rm -f "$TMP"\' EXIT')));
+
+// --- scope: libraries and pragmas.
+check('an unguarded file that action.yml never executes is NOT a finding',
+  !missing('a/scripts/engine.mjs', src('export const f = () => 1;'), false));
+check('the pragma exempts, and requires a reason',
+  !missing('a/scripts/x.py', src('# lint-allow-no-crash-guard: wrapper attributes it', 'main()')));
+check('a BARE pragma with no reason does NOT exempt',
+  missing('a/scripts/x.py', src('# lint-allow-no-crash-guard:', 'main()')));
+check('an unknown extension is out of scope',
+  !missing('a/scripts/x.rb', src('puts 1')));
+
+// --- discoverExecuted: the ground-truth set rule 3 keys on.
+say('\n# discoverExecuted — read from action.yml, not guessed');
+const executedSet = discoverExecuted(root);
+check('finds the executed scripts across every language',
+  ['a11y-audit/scripts/audit.sh', 'linkcheck/scripts/linkcheck.py', 'linkcheck/scripts/sitemap-urls.py',
+   'verify-homepage/scripts/render-check.mjs', 'verify-homepage/scripts/link-crawl.sh',
+   'security-baseline/scripts/scan.mjs'].every((f) => executedSet.has(f)),
+  JSON.stringify([...executedSet].sort()));
+// The distinction the rule depends on: pure library modules are NOT executed.
+check('pure library modules are NOT in the executed set',
+  !['deps-currency/scripts/engine.mjs', 'seo-aeo/scripts/checks.mjs', 'test-suite/scripts/detect.mjs',
+    'security-baseline/scripts/tiers.mjs'].some((f) => executedSet.has(f)),
+  JSON.stringify([...executedSet].sort()));
+
+// ---------------------------------------------------------------------------
 say('\n# the live tree is clean (the lint is wired as blocking)');
 
 let live = 0;
-for (const rel of found) live += lintSource(fs.readFileSync(path.join(root, rel), 'utf8'), rel).length;
+for (const rel of found) {
+  live += lintEntrypoint(fs.readFileSync(path.join(root, rel), 'utf8'), rel, executedSet.has(rel)).length;
+}
 check(`all ${found.length} entrypoints lint clean`, live === 0, `(${live} finding(s))`);
+
+// Discovery must actually reach the non-JS entrypoints, or rule 3 passes
+// vacuously on exactly the two languages it was added for.
+check('discovery covers .py and .sh entrypoints, not just .mjs',
+  found.includes('linkcheck/scripts/linkcheck.py') && found.includes('a11y-audit/scripts/audit.sh'),
+  JSON.stringify(found));
+// …and the three actions this rule was written for must be GUARDED in the live
+// tree — the positive assertion that v1.12.0 actually landed.
+check('the three v1.12.0 entrypoints are guarded in the live tree',
+  ['verify-homepage/scripts/render-check.mjs', 'linkcheck/scripts/linkcheck.py', 'a11y-audit/scripts/audit.sh']
+    .every((f) => !lintCrashGuardPresence(fs.readFileSync(path.join(root, f), 'utf8'), f, true).length));
 
 // The exempt selftests must stay exempt AND stay small — the exemption is
 // "1-4 KB of output cannot reach a 64 KiB pipe buffer", not "selftests are
