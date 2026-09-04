@@ -20,9 +20,13 @@ name: linkcheck engine self-test
 # THE FOUR PASSES ARE THE WHOLE DESIGN — one per branch of the verdict contract:
 #   broken → OPEN the issue        clean  → CLOSE it
 #   fault  → do NEITHER            unset  → do NEITHER   ← the regression's real mechanism
-# The `unset` pass is the load-bearing one. A partial relapse that restores the numeric
-# conditions while keeping the `set +e` guard passes broken/fault/clean and fails ONLY
-# here, because only here is the output genuinely never written.
+# The `unset` pass is the load-bearing one, and this is MEASURED, not argued. Run
+# 33911783576 dispatched this job against a branch carrying exactly that partial relapse
+# (numeric `rc == '0'`/`'1'` conditions restored, `set +e` kept). Result: BROKEN, FAULT
+# and their assertions all PASSED, and the job failed on one step —
+#   "AN UNSET VERDICT CLOSED #5 ... a null output compared to a numeric literal coerces
+#    to 0 == 0, so 'we never checked' read as 'verified clean'."
+# Delete the unset pass and the guard goes green on the regression it exists to catch.
 #
 # COST, stated plainly: one real issue is opened and closed on THIS repo per run, left
 # closed with a comment marking it a fixture artifact. `gh issue create` IS the code
@@ -297,15 +301,27 @@ jobs:
               "Fixture artifact — opened and closed by the \`linkcheck\` issue-lifecycle self-test (run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}). Not a real finding: the links came from a loopback fixture in \`linkcheck/fixtures/site\`. This job exists because a static check pinned the buggy condition verbatim while the action spent weeks closing its own issue on every red run."
             gh issue close "$n" -R "$GITHUB_REPOSITORY"
           done
-          sleep 3
-          leftover=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
-                       --jq ".[] | select(.title==\"$TITLE\") | .number" 2>/dev/null)
-          if [ -n "$ISSUE" ]; then
-            st=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --jq .state 2>/dev/null)
-            [ "$st" = "open" ] && leftover="$leftover $ISSUE"
-          fi
+          # CONFIRM, with retries, and re-close rather than just reporting. On the
+          # mutation run (33911783576) a single re-read said "#5 still OPEN" ~4s
+          # after it had been closed — the same read-after-write flap as above, in
+          # the direction that cries wolf. The dangerous direction is the other one
+          # (reading `closed` while it is open, and silently leaking), so this
+          # settles only on a stable answer and acts again if it sees `open`.
+          leftover=''
+          for _ in $(seq 1 6); do
+            leftover=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+                         --jq ".[] | select(.title==\"$TITLE\") | .number" 2>/dev/null)
+            if [ -n "$ISSUE" ]; then
+              st=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --jq .state 2>/dev/null)
+              [ "$st" = "open" ] && leftover="$(printf '%s\n%s' "$leftover" "$ISSUE")"
+            fi
+            leftover=$(printf '%s\n' "$leftover" | grep -E '^[0-9]+$' | sort -u)
+            [ -z "$leftover" ] && break
+            for n in $leftover; do gh issue close "$n" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; done
+            sleep 3
+          done
           if [ -n "$leftover" ]; then
-            echo "::error::fixture issue(s) #$(echo "$leftover" | tr '\n' ' ')still OPEN on a public repo — close by hand: gh issue close <n> -R $GITHUB_REPOSITORY"
+            echo "::error::fixture issue(s) #$(printf '%s' "$leftover" | tr '\n' ' ') still OPEN on a public repo after 6 attempts — close by hand: gh issue close <n> -R $GITHUB_REPOSITORY"
             exit 1
           fi
           echo "✓ no fixture issue left open"
