@@ -86,6 +86,12 @@ runs:
       # expansion failed.
       run: |
         set -o pipefail
+        # Clear both side files FIRST. A stale linkcheck-review.txt from an earlier
+        # invocation in the same job would be re-uploaded under the same artifact
+        # name (upload-artifact@v4 rejects a duplicate name, so the second one 409s),
+        # and a stale linkcheck-verdict.txt would let a SKIPPED crawl look like it
+        # ran. The selftest's unset-verdict pass depends on that file's ABSENCE.
+        rm -f linkcheck-review.txt linkcheck-verdict.txt
         set +e
         python3 "${{ github.action_path }}/scripts/linkcheck.py" - < pages.txt | tee linkcheck-report.txt
         rc=${PIPESTATUS[0]}
@@ -96,6 +102,12 @@ runs:
           *) verdict=fault ;;
         esac
         { echo "rc=$rc"; echo "verdict=$verdict"; } >> "$GITHUB_OUTPUT"
+        # The same verdict as a FILE, so a caller can assert the discriminator
+        # directly. A composite's `outputs:` mapping is not readable by the caller
+        # when the composite FAILED — which is precisely the broken and fault cases —
+        # so the file is the only oracle available to the issue-lifecycle self-test.
+        # Inert for real callers: one 7-byte file in the workspace.
+        printf '%s\n' "$verdict" > linkcheck-verdict.txt
         { echo '## Weekly full-site link & image check'; echo; echo '```'; cat linkcheck-report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
         exit "$rc"
 

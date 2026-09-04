@@ -1,9 +1,38 @@
 name: linkcheck engine self-test
 
-# Offline regression guard for the verify-token scoping fix: spins up two
-# loopback servers on different hostnames and asserts the WAF-bypass token is
-# never carried to a cross-origin host across a redirect chain. No network, no
-# secrets — deterministic. (The live end-to-end run stays in selftest.yml.)
+# Two guards, and the split is the point.
+#
+# engine-selftest  — offline, no writes. Token scoping across a redirect chain, plus the
+#                    static verdict-token class checks added 2026-09-04.
+# issue-lifecycle  — the LIVE half. Runs the real composite against a loopback site and
+#                    lets GitHub's OWN `if:` evaluator decide the issue steps.
+#
+# WHY THE SECOND ONE EXISTS. On 2026-09-04 this action was found CLOSING its own
+# broken-links issue on every run that FOUND broken links; two fleet gates sat red for
+# over a month because the notification path was inverted. Two bugs had to combine:
+# `shell: bash` runs with -e so the crawl aborted before writing `rc=`, and an UNSET
+# Actions output compared to a numeric literal coerces both to numbers, so
+# `outputs.rc == '0'` was TRUE when rc was missing — "we never got a verdict" evaluated
+# as "verified clean". What let it ship was that the selftest PINNED THE BUGGY CONDITION
+# VERBATIM. A static check proves a condition EXISTS, never that it FIRES; `if:` is
+# evaluated server-side, so no amount of local Python can grade it.
+#
+# THE FOUR PASSES ARE THE WHOLE DESIGN — one per branch of the verdict contract:
+#   broken → OPEN the issue        clean  → CLOSE it
+#   fault  → do NEITHER            unset  → do NEITHER   ← the regression's real mechanism
+# The `unset` pass is the load-bearing one. A partial relapse that restores the numeric
+# conditions while keeping the `set +e` guard passes broken/fault/clean and fails ONLY
+# here, because only here is the output genuinely never written.
+#
+# COST, stated plainly: one real issue is opened and closed on THIS repo per run, left
+# closed with a comment marking it a fixture artifact. `gh issue create` IS the code
+# under test, so there is no read-only equivalent. It is confined to this repo (never a
+# caller), reversible, and fires only on changes to linkcheck/** or manual dispatch —
+# a handful of times a year.
+#
+# SEQUENCING: `v1` must not be force-moved onto a commit until this job is green on it.
+# This is a post-merge guard, so it cannot block the push that breaks it — the release
+# ritual is what keeps a broken lifecycle out of the 6 callers.
 
 on:
   push:
@@ -23,3 +52,231 @@ jobs:
       - uses: actions/checkout@v6
       - name: Offline token-scoping self-test
         run: python3 linkcheck/scripts/selftest.py
+
+  issue-lifecycle:
+    name: issue lifecycle (live — broken opens; fault/unset do nothing; clean closes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Title-keyed state on a shared repo: two overlapping runs would fight over ONE
+    # issue and cross-close it, reporting the exact regression under guard as a
+    # failure. Never cancel-in-progress — a run killed mid-lifecycle leaks its issue.
+    concurrency:
+      group: linkcheck-issue-lifecycle
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    env:
+      TITLE: 'Weekly link check: broken links found'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Fixtures must be in the checkout
+        run: |
+          [ -d linkcheck/fixtures/site ] || {
+            echo "::error::fixture site missing — were linkcheck/fixtures/** committed?"; exit 1; }
+
+      - name: Serve the fixture site on loopback
+        run: |
+          cd linkcheck/fixtures/site
+          nohup python3 -m http.server 8099 --bind 127.0.0.1 >/tmp/fixture-server.log 2>&1 &
+          for _ in $(seq 1 20); do
+            curl -sf -o /dev/null http://127.0.0.1:8099/ok.html && break
+            sleep 1
+          done
+          curl -sf -o /dev/null http://127.0.0.1:8099/ok.html || {
+            echo "::error::fixture server never came up"; cat /tmp/fixture-server.log; exit 1; }
+
+      # LOAD-BEARING, not informational. A leftover open issue would make "the broken
+      # pass opened an issue" pass vacuously, so the job refuses to start ambiguous.
+      # The always() cleanup below makes leftovers unlikely; when one happens it is a
+      # real signal, not noise.
+      - name: Precondition — no open fixture issue
+        run: |
+          raw=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+                  --jq ".[] | select(.title==\"$TITLE\") | .number") \
+            || { echo "::error::INFRA — could not list issues; this is not a linkcheck verdict"; exit 1; }
+          if [ -n "$raw" ]; then
+            echo "::error::an issue titled '$TITLE' is ALREADY open (#$(echo "$raw" | tr '\n' ' ')). Every assertion below would be ambiguous. Close it, then re-run: gh issue close <n> -R $GITHUB_REPOSITORY"
+            exit 1
+          fi
+          # Sentinel: the cleanup step keys on this, NOT on the issue number, so a
+          # failure between "issue created" and "number recorded" cannot leak it.
+          echo "LIFECYCLE=1" >> "$GITHUB_ENV"
+          echo "STARTED_AT=$(date -u +%s)" >> "$GITHUB_ENV"
+
+      # ---- 1. BROKEN → the issue must be OPENED ---------------------------------
+      - name: 'BROKEN pass (verdict=broken)'
+        id: broken
+        continue-on-error: true      # the crawl exits 1 by design; the composite's issue
+        uses: ./linkcheck            # steps are `if: !cancelled()` and still run
+        with:
+          sitemap-url: 'http://127.0.0.1:8099/sitemap_index.xml'
+          host: '127.0.0.1'
+          workers: '4'
+          manage-issue: 'true'
+
+      - name: Assert the crawl classified it BROKEN
+        run: |
+          [ "${{ steps.broken.outcome }}" = "failure" ] \
+            || { echo "::error::the broken fixture stopped failing the crawl — everything below would pass vacuously"; exit 1; }
+          v=$(cat linkcheck-verdict.txt 2>/dev/null || true)
+          [ "$v" = "broken" ] || { echo "::error::expected verdict=broken, got '$v' — a positive oracle, not a side-effect proxy"; exit 1; }
+
+      # REST list, not search: the search index lags a just-created issue, and this
+      # assertion must grade the ACTION, never GitHub's indexing latency.
+      - name: Assert an issue was OPENED, and by THIS run
+        run: |
+          raw=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+                  --jq ".[] | select(.title==\"$TITLE\") | .number") \
+            || { echo "::error::INFRA — issue list failed; cannot conclude anything"; exit 1; }
+          num=$(printf '%s\n' "$raw" | head -1)
+          case "$num" in
+            ''|*[!0-9]*) echo "::error::verdict=broken did NOT open an issue — THE REGRESSION THIS JOB EXISTS FOR IS BACK"; exit 1 ;;
+          esac
+          created=$(gh api "repos/$GITHUB_REPOSITORY/issues/$num" --jq '.created_at') \
+            || { echo "::error::INFRA — could not read issue #$num"; exit 1; }
+          # Newer than this job's own start: a leftover from a re-run ATTEMPT of the
+          # same run shares $GITHUB_RUN_ID, so the run-id alone is not proof.
+          [ "$(date -u -d "$created" +%s 2>/dev/null || date -u -jf '%Y-%m-%dT%H:%M:%SZ' "$created" +%s)" -ge "$STARTED_AT" ] \
+            || { echo "::error::#$num predates this job — a leftover, not proof"; exit 1; }
+          echo "ISSUE=$num" >> "$GITHUB_ENV"
+          echo "✓ issue #$num opened by this run"
+
+      # The action's own close step finds the issue via `gh issue list --search`, which
+      # is index-backed. Wait for consistency HERE, so a lag can never be misread below
+      # as "the clean branch failed to fire".
+      - name: Wait for the search index (the action's own lookup path)
+        run: |
+          for _ in $(seq 1 75); do
+            n=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "$TITLE in:title" \
+                  --json number,title --jq ".[] | select(.title==\"$TITLE\") | .number" 2>/dev/null | head -1) || true
+            [ -n "$n" ] && { echo "✓ searchable as #$n"; exit 0; }
+            sleep 4
+          done
+          echo "::error::INFRA — GitHub's issue search index did not see #$ISSUE within 300s. This is NOT a linkcheck regression: the action's close step is index-backed and could not have found it either. Re-run."
+          exit 1
+
+      # ---- 2. FAULT → the issue must be left ALONE ------------------------------
+      # An empty host makes linkcheck.py exit 2 (it refuses to classify internal vs
+      # external without one) ⇒ verdict=fault. That is the CONFIG-error route to rc=2;
+      # the crash route reaches the same branch via the script's own crash guard.
+      # Either way: we did not check the links, so we may neither report them broken
+      # nor declare them clean.
+      - name: Snapshot the issue before the FAULT pass
+        run: |
+          n=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" --jq 'length') \
+            || { echo "::error::INFRA — comment probe failed"; exit 1; }
+          echo "COMMENTS_BEFORE=$n" >> "$GITHUB_ENV"
+          rm -f linkcheck-verdict.txt
+
+      - name: 'FAULT pass (verdict=fault)'
+        id: fault
+        continue-on-error: true
+        uses: ./linkcheck
+        with:
+          sitemap-url: 'http://127.0.0.1:8099/sitemap_index_clean.xml'
+          host: ''
+          workers: '4'
+          manage-issue: 'true'
+
+      - name: Assert a FAULT wrote NOTHING (both directions)
+        run: |
+          v=$(cat linkcheck-verdict.txt 2>/dev/null || true)
+          [ "$v" = "fault" ] || { echo "::error::expected verdict=fault, got '$v'"; exit 1; }
+          state=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --jq .state) \
+            || { echo "::error::INFRA — state probe failed"; exit 1; }
+          [ "$state" = "open" ] || { echo "::error::a crawler FAULT closed #$ISSUE — 'we could not look' was treated as 'verified clean'"; exit 1; }
+          after=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" --jq 'length') \
+            || { echo "::error::INFRA — comment probe failed"; exit 1; }
+          # Two-sided: absence of 'Resolved' alone would let a fault→BROKEN misroute
+          # (a false "broken links found" report about links we never checked) pass.
+          [ "$after" = "$COMMENTS_BEFORE" ] \
+            || { echo "::error::a crawler FAULT wrote to #$ISSUE ($COMMENTS_BEFORE→$after comments) — fault must do NEITHER"; exit 1; }
+          echo "✓ fault left #$ISSUE open and untouched"
+
+      # ---- 3. UNSET → the issue must be left ALONE ------------------------------
+      # THE LOAD-BEARING PASS. A bogus sitemap makes expansion yield zero URLs, so
+      # action.yml's `[ "$N" -gt 0 ]` aborts the composite and the crawl step NEVER
+      # RUNS — `steps.crawl.outputs.verdict` is genuinely null. This is the state that
+      # produced the incident, and the only pass that goes red on a numeric-coercion
+      # relapse. Its oracle is the ABSENCE of linkcheck-verdict.txt, which the crawl
+      # step deletes on entry and writes on exit.
+      - name: Snapshot the issue before the UNSET pass
+        run: |
+          n=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" --jq 'length') \
+            || { echo "::error::INFRA — comment probe failed"; exit 1; }
+          echo "COMMENTS_BEFORE=$n" >> "$GITHUB_ENV"
+          rm -f linkcheck-verdict.txt
+
+      - name: 'UNSET pass (crawl step never runs — outputs are null)'
+        id: unset
+        continue-on-error: true
+        uses: ./linkcheck
+        with:
+          sitemap-url: 'http://127.0.0.1:8099/no-such-sitemap.xml'
+          host: '127.0.0.1'
+          workers: '4'
+          manage-issue: 'true'
+
+      - name: Assert an UNSET verdict wrote NOTHING
+        run: |
+          [ ! -f linkcheck-verdict.txt ] \
+            || { echo "::error::the crawl step RAN ('$(cat linkcheck-verdict.txt)') — this pass must skip it, or it proves nothing about a null output"; exit 1; }
+          state=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --jq .state) \
+            || { echo "::error::INFRA — state probe failed"; exit 1; }
+          [ "$state" = "open" ] \
+            || { echo "::error::AN UNSET VERDICT CLOSED #$ISSUE. This is the 2026-09-04 regression exactly: a null output compared to a numeric literal coerces to 0 == 0, so 'we never checked' read as 'verified clean'."; exit 1; }
+          after=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" --jq 'length') \
+            || { echo "::error::INFRA — comment probe failed"; exit 1; }
+          [ "$after" = "$COMMENTS_BEFORE" ] \
+            || { echo "::error::an UNSET verdict wrote to #$ISSUE ($COMMENTS_BEFORE→$after) — it must do NEITHER"; exit 1; }
+          echo "✓ unset verdict left #$ISSUE open and untouched"
+
+      # ---- 4. CLEAN → the issue must be CLOSED ----------------------------------
+      - name: 'CLEAN pass (verdict=clean)'
+        id: clean
+        uses: ./linkcheck
+        with:
+          sitemap-url: 'http://127.0.0.1:8099/sitemap_index_clean.xml'
+          host: '127.0.0.1'
+          workers: '4'
+          manage-issue: 'true'
+
+      - name: Assert the issue was CLOSED
+        run: |
+          v=$(cat linkcheck-verdict.txt 2>/dev/null || true)
+          [ "$v" = "clean" ] || { echo "::error::expected verdict=clean, got '$v'"; exit 1; }
+          state=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --jq .state) \
+            || { echo "::error::INFRA — state probe failed"; exit 1; }
+          [ "$state" = "closed" ] || { echo "::error::verdict=clean did NOT close #$ISSUE (state=$state)"; exit 1; }
+          comments=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" --jq '.[].body') \
+            || { echo "::error::INFRA — comment probe failed"; exit 1; }
+          printf '%s' "$comments" | grep -qF 'Resolved' \
+            || { echo "::error::#$ISSUE closed without the resolved-clean comment"; exit 1; }
+          echo "✓ issue #$ISSUE closed by the clean pass"
+
+      # Always: never leave an issue OPEN on a public repo because an assertion failed.
+      # Keyed on the SENTINEL and re-derived BY TITLE, so it still fires when the run
+      # died before $ISSUE was recorded — the window in which an issue exists but its
+      # number does not. Confirms the end state rather than assuming it.
+      - name: Leave nothing open
+        if: ${{ always() && env.LIFECYCLE == '1' }}
+        run: |
+          set +e
+          nums=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+                   --jq ".[] | select(.title==\"$TITLE\") | .number" 2>/dev/null)
+          if [ -z "$nums" ] && [ -n "$ISSUE" ]; then nums="$ISSUE"; fi
+          for n in $nums; do
+            gh issue comment "$n" -R "$GITHUB_REPOSITORY" --body \
+              "Fixture artifact — opened and closed by the \`linkcheck\` issue-lifecycle self-test (run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}). Not a real finding: the links came from a loopback fixture in \`linkcheck/fixtures/site\`. This job exists because a static check pinned the buggy condition verbatim while the action spent weeks closing its own issue on every red run."
+            gh issue close "$n" -R "$GITHUB_REPOSITORY"
+          done
+          leftover=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+                       --jq ".[] | select(.title==\"$TITLE\") | .number" 2>/dev/null)
+          if [ -n "$leftover" ]; then
+            echo "::error::fixture issue(s) #$(echo "$leftover" | tr '\n' ' ')still OPEN on a public repo — close by hand: gh issue close <n> -R $GITHUB_REPOSITORY"
+            exit 1
+          fi
+          echo "✓ no fixture issue left open"
