@@ -54,17 +54,48 @@ runs:
         LINKCHECK_WORKERS: ${{ inputs.workers }}
         LINKCHECK_ALLOW: ${{ github.workspace }}/${{ inputs.allow-file }}
         VERIFY_HOMEPAGE_TOKEN: ${{ inputs.verify-token }}
-      # `rc` is published as a step OUTPUT so the issue steps below can tell a link
-      # VERDICT (rc 1) from a tool FAULT (rc 2) — `failure()` cannot, and keying on
-      # it is what used to file a false "broken links found" issue whenever our own
-      # crawler died. The write to $GITHUB_OUTPUT happens BEFORE `exit "$rc"`; a
-      # step's outputs are collected regardless of its exit status, so the value
-      # survives the deliberate non-zero exit that still fails the gate.
+      # The crawl publishes a step OUTPUT so the issue steps below can tell a link
+      # VERDICT from a tool FAULT — `failure()` cannot, and keying on it is what used
+      # to file a false "broken links found" issue whenever our own crawler died.
+      #
+      # TWO BUGS LIVED HERE UNTIL 2026-09-04, and together they made this action CLOSE
+      # its own broken-links issue on every run that FOUND broken links. Measured on
+      # mvalasis/luxairportlu run 31351732755 and reproduced on lampakia-astro run
+      # 33382684973: "Open / update" skipped, "Close … when clean" succeeded, "✓ Closed
+      # issue #13". The issue had been open since 2026-07-27; four more red weekly runs
+      # after it was closed opened nothing. That is why two fleet gates were red for
+      # over a month with nobody seeing them.
+      #
+      #   1. `shell: bash` runs `bash --noprofile --norc -eo pipefail {0}`, so `-e` is
+      #      ON. The crawl pipeline exits non-zero on a real finding, which aborted the
+      #      step RIGHT THERE — before `rc=` was ever written. The old comment's claim
+      #      that "the write happens BEFORE exit" was true of the source and false of
+      #      the execution. The pipeline is now guarded with `set +e` so the status is
+      #      captured instead of killing the shell.
+      #   2. An unset output is NOT inert in a GitHub `if:`. Comparing null to a
+      #      numeric-looking string coerces BOTH to numbers, so `outputs.rc == '0'`
+      #      was TRUE whenever rc was missing — i.e. "we never got a verdict" read as
+      #      "verified clean", the most dangerous possible default. The old comment
+      #      asserted the opposite ("falls out of the comparison for free"), which is
+      #      the assumption that shipped the bug.
+      #
+      # So the conditions below key on `verdict`, a NON-NUMERIC token. null cannot
+      # coerce to 'clean' or 'broken', which makes the failure mode unreachable rather
+      # than merely fixed — and it still holds for the two cases where no rc exists at
+      # all: the crawler crashing (rc 2), and this step never running because sitemap
+      # expansion failed.
       run: |
         set -o pipefail
+        set +e
         python3 "${{ github.action_path }}/scripts/linkcheck.py" - < pages.txt | tee linkcheck-report.txt
         rc=${PIPESTATUS[0]}
-        echo "rc=$rc" >> "$GITHUB_OUTPUT"
+        set -e
+        case "$rc" in
+          0) verdict=clean ;;
+          1) verdict=broken ;;
+          *) verdict=fault ;;
+        esac
+        { echo "rc=$rc"; echo "verdict=$verdict"; } >> "$GITHUB_OUTPUT"
         { echo '## Weekly full-site link & image check'; echo; echo '```'; cat linkcheck-report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
         exit "$rc"
 
@@ -77,17 +108,18 @@ runs:
         if-no-files-found: ignore
         retention-days: 14
 
-    # Issue lifecycle keys on the crawler's OWN exit code, never on `failure()`.
-    #   rc 1  → real broken links   → open/comment.
-    #   rc 0  → clean               → close.
-    #   rc 2  → the crawler crashed → do NEITHER. We did not check the links, so we
-    #           can neither report them broken nor declare them clean; the step is
-    #           already red and the crash detail is already in the step summary.
-    #   unset → the crawl step never ran (e.g. sitemap expansion failed) → also
-    #           neither, which falls out of the `== '1'` / `== '0'` comparison for
-    #           free rather than needing its own case.
+    # Issue lifecycle keys on the crawler's OWN verdict, never on `failure()`.
+    #   broken → real broken links   → open/comment.
+    #   clean  → verified clean      → close.
+    #   fault  → the crawler crashed → do NEITHER. We did not check the links, so we
+    #            can neither report them broken nor declare them clean; the step is
+    #            already red and the crash detail is already in the step summary.
+    #   unset  → the crawl step never ran (e.g. sitemap expansion failed) → also
+    #            neither. This case needs a NON-NUMERIC token to work: an unset output
+    #            compared against '0' coerces to 0 == 0 and reads as CLEAN. It did
+    #            exactly that until 2026-09-04.
     - name: Open / update the broken-links issue
-      if: ${{ !cancelled() && steps.crawl.outputs.rc == '1' && inputs.manage-issue == 'true' }}
+      if: ${{ !cancelled() && steps.crawl.outputs.verdict == 'broken' && inputs.manage-issue == 'true' }}
       continue-on-error: true
       shell: bash
       env:
@@ -109,7 +141,7 @@ runs:
         fi
 
     - name: Close the broken-links issue when clean
-      if: ${{ !cancelled() && steps.crawl.outputs.rc == '0' && inputs.manage-issue == 'true' }}
+      if: ${{ !cancelled() && steps.crawl.outputs.verdict == 'clean' && inputs.manage-issue == 'true' }}
       continue-on-error: true
       shell: bash
       env:

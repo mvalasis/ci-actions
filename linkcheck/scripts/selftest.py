@@ -17,6 +17,8 @@ Run: `python3 linkcheck/scripts/selftest.py`  (exit 0 = pass, 1 = a leak/regress
 import http.server
 import importlib.util
 import os
+import re
+import textwrap
 import threading
 from urllib.parse import urlsplit
 
@@ -299,13 +301,58 @@ def crash_guard_checks():
     ay = open(os.path.join(HERE, "..", "action.yml"), encoding="utf-8").read()
     open_step = ay.split("- name: Open / update the broken-links issue")[1].split("- name:")[0]
     close_step = ay.split("- name: Close the broken-links issue when clean")[1].split("- name:")[0]
-    check("the crawl step publishes its rc as a step output", 'echo "rc=$rc" >> "$GITHUB_OUTPUT"' in ay)
-    check("open-issue keys on rc == '1' (a real link verdict)",
-          "steps.crawl.outputs.rc == '1'" in open_step)
+    check("the crawl step publishes a verdict as a step output",
+          'echo "verdict=$verdict"' in ay)
+    check("open-issue keys on verdict == 'broken' (a real link verdict)",
+          "steps.crawl.outputs.verdict == 'broken'" in open_step)
     check("open-issue no longer keys on failure() — the false-issue bug",
           "failure()" not in open_step)
-    check("close-issue keys on rc == '0' (verified clean), not success()",
-          "steps.crawl.outputs.rc == '0'" in close_step and "success()" not in close_step)
+    check("close-issue keys on verdict == 'clean', not success()",
+          "steps.crawl.outputs.verdict == 'clean'" in close_step and "success()" not in close_step)
+
+    # (6b) THE CLASS, not the instance (2026-09-04). An UNSET step output is not inert
+    #      in a GitHub `if:`: comparing null against a numeric-looking string coerces
+    #      both to numbers, so `outputs.rc == '0'` is TRUE when rc was never written.
+    #      That is how this action closed its own broken-links issue on every run that
+    #      FOUND broken links — "we got no verdict" read as "verified clean".
+    #      No issue-lifecycle condition may compare an output to a numeric literal
+    #      again, whatever it is named.
+    numeric_cmp = re.compile(r"steps\.\w+\.outputs\.\w+\s*==\s*'\d+'")
+    check("no issue-lifecycle `if:` compares a step output to a NUMERIC literal",
+          not numeric_cmp.search(open_step) and not numeric_cmp.search(close_step))
+
+    # (7) THE BEHAVIOURAL ANCHOR the textual checks above structurally cannot give,
+    #     and the reason this bug shipped: assertions (6) pinned that the wiring
+    #     EXISTED, never that the crawl step could reach it. `shell: bash` runs
+    #     `bash -eo pipefail`, so a crawler exiting non-zero aborted the step BEFORE
+    #     the output was written. Extract the real `run:` body out of action.yml and
+    #     execute it under the same flags GitHub uses, with a stub crawler.
+    crawl_body = ay.split("      run: |\n        set -o pipefail\n")[1].split("\n    - name:")[0]
+    crawl_body = textwrap.dedent("        set -o pipefail\n" + crawl_body)
+    check("the crawl step's run: body was extracted for execution",
+          "verdict=" in crawl_body and "PIPESTATUS" in crawl_body)
+
+    for rc_want, verdict_want in ((0, "clean"), (1, "broken"), (2, "fault")):
+        with tempfile.TemporaryDirectory() as td:
+            stub = os.path.join(td, "linkcheck.py")
+            with open(stub, "w", encoding="utf-8") as f:
+                f.write(f"import sys\nprint('stub crawler')\nsys.exit({rc_want})\n")
+            body = crawl_body.replace(
+                '"${{ github.action_path }}/scripts/linkcheck.py"', f'"{stub}"')
+            out_file = os.path.join(td, "gh_out")
+            sum_file = os.path.join(td, "gh_sum")
+            open(os.path.join(td, "pages.txt"), "w").close()
+            r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", body],
+                               cwd=td, capture_output=True, text=True,
+                               env={"PATH": os.environ.get("PATH", ""),
+                                    "GITHUB_OUTPUT": out_file,
+                                    "GITHUB_STEP_SUMMARY": sum_file})
+            written = open(out_file, encoding="utf-8").read() if os.path.exists(out_file) else ""
+            check(f"crawler rc={rc_want}: the step still PUBLISHES its verdict "
+                  f"(this is what -e used to prevent)",
+                  f"verdict={verdict_want}" in written and f"rc={rc_want}" in written)
+            check(f"crawler rc={rc_want}: the step's own exit code is preserved ({rc_want})",
+                  r.returncode == rc_want)
 
 
 if __name__ == "__main__":
