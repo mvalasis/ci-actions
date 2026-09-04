@@ -126,14 +126,26 @@ jobs:
 
       # REST list, not search: the search index lags a just-created issue, and this
       # assertion must grade the ACTION, never GitHub's indexing latency.
+      # POLL, never a single read. Measured on run 33911430879: the composite created
+      # the issue at T+0 and this endpoint still returned an empty list ~300ms later,
+      # so a one-shot read turned "GitHub has not caught up" into
+      # "THE REGRESSION IS BACK" — a failed probe used as a verdict, which is the
+      # exact class this job polices, reproduced inside the job. The REST list is
+      # read-after-write EVENTUALLY consistent; only its absence after a bounded wait
+      # means anything.
       - name: Assert an issue was OPENED, and by THIS run
         run: |
-          raw=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
-                  --jq ".[] | select(.title==\"$TITLE\") | .number") \
-            || { echo "::error::INFRA — issue list failed; cannot conclude anything"; exit 1; }
-          num=$(printf '%s\n' "$raw" | head -1)
+          num=''
+          for _ in $(seq 1 30); do
+            raw=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+                    --jq ".[] | select(.title==\"$TITLE\") | .number") \
+              || { echo "::error::INFRA — issue list failed; cannot conclude anything"; exit 1; }
+            num=$(printf '%s\n' "$raw" | head -1)
+            case "$num" in ''|*[!0-9]*) ;; *) break ;; esac
+            sleep 2
+          done
           case "$num" in
-            ''|*[!0-9]*) echo "::error::verdict=broken did NOT open an issue — THE REGRESSION THIS JOB EXISTS FOR IS BACK"; exit 1 ;;
+            ''|*[!0-9]*) echo "::error::verdict=broken did NOT open an issue within 60s — THE REGRESSION THIS JOB EXISTS FOR IS BACK"; exit 1 ;;
           esac
           created=$(gh api "repos/$GITHUB_REPOSITORY/issues/$num" --jq '.created_at') \
             || { echo "::error::INFRA — could not read issue #$num"; exit 1; }
@@ -265,16 +277,33 @@ jobs:
         if: ${{ always() && env.LIFECYCLE == '1' }}
         run: |
           set +e
-          nums=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
-                   --jq ".[] | select(.title==\"$TITLE\") | .number" 2>/dev/null)
-          if [ -z "$nums" ] && [ -n "$ISSUE" ]; then nums="$ISSUE"; fi
+          # Same read-after-write trap as the assertion above, and here it is worse:
+          # a single lagged read printed "no fixture issue left open" on run
+          # 33911430879 while the issue was open on a PUBLIC repo. Retry, and always
+          # act on $ISSUE when we have it.
+          nums=''
+          for _ in $(seq 1 15); do
+            nums=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
+                     --jq ".[] | select(.title==\"$TITLE\") | .number" 2>/dev/null)
+            [ -n "$nums" ] && break
+            sleep 2
+          done
+          if [ -n "$ISSUE" ]; then
+            printf '%s\n' "$nums" | grep -qx "$ISSUE" || nums="$(printf '%s\n%s' "$nums" "$ISSUE")"
+          fi
+          nums=$(printf '%s\n' "$nums" | grep -E '^[0-9]+$' | sort -u)
           for n in $nums; do
             gh issue comment "$n" -R "$GITHUB_REPOSITORY" --body \
               "Fixture artifact — opened and closed by the \`linkcheck\` issue-lifecycle self-test (run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}). Not a real finding: the links came from a loopback fixture in \`linkcheck/fixtures/site\`. This job exists because a static check pinned the buggy condition verbatim while the action spent weeks closing its own issue on every red run."
             gh issue close "$n" -R "$GITHUB_REPOSITORY"
           done
+          sleep 3
           leftover=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
                        --jq ".[] | select(.title==\"$TITLE\") | .number" 2>/dev/null)
+          if [ -n "$ISSUE" ]; then
+            st=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --jq .state 2>/dev/null)
+            [ "$st" = "open" ] && leftover="$leftover $ISSUE"
+          fi
           if [ -n "$leftover" ]; then
             echo "::error::fixture issue(s) #$(echo "$leftover" | tr '\n' ' ')still OPEN on a public repo — close by hand: gh issue close <n> -R $GITHUB_REPOSITORY"
             exit 1
