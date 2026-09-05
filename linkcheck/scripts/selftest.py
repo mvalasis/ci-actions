@@ -119,6 +119,50 @@ def check(name, cond):
         FAILS.append(name)
 
 
+def extraction_checks(linkcheck):
+    """A templating DIRECTIVE is not a link.
+
+    `\\bhref=` / `\\bsrc=` also match INSIDE a longer attribute name, because `-`
+    satisfies `\\b`. Every client-side dialect then donates its expressions to the
+    crawl. Live instance: lux-airport.lu emits
+
+        <img data-wp-bind--src="state.selectedImage.currentSrc">
+
+    from WordPress core's block lightbox. Crawled as a relative path it 404s with
+    total confidence — the worst kind of red, because it looks like a real broken
+    link on a real page. Six consecutive weekly runs went red on it, and the
+    documented remedy suppresses it per state-variable NAME, so renaming the
+    variable (`currentImage` -> `selectedImage`) re-broke the gate and earned a
+    SECOND suppression line for the same one bug.
+
+    Both directions are asserted, and the positive half is the one that matters:
+    a regex that extracted nothing at all would satisfy every "must not extract"
+    case below.
+    """
+    print("linkcheck.py — attribute extraction: directives are not URLs")
+    LIVE = ('<img data-wp-bind--src="state.selectedImage.currentSrc" '
+            'src="/wp-content/uploads/real.jpg" alt="">')
+    a_of = linkcheck.A_RE.findall
+    i_of = linkcheck.IMG_RE.findall
+    check("img: the real src is still extracted", i_of(LIVE) == ["/wp-content/uploads/real.jpg"])
+    check("img: WP Interactivity data-wp-bind--src is NOT extracted",
+          "state.selectedImage.currentSrc" not in i_of(LIVE))
+    check("img: a directive-only tag yields nothing",
+          i_of('<img data-wp-bind--src="state.x">') == [])
+    check("a: a plain href is still extracted",
+          a_of('<a href="/plain/">x</a>') == ["/plain/"])
+    check("a: a data- attribute BEFORE href does not shadow it",
+          a_of('<a data-astro-prefetch href="/ok/">x</a>') == ["/ok/"])
+    check("a: Alpine/Vue x-bind:href is NOT extracted",
+          a_of('<a x-bind:href="u">x</a>') == [])
+    check("a: the :href shorthand is NOT extracted", a_of('<a :href="u">x</a>') == [])
+    check("img: htmx hx-src is NOT extracted", i_of('<img hx-src="u">') == [])
+    check("img: srcset does not shadow the real src",
+          i_of('<img srcset="a.png 1x" src="/b.png">') == ["/b.png"])
+    check("img: a directive alongside a real src yields ONLY the real one",
+          i_of('<img :src="u" src="/z.png">') == ["/z.png"])
+
+
 def main():
     global INT_PORT, EXT_PORT
     int_srv, INT_PORT = _start("INT")
@@ -130,6 +174,8 @@ def main():
     os.environ["LINKCHECK_WORKERS"] = "2"
     linkcheck = _load("linkcheck", "linkcheck.py")
     sitemap = _load("sitemap_urls", "sitemap-urls.py")
+
+    extraction_checks(linkcheck)
 
     print("linkcheck.py — status() / fetch_html() per-hop token scoping")
 

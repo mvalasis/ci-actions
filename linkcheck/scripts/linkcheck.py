@@ -77,8 +77,34 @@ EXCLUDE = re.compile("|".join([
     # anyway (they're outbound), so skip them to keep the report quiet.
     r"^https?://([a-z0-9-]+\.)*(linkedin|facebook|fb|instagram|twitter|x|youtube|youtu|tiktok|pinterest)\.(com|be)\b",
 ]), re.I)
-A_RE = re.compile(r'<a\b[^>]*\bhref="([^"]+)"', re.I)
-IMG_RE = re.compile(r'<img\b[^>]*\bsrc="([^"]+)"', re.I)
+# `\bhref=` / `\bsrc=` also match INSIDE a longer attribute name, because `-` is a
+# non-word character and so satisfies `\b`. Every client-side templating dialect in
+# the fleet then donates its expressions to the crawl as if they were URLs:
+#   WP Interactivity  data-wp-bind--src="state.selectedImage.currentSrc"
+#   Alpine/Vue        :href, :src, x-bind:href        htmx  hx-src
+# Those values are evaluated in the BROWSER; they are correct markup and there is
+# no URL to check. Crawled as relative paths they resolve against the page and 404
+# with total confidence, which is the worst kind of red: it looks like a broken
+# link on a real page, and the documented remedy (linkcheck-allow.txt) suppresses
+# it per state-variable NAME — so renaming the variable re-breaks the gate. That is
+# exactly what happened on lux-airport.lu: `currentImage` -> `selectedImage` between
+# 2026-07-20 and 2026-07-27 turned the weekly red for six consecutive runs, and the
+# fix was a second suppression line for the same one bug.
+#
+# A lookbehind for "no word char, hyphen or colon immediately before" keeps `href=`,
+# ` href=`, `"href=` and rejects `-href=`, `data-x--src=` and the `:href` / `x-bind:src`
+# shorthand. Deliberately NOT a denylist of known prefixes: the next framework
+# invents its own, and this gate is shared by 11 repos.
+#
+# The colon costs SVG `<a xlink:href>`, which is real markup and would now be
+# skipped. Measured before taking it: ZERO occurrences across lux-airport.lu,
+# www.epn.one, lampakia.gr and www.prevedourou.gr. It is also the deprecated
+# spelling — SVG2 anchors use plain `href`, which still matches. Trading a link
+# nobody in this fleet writes for a false FATAL on every page using a modern
+# templating dialect is the right side of that trade, and it is stated here so the
+# next reader does not have to rediscover the reasoning.
+A_RE = re.compile(r'<a\b[^>]*(?<![-\w:])href="([^"]+)"', re.I)
+IMG_RE = re.compile(r'<img\b[^>]*(?<![-\w:])src="([^"]+)"', re.I)
 SCRIPT_STYLE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.I | re.S)
 ACCEPT = {401, 403, 429, 503, 999}  # non-2xx/3xx but the host is alive
 
