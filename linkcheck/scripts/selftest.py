@@ -257,12 +257,13 @@ def main():
     ext_srv.shutdown()
 
     crash_guard_checks()
+    crawl_floor_checks()
 
     print()
     if FAILS:
         print(f"FAIL — {len(FAILS)} check(s) failed: {', '.join(FAILS)}")
         raise SystemExit(1)
-    print("PASS — token scoping + crash-guard attribution hold.")
+    print("PASS — token scoping, crash-guard attribution and the crawl-size floor hold.")
 
 
 def crash_guard_checks():
@@ -399,6 +400,209 @@ def crash_guard_checks():
                   f"verdict={verdict_want}" in written and f"rc={rc_want}" in written)
             check(f"crawler rc={rc_want}: the step's own exit code is preserved ({rc_want})",
                   r.returncode == rc_want)
+
+
+def crawl_floor_checks():
+    """The collapsed-crawl floor — the 2026-09-06 lampakia-astro class.
+
+    Scheduled run 33382684973 reported `48 checked | 10 fatal` -> FAIL and named
+    ten `/katigoria/…` URLs as broken. Every one returns 200; the next full run
+    crawled 1824 pages / 5113 links with 0 fatal. The tell was one line above the
+    verdict: `Collected 18 page URLs across the sitemap` against 1824. The page
+    set had collapsed ~100x, `[ "$N" -gt 0 ]` was satisfied, and the action
+    published a verdict about a site it had seen 1% of.
+
+    Two layers are graded here, and the second is the one that matters:
+      * the DECISION is pure and unit-testable (below);
+      * the OVERRIDE is executed, by running the real crawl `run:` body out of
+        action.yml under the same bash flags GitHub uses. A static check proves a
+        condition exists, never that it fires — which is exactly how the
+        2026-09-04 numeric-coercion bug shipped past a selftest that had pinned
+        the buggy condition verbatim.
+    """
+    import json
+    import subprocess
+    import sys
+    import tempfile
+
+    print("\n# crawl-size floor (collapsed page set => fault, not a verdict)")
+    floor_py = os.path.join(HERE, "crawl-floor.py")
+    check("crawl-floor.py ships next to the crawler", os.path.exists(floor_py))
+    if not os.path.exists(floor_py):
+        return
+
+    def decide(pages, baseline_content, extra=None):
+        with tempfile.TemporaryDirectory() as td:
+            bp = os.path.join(td, "b.json")
+            if baseline_content is not None:
+                with open(bp, "w", encoding="utf-8") as f:
+                    f.write(baseline_content)
+            r = subprocess.run(
+                [sys.executable, floor_py, "decide", "--pages", str(pages),
+                 "--baseline", bp] + (extra or []),
+                capture_output=True, text=True)
+            return r.stdout.strip(), r.stderr, r.returncode
+
+    # --- the incident, reproduced exactly -----------------------------------
+    good = json.dumps([1824, 1820, 1830])
+    d, err, rc = decide(18, good)
+    check("THE INCIDENT: 18 pages against a 1824 median is `collapsed`", d == "collapsed")
+    check("…and the explanation names both numbers, not just a verdict",
+          "18" in err and "1824" in err)
+    check("…and deciding never fails the run itself (exit 0)", rc == 0)
+
+    # --- and the healthy run right next to it, or the above proves nothing ---
+    check("a full crawl against the same baseline is `ok`", decide(1800, good)[0] == "ok")
+
+    # --- boundary, both sides ------------------------------------------------
+    check("exactly at the floor is NOT collapsed (0.5 x 1824 = 912)",
+          decide(912, good)[0] == "ok")
+    check("one page below the floor IS collapsed", decide(911, good)[0] == "collapsed")
+
+    # --- COULD-NOT-LOOK is its own state, three ways -------------------------
+    #     Each must be distinguishable in the report; none may fault the run. A
+    #     floor that red-lights every new caller is a floor that gets switched off.
+    d, err, _ = decide(18, None)
+    check("no baseline at all => `no-baseline`, never `collapsed`", d == "no-baseline")
+    check("…and it says the size was NOT judged", "NOT judged" in err)
+    d, err, _ = decide(18, "{not json at all")
+    check("a corrupt baseline => `unreadable`, never `collapsed`", d == "unreadable")
+    check("…and `unreadable` is distinguishable from `no-baseline` in the report",
+          "not a list of positive integers" in err)
+    check("a list with a non-int member is `unreadable`, not silently filtered",
+          decide(18, json.dumps([1824, "1820", 1830]))[0] == "unreadable")
+    check("too little history => `no-baseline` (the floor is not armed yet)",
+          decide(18, json.dumps([1824, 1820]))[0] == "no-baseline")
+    check("…and the third good run arms it", decide(18, json.dumps([1824, 1820, 1830]))[0] == "collapsed")
+
+    # --- the knobs actually move the answer ----------------------------------
+    check("--fraction 0.9 makes a 20% drop collapsed",
+          decide(1400, good, ["--fraction", "0.9"])[0] == "collapsed")
+    check("--fraction 0.001 makes even 18 pages ok (0 disables at the action level)",
+          decide(18, good, ["--fraction", "0.001"])[0] == "ok")
+    check("--min-history 5 disarms a 3-run baseline",
+          decide(18, good, ["--min-history", "5"])[0] == "no-baseline")
+
+    # --- a crash degrades to `unreadable`, never to `ok` ---------------------
+    #     Asserted by mutating a COPY of the real file, not by grepping for
+    #     `except`: a textual check cannot tell a live handler from a dead one.
+    src = open(floor_py, encoding="utf-8").read()
+    anchor = "def main():"
+    check("floor fault-injection anchor still present", anchor in src)
+    if anchor in src:
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "cf.py")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(src.replace(anchor, anchor + "\n    raise RuntimeError('injected floor fault')"))
+            bp = os.path.join(td, "b.json")
+            with open(bp, "w", encoding="utf-8") as f:
+                f.write(good)
+            r = subprocess.run([sys.executable, p, "decide", "--pages", "18", "--baseline", bp],
+                               capture_output=True, text=True)
+            check("a crashed floor script prints `unreadable`, never `ok`",
+                  r.stdout.strip() == "unreadable")
+            check("…exits 0, so a broken GUARD cannot take a working gate down",
+                  r.returncode == 0)
+            check("…and the traceback still reaches stderr", "injected floor fault" in r.stderr)
+
+    # --- record: only trustworthy runs extend the history --------------------
+    with tempfile.TemporaryDirectory() as td:
+        bp = os.path.join(td, "b.json")
+        for n in (100, 200, 300):
+            subprocess.run([sys.executable, floor_py, "record", "--pages", str(n),
+                            "--baseline", bp], capture_output=True, text=True)
+        check("record appends in order", json.load(open(bp)) == [100, 200, 300])
+        subprocess.run([sys.executable, floor_py, "record", "--pages", "400",
+                        "--baseline", bp, "--keep", "2"], capture_output=True, text=True)
+        check("record keeps only the last --keep samples", json.load(open(bp)) == [300, 400])
+        with open(bp, "w", encoding="utf-8") as f:
+            f.write("garbage")
+        subprocess.run([sys.executable, floor_py, "record", "--pages", "500",
+                        "--baseline", bp], capture_output=True, text=True)
+        check("record recovers from a corrupt baseline instead of wedging it forever",
+              json.load(open(bp)) == [500])
+
+    # ===== THE OVERRIDE, EXECUTED ===========================================
+    # Everything above grades a pure function. This grades action.yml: extract the
+    # real crawl `run:` body and run it under `bash --noprofile --norc -eo
+    # pipefail` with a stub crawler, exactly as GitHub would.
+    ay = open(os.path.join(HERE, "..", "action.yml"), encoding="utf-8").read()
+    body = ay.split("      run: |\n        set -o pipefail\n")[1].split("\n    - name:")[0]
+    body = textwrap.dedent("        set -o pipefail\n" + body)
+    check("the crawl body was extracted and carries the floor override",
+          "LINKCHECK_FLOOR_DECISION" in body)
+
+    def run_body(rc, decision):
+        with tempfile.TemporaryDirectory() as td:
+            stub = os.path.join(td, "linkcheck.py")
+            with open(stub, "w", encoding="utf-8") as f:
+                f.write(f"import sys\nprint('stub crawler')\nsys.exit({rc})\n")
+            b = body.replace('"${{ github.action_path }}/scripts/linkcheck.py"', f'"{stub}"')
+            out_file, sum_file = os.path.join(td, "gh_out"), os.path.join(td, "gh_sum")
+            open(os.path.join(td, "pages.txt"), "w").close()
+            env = {"PATH": os.environ.get("PATH", ""),
+                   "GITHUB_OUTPUT": out_file, "GITHUB_STEP_SUMMARY": sum_file}
+            if decision is not None:
+                env["LINKCHECK_FLOOR_DECISION"] = decision
+            r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", b],
+                               cwd=td, capture_output=True, text=True, env=env)
+            written = open(out_file, encoding="utf-8").read() if os.path.exists(out_file) else ""
+            vfile = os.path.join(td, "linkcheck-verdict.txt")
+            verdict_file = open(vfile, encoding="utf-8").read().strip() if os.path.exists(vfile) else ""
+            summary = open(sum_file, encoding="utf-8").read() if os.path.exists(sum_file) else ""
+            return r, written, verdict_file, summary
+
+    # (1) THE DANGEROUS DIRECTION. A collapsed crawl that happened to find no
+    #     broken links would report `clean` — which CLOSES the tracking issue,
+    #     declaring a site verified when 99% of it was never fetched. Harder to
+    #     notice than the red one and strictly worse.
+    r, written, vfile, summary = run_body(0, "collapsed")
+    check("collapsed + rc=0: the CLEAN verdict is downgraded to `fault`",
+          "verdict=fault" in written and vfile == "fault")
+    check("collapsed + rc=0: `clean` is nowhere in the published output "
+          "(it would close the issue)", "verdict=clean" not in written)
+    check("collapsed + rc=0: the step goes RED — a green gate would report a run "
+          "that verified nothing", r.returncode != 0)
+    check("collapsed + rc=0: rc is republished as 2, matching the fault verdict",
+          "rc=2" in written)
+    check("collapsed + rc=0: the step summary explains the collapse, not the links",
+          "CRAWL SIZE COLLAPSED" in summary and "NOT a link verdict" in summary)
+
+    # (2) …and the red direction, which is the shape actually observed.
+    r, written, vfile, _ = run_body(1, "collapsed")
+    check("collapsed + rc=1: the BROKEN verdict is downgraded to `fault`",
+          "verdict=fault" in written and vfile == "fault")
+    check("collapsed + rc=1: `broken` is nowhere in the published output "
+          "(it would file a false report)", "verdict=broken" not in written)
+
+    # (3) THE ASYMMETRY. Without these, (1) and (2) pass just as well against a
+    #     step that faults unconditionally — a gate that can never say anything.
+    for decision in ("ok", "no-baseline", "unreadable", None):
+        label = decision if decision is not None else "unset (floor step skipped)"
+        _, written, _, _ = run_body(1, decision)
+        check(f"decision={label}: a real BROKEN verdict still reports broken",
+              "verdict=broken" in written)
+        _, written, _, _ = run_body(0, decision)
+        check(f"decision={label}: a real CLEAN verdict still reports clean",
+              "verdict=clean" in written)
+
+    # (4) a genuine crawler FAULT is not relabelled by the floor either way.
+    _, written, _, _ = run_body(2, "ok")
+    check("decision=ok + rc=2: a crawler fault is still `fault`", "verdict=fault" in written)
+
+    # --- action.yml wiring: the pieces the executed body cannot reach --------
+    check("the floor step publishes a decision the crawl step consumes",
+          'echo "decision=$d" >> "$GITHUB_OUTPUT"' in ay
+          and "LINKCHECK_FLOOR_DECISION: ${{ steps.floor.outputs.decision }}" in ay)
+    check("an empty decision token defaults to `unreadable`, never `ok` "
+          "(a guard that never ran must not read as healthy)",
+          "*) d=unreadable" in ay)
+    record_step = ay.split("- name: Record this crawl's size in the baseline")[1].split("- name:")[0]
+    check("a COLLAPSED run never extends the baseline it is judged against "
+          "(the guard would train itself to accept the collapse)",
+          "steps.floor.outputs.decision != 'collapsed'" in record_step)
+    check("only a real verdict extends the baseline",
+          "outputs.verdict == 'clean'" in record_step and "outputs.verdict == 'broken'" in record_step)
 
 
 if __name__ == "__main__":

@@ -41,7 +41,9 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.12.0**.
+`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.12.2**
+(**v1.13.0** — the `linkcheck` crawl-size floor — is merged but NOT yet
+released: `v1` still points at `v1.12.2` until the tag is moved).
 
 **v1.12.0** — the three entrypoints that had **no crash guard at all** now have
 one, closing the split v1.11.0 left open. A fault in a scanner is a fault in the
@@ -503,6 +505,53 @@ jobs:
 | `allow-file` | no | `scripts/linkcheck-allow.txt` | Per-repo baselined-URL list, read from the caller checkout. |
 | `workers` | no | `10` | Concurrent curl workers. |
 | `manage-issue` | no | `true` | Open/auto-close a GitHub issue on failure/clean (needs `issues: write`). |
+| `crawl-floor-fraction` | no | `0.5` | Fault the run when it crawled fewer than this × the median page count of previous good runs. `0` disables the floor. |
+| `crawl-floor-min-history` | no | `3` | Good runs needed before the floor arms. Below this, no run is judged. |
+| `manage-baseline` | no | `true` | Persist the crawl-size history in the Actions cache. `false` = read a `.linkcheck-baseline.json` already in the workspace and skip the cache. |
+
+### The crawl-size floor — a collapsed crawl is not a verdict
+
+Added **v1.13.0**, from `creme-ypsilon/lampakia-astro` run `33382684973`
+(2026-08-31). That scheduled run reported `48 checked | 10 fatal` → FAIL and
+named ten `/katigoria/…` URLs as broken. Every one of them returns 200. The
+next full run crawled 1824 pages / 5113 links with **0 fatal**. The tell was
+one line above the verdict:
+
+```
+Collected 18 page URLs across the sitemap        # the good run: 1824
+```
+
+The page set had collapsed ~100×, `[ "$N" -gt 0 ]` was satisfied, and the
+action published a confident verdict about a site it had seen 1% of. Nothing
+inside a single run can tell *"this site has 18 pages"* from *"we saw 18 of
+1824"* — only the site's own history can.
+
+So each run's page count is compared against the median of the last 13 good
+runs. Below `crawl-floor-fraction ×` that median, the run is **`collapsed`**:
+the verdict becomes `fault`, the step goes red, and the tracking issue is left
+exactly as it was.
+
+**It downgrades `clean` as well as `broken`, and the clean half is the reason
+this exists.** Had those 18 pages happened to be link-clean, the action would
+have reported `clean` and *closed* the broken-links issue — declaring a site
+verified when 99% of it was never fetched. Same defect, quieter, and nothing
+downstream could tell.
+
+What it deliberately does **not** do is fault a run it cannot judge. No
+history, an unparseable baseline, or a crashed floor script all leave the
+crawl's own verdict standing, each printing its own line in the report so
+*"not judged"* never renders as *"healthy"*. A floor that red-lights every new
+caller is a floor that gets switched off.
+
+It measures **collapse, not decay** — the median moves with the site, so a
+site that genuinely shrinks re-baselines instead of alarming forever, and a
+genuinely small site is never flagged.
+
+The history lives in the **Actions cache** (`linkcheck-baseline-v1-<host>-*`),
+so no caller edit and no repo write are needed. Cache eviction (7 days unused)
+disarms the floor on a weekly cron that skips a run; it re-arms after three
+good runs. Only a run with a real verdict on a non-collapsed page set extends
+the history — otherwise the guard would train itself to accept the collapse.
 
 ### Per-repo baseline
 
@@ -522,7 +571,15 @@ regression guard: it stands up two loopback servers on different hostnames and
 asserts the token never reaches the external host across a redirect chain
 (`python3 linkcheck/scripts/selftest.py`; also runs in CI on `linkcheck/**`).
 
-The same self-test also pins the **crash-guard attribution** added in v1.12.0.
+The same self-test also pins the **crash-guard attribution** added in v1.12.0,
+and the **crawl-size floor** added in v1.13.0 — the latter both as unit checks
+of the pure decision and by executing the real crawl `run:` body out of
+`action.yml` under the same bash flags GitHub uses, because a static check
+proves a condition exists and never that it fires. `linkcheck-selftest.yml`'s
+`issue-lifecycle` job adds the server-side half: its COLLAPSED pass crawls the
+**same one-page clean fixture as the CLEAN pass** and differs only in the
+baseline file, so a broken floor does not fail quietly — it closes the issue,
+which is the production defect itself.
 
 ### Exit codes, and why the issue lifecycle keys on them
 
@@ -534,7 +591,7 @@ a **verdict** apart from a **fault**:
 | --- | --- | --- |
 | `0` | crawled clean | close the tracking issue |
 | `1` | crawled, found broken links | open / comment on it |
-| `2` | **could not crawl** — the tool faulted, or `LINKCHECK_HOST` is unset | do **neither** |
+| `2` | **could not crawl** — the tool faulted, `LINKCHECK_HOST` is unset, or the page set **collapsed** (v1.13.0) | do **neither** |
 
 Before v1.12.0 the issue steps keyed on `failure()`, which cannot see the
 difference: a crashed crawler filed a "Weekly link check: broken links found"

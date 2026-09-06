@@ -20,6 +20,14 @@ name: linkcheck engine self-test
 # THE FOUR PASSES ARE THE WHOLE DESIGN — one per branch of the verdict contract:
 #   broken → OPEN the issue        clean  → CLOSE it
 #   fault  → do NEITHER            unset  → do NEITHER   ← the regression's real mechanism
+#   collapsed → do NEITHER, even though the links came back clean (added 2026-09-06)
+#
+# THE COLLAPSED PASS (3b) IS AN A/B AGAINST PASS 4. Both crawl the same one-page
+# clean fixture; only the baseline file differs. So a broken floor does not make 3b
+# fail quietly — it makes 3b CLOSE the issue, which is the exact production defect:
+# lampakia-astro run 33382684973 fetched 18 of ~1824 pages and published a verdict
+# about the whole site. It reported `broken` that day; had the 18 been clean it
+# would have closed the tracking issue and declared the site verified.
 # The `unset` pass is the load-bearing one, and this is MEASURED, not argued. Run
 # 33911783576 dispatched this job against a branch carrying exactly that partial relapse
 # (numeric `rc == '0'`/`'1'` conditions restored, `set +e` kept). Result: BROKEN, FAULT
@@ -250,7 +258,71 @@ jobs:
             || { echo "::error::an UNSET verdict wrote to #$ISSUE ($COMMENTS_BEFORE→$after) — it must do NEITHER"; exit 1; }
           echo "✓ unset verdict left #$ISSUE open and untouched"
 
+      # ---- 3b. COLLAPSED → the issue must be left ALONE -------------------------
+      # THE A/B PASS, and it is deliberately the same fixture as pass 4 below. Both
+      # crawl `sitemap_index_clean.xml`, one page, zero broken links. The ONLY
+      # difference is the baseline file this step writes first — so if the floor is
+      # not working, this pass does what pass 4 does: CLOSES the issue.
+      #
+      # That is the dangerous direction of the 2026-09-06 lampakia-astro class. Run
+      # 33382684973 crawled 18 of ~1824 pages and reported `broken`, naming ten URLs
+      # that all return 200. Had those 18 pages been link-clean it would have
+      # reported `clean` and closed the tracking issue, declaring a site verified
+      # when 99% of it was never fetched — the same defect, quieter, and nothing
+      # downstream could tell.
+      #
+      # `manage-baseline: false` so the composite reads the file written here and
+      # skips the Actions cache: this pass grades the DECISION and the issue
+      # lifecycle, not the cache plumbing.
+      - name: Snapshot the issue before the COLLAPSED pass
+        run: |
+          n=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" --jq 'length') \
+            || { echo "::error::INFRA — comment probe failed"; exit 1; }
+          echo "COMMENTS_BEFORE=$n" >> "$GITHUB_ENV"
+          rm -f linkcheck-verdict.txt
+          # 3 samples clears --min-history; 1 page against a median of 100 is 0.01x,
+          # far below the 0.5 floor. Written here rather than accumulated so the pass
+          # cannot silently disarm itself if the defaults change.
+          echo '[100,100,100]' > .linkcheck-baseline.json
+
+      - name: 'COLLAPSED pass (clean links, but 1 page against a median of 100)'
+        id: collapsed
+        continue-on-error: true
+        uses: ./linkcheck
+        with:
+          sitemap-url: 'http://127.0.0.1:8099/sitemap_index_clean.xml'
+          host: '127.0.0.1'
+          workers: '4'
+          manage-issue: 'true'
+          manage-baseline: 'false'
+
+      - name: Assert a COLLAPSED crawl wrote NOTHING, and did not close the issue
+        run: |
+          v=$(cat linkcheck-verdict.txt 2>/dev/null || true)
+          [ "$v" = "fault" ] \
+            || { echo "::error::expected verdict=fault from a collapsed crawl, got '$v'. With '$v' this pass is graded on the same path as the CLEAN pass below — which CLOSES the issue."; exit 1; }
+          # Positive oracle: prove the crawl actually RAN and was clean, so the fault
+          # came from the floor and not from the crawl failing for some other reason.
+          grep -q 'CRAWL SIZE COLLAPSED' linkcheck-report.txt \
+            || { echo "::error::the report does not name the collapse — the fault came from somewhere else and this pass proves nothing"; exit 1; }
+          [ "${{ steps.collapsed.outcome }}" = "failure" ] \
+            || { echo "::error::a collapsed crawl exited 0 — a green gate for a run that verified nothing"; exit 1; }
+          state=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE" --jq .state) \
+            || { echo "::error::INFRA — state probe failed"; exit 1; }
+          [ "$state" = "open" ] \
+            || { echo "::error::A COLLAPSED CRAWL CLOSED #$ISSUE. One page of a hundred was fetched and the action declared the site verified — 'we could not look' read as 'we looked and it is clean'."; exit 1; }
+          after=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" --jq 'length') \
+            || { echo "::error::INFRA — comment probe failed"; exit 1; }
+          [ "$after" = "$COMMENTS_BEFORE" ] \
+            || { echo "::error::a collapsed crawl wrote to #$ISSUE ($COMMENTS_BEFORE→$after) — it must do NEITHER"; exit 1; }
+          echo "✓ collapsed crawl left #$ISSUE open and untouched"
+          # Pass 4 must run WITHOUT a baseline, or it collapses too and never closes.
+          rm -f .linkcheck-baseline.json
+
       # ---- 4. CLEAN → the issue must be CLOSED ----------------------------------
+      # Same sitemap as 3b, no baseline: the floor is unarmed, the crawl is clean,
+      # and the issue closes. 3b and 4 together are the asymmetry — without 4 the
+      # floor could fault everything and 3b would still pass.
       - name: 'CLEAN pass (verdict=clean)'
         id: clean
         uses: ./linkcheck

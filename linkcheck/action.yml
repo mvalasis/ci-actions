@@ -28,11 +28,51 @@ inputs:
     description: 'Open/auto-close a GitHub issue on failure/clean. Needs `issues: write`.'
     required: false
     default: 'true'
+  crawl-floor-fraction:
+    description: >-
+      Fault the run when this crawl covered fewer than <fraction> x the median
+      page count of previous good runs. Guards the collapsed-crawl class: a
+      truncated page set otherwise produces a confident verdict about a site
+      that was never fetched. 0 disables the floor.
+    required: false
+    default: '0.5'
+  crawl-floor-min-history:
+    description: 'Good runs required before the floor arms. Below this, no run is judged.'
+    required: false
+    default: '3'
+  manage-baseline:
+    description: >-
+      Persist the crawl-size history in the Actions cache (no repo write, no
+      caller file). Set false to use a `.linkcheck-baseline.json` already in the
+      workspace and skip the cache entirely — which is what the self-test does.
+    required: false
+    default: 'true'
 
 runs:
   using: composite
   steps:
+    # The crawl-size history, restored from the Actions cache. NOT a caller file
+    # and NOT a repo write: a size floor is worth nothing if it only protects the
+    # callers who remembered to add something, and the incident it guards
+    # (lampakia-astro run 33382684973) happened on a caller that had done
+    # everything right. `restore` + `save` rather than `cache`, so the history is
+    # written only by a run whose crawl we trust — see the record step.
+    #
+    # A cache miss is NOT a failure: `crawl-floor.py` reads the absent file as
+    # `no-baseline` and judges nothing. Eviction (7 days unused) is real on a
+    # weekly cron and degrades exactly that way — the floor disarms, says so in
+    # the report, and re-arms after three good runs.
+    - name: Restore the crawl-size baseline
+      if: ${{ inputs.manage-baseline == 'true' }}
+      uses: actions/cache/restore@v4
+      with:
+        path: .linkcheck-baseline.json
+        key: linkcheck-baseline-v1-${{ inputs.host }}-${{ github.run_id }}
+        restore-keys: |
+          linkcheck-baseline-v1-${{ inputs.host }}-
+
     - name: Expand sitemap → page list
+      id: sitemap
       shell: bash
       env:
         VERIFY_HOMEPAGE_TOKEN: ${{ inputs.verify-token }}
@@ -45,6 +85,39 @@ runs:
         N=$(grep -c . pages.txt || true)
         echo "Collected $N page URLs across the sitemap"
         [ "$N" -gt 0 ] || { echo "::error::sitemap expansion produced no URLs (sitemap down?)"; exit 1; }
+        # `$N > 0` is the floor that 18-instead-of-1824 walked straight through.
+        # Publish the count so the next step can judge it against this site's own
+        # history — nothing inside one run can tell a small site from a truncated
+        # one.
+        echo "pages=$N" >> "$GITHUB_OUTPUT"
+
+    # Decide BEFORE the crawl, so the decision is on the record even if the crawl
+    # dies — and so the reason is in the log next to the page count it judged.
+    # This step can only publish a token; it never fails the run. A floor script
+    # that crashed has cost us the extra protection, not the crawl's verdict.
+    - name: Judge the crawl size against this site's own history
+      id: floor
+      if: ${{ inputs.crawl-floor-fraction != '0' }}
+      shell: bash
+      run: |
+        d=$(python3 "${{ github.action_path }}/scripts/crawl-floor.py" decide \
+              --pages "${{ steps.sitemap.outputs.pages }}" \
+              --baseline "${{ github.workspace }}/.linkcheck-baseline.json" \
+              --fraction "${{ inputs.crawl-floor-fraction }}" \
+              --min-history "${{ inputs.crawl-floor-min-history }}" 2>floor.err)
+        cat floor.err
+        # Fail CLOSED on an empty read, and note WHICH way "closed" points here:
+        # towards not judging. An empty stdout means the script produced no token
+        # at all, which is the one state that must never be silently defaulted to
+        # `ok` — that would restore the exact bug, a guard reporting healthy
+        # because it never ran.
+        case "$d" in
+          ok|collapsed|no-baseline|unreadable) : ;;
+          *) d=unreadable
+             echo "crawl-floor: no decision token was produced — treating as unjudged" ;;
+        esac
+        echo "decision=$d" >> "$GITHUB_OUTPUT"
+        { echo "_crawl-floor: $d_"; cat floor.err; } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Crawl + check every link & image
       id: crawl
@@ -54,6 +127,11 @@ runs:
         LINKCHECK_WORKERS: ${{ inputs.workers }}
         LINKCHECK_ALLOW: ${{ github.workspace }}/${{ inputs.allow-file }}
         VERIFY_HOMEPAGE_TOKEN: ${{ inputs.verify-token }}
+        # Through `env:`, not `${{ }}` inline in the body, so selftest.py can
+        # extract this run: block and execute it under the real bash flags with
+        # the decision set directly. The 2026-09-04 bug shipped because the
+        # assertions could only read the wiring, never run it.
+        LINKCHECK_FLOOR_DECISION: ${{ steps.floor.outputs.decision }}
       # The crawl publishes a step OUTPUT so the issue steps below can tell a link
       # VERDICT from a tool FAULT — `failure()` cannot, and keying on it is what used
       # to file a false "broken links found" issue whenever our own crawler died.
@@ -101,6 +179,34 @@ runs:
           1) verdict=broken ;;
           *) verdict=fault ;;
         esac
+        # A COLLAPSED PAGE SET INVALIDATES BOTH VERDICTS, and the clean one is the
+        # dangerous half. lampakia-astro run 33382684973 crawled 18 of ~1824 pages
+        # and reported `broken` with ten named URLs that all return 200 — a
+        # confident claim about a site 99% of which was never fetched. Had those
+        # 18 pages been link-clean it would have reported `clean` and CLOSED the
+        # broken-links issue, which is the same defect pointing the other way and
+        # far harder to notice. So this downgrades clean AND broken to `fault`:
+        # "we could not look" is a third state, not a shade of "we looked".
+        #
+        # rc moves to 2 with it. The step must go red — a collapsed crawl that
+        # exited 0 would report a green gate for a run that verified nothing — and
+        # 2 is already this action's code for "no verdict", so the exit code and
+        # the verdict token cannot disagree.
+        if [ "${LINKCHECK_FLOOR_DECISION:-}" = "collapsed" ]; then
+          {
+            echo
+            echo "=== CRAWL SIZE COLLAPSED — this is NOT a link verdict ==="
+            echo "The page set was a fraction of this site's usual size, so the crawl"
+            echo "covered a fraction of the site. The '$verdict' result below describes"
+            echo "only the pages that were reached and says nothing about the rest."
+            echo "Neither reported broken nor declared clean; the tracking issue is"
+            echo "left exactly as it was."
+            echo "Look at the sitemap first (a truncated or mid-deploy sitemap is the"
+            echo "usual cause), not at the URLs listed above."
+          } | tee -a linkcheck-report.txt
+          verdict=fault
+          rc=2
+        fi
         { echo "rc=$rc"; echo "verdict=$verdict"; } >> "$GITHUB_OUTPUT"
         # The same verdict as a FILE, so a caller can assert the discriminator
         # directly. A composite's `outputs:` mapping is not readable by the caller
@@ -110,6 +216,36 @@ runs:
         printf '%s\n' "$verdict" > linkcheck-verdict.txt
         { echo '## Weekly full-site link & image check'; echo; echo '```'; cat linkcheck-report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
         exit "$rc"
+
+    # Only a run we TRUST extends the history: a real verdict (the crawl ran to a
+    # conclusion) on a page set the floor did not call collapsed. Recording a
+    # collapsed run would drag the median down towards the truncated size and
+    # disarm the floor after a few bad weeks — the guard quietly training itself
+    # to accept the thing it exists to catch.
+    - name: Record this crawl's size in the baseline
+      if: ${{ !cancelled() && inputs.crawl-floor-fraction != '0'
+              && steps.floor.outputs.decision != 'collapsed'
+              && (steps.crawl.outputs.verdict == 'clean' || steps.crawl.outputs.verdict == 'broken') }}
+      shell: bash
+      run: |
+        python3 "${{ github.action_path }}/scripts/crawl-floor.py" record \
+          --pages "${{ steps.sitemap.outputs.pages }}" \
+          --baseline "${{ github.workspace }}/.linkcheck-baseline.json"
+
+    # continue-on-error: a cache write is a convenience, never a verdict. A cache
+    # service blip, or a second linkcheck invocation in one job hitting the same
+    # run-id key, must not turn a healthy gate red — the next run simply re-reads
+    # the older entry, or none, and says so.
+    - name: Save the crawl-size baseline
+      continue-on-error: true
+      if: ${{ !cancelled() && inputs.manage-baseline == 'true'
+              && inputs.crawl-floor-fraction != '0'
+              && steps.floor.outputs.decision != 'collapsed'
+              && (steps.crawl.outputs.verdict == 'clean' || steps.crawl.outputs.verdict == 'broken') }}
+      uses: actions/cache/save@v4
+      with:
+        path: .linkcheck-baseline.json
+        key: linkcheck-baseline-v1-${{ inputs.host }}-${{ github.run_id }}
 
     - name: Upload the REVIEW queue (WAF-fronted URLs to verify out-of-band)
       if: ${{ always() }}
