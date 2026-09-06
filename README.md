@@ -41,9 +41,25 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.12.2**
-(**v1.13.0** — the `linkcheck` crawl-size floor — is merged but NOT yet
-released: `v1` still points at `v1.12.2` until the tag is moved).
+`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.13.0**.
+
+**v1.13.0** — `linkcheck` no longer publishes a verdict about a site it only
+partly crawled. A run whose page count collapses below `crawl-floor-fraction` ×
+the median of the last 13 good runs is `fault`: rc 2, step red, tracking issue
+untouched. It downgrades **`clean` as well as `broken`** — a collapsed crawl that
+happens to find nothing would otherwise CLOSE the issue and declare a site
+verified when 99% of it was never fetched, which is the same defect pointing the
+quieter way.
+
+From `creme-ypsilon/lampakia-astro` run `33382684973`: `48 checked | 10 fatal`
+against ten URLs that all return 200, because the sitemap yielded 18 pages
+instead of 1824 and `[ "$N" -gt 0 ]` was satisfied.
+
+**Caller-visible:** nothing to change. The history lives in the Actions cache, so
+no caller edit and no repo write; a caller with no history yet is never faulted,
+and the floor arms after three good runs. `crawl-floor-fraction: '0'` disables it.
+Cache eviction (7 days unused) disarms it and it re-arms — the report says which
+state it is in, so *not judged* never renders as *healthy*.
 
 **v1.12.0** — the three entrypoints that had **no crash guard at all** now have
 one, closing the split v1.11.0 left open. A fault in a scanner is a fault in the
