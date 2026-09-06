@@ -162,6 +162,34 @@ def extraction_checks(linkcheck):
     check("img: a directive alongside a real src yields ONLY the real one",
           i_of('<img :src="u" src="/z.png">') == ["/z.png"])
 
+    # --- THE ACCEPTED COST, pinned so it stays a decision ---------------------
+    # The lookbehind rejects a preceding `:`, which is what kills `x-bind:href`
+    # and the `:href` shorthand above. It also rejects SVG 1.1's
+    # `<a xlink:href="…">`, which IS a real link. Naming it here rather than
+    # leaving it to be rediscovered as a hole: an exemption nothing pins decays
+    # into "we never checked those".
+    #
+    # MEASURED before accepting, 2026-09-06 — every `xlink:href` across nine
+    # caller repos plus two live rendered pages is a FRAGMENT reference
+    # (`#SVGID_1_`, `#icon-badResponse`, `#_Image1`) on `<use>`/`<image>`/
+    # `<linearGradient>`. Not one is a URL and not one is on an `<a>`. Fragment
+    # refs are dropped by the `#` filter in extract() regardless, so the live
+    # exposure is zero.
+    #
+    # And the mitigation is in the markup itself: SVG2 deprecated `xlink:href`
+    # for plain `href`, which has no preceding colon and IS extracted — asserted
+    # below, because a limitation without its escape route reads worse than it is.
+    check("a: SVG1.1 xlink:href is NOT extracted — the accepted cost of the "
+          "colon in the lookbehind (fleet exposure measured at zero)",
+          a_of('<a xlink:href="https://example.com/svg-link">x</a>') == [])
+    check("a: …but SVG2's plain href inside an <svg> IS extracted, which is the "
+          "escape route for anything that actually needs crawling",
+          a_of('<svg><a href="https://example.com/svg2-link">x</a></svg>')
+          == ["https://example.com/svg2-link"])
+    check("use: a fragment xlink:href was never crawlable anyway (the `#` filter), "
+          "which is why the measured exposure is zero",
+          a_of('<use xlink:href="#icon-badResponse"/>') == [])
+
 
 def main():
     global INT_PORT, EXT_PORT
