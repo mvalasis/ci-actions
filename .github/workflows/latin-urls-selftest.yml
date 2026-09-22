@@ -1,0 +1,56 @@
+name: latin-urls engine self-test
+
+# Offline regression guard for the ASCII page-URL gate: builds throwaway trees and
+# runs the real audit.sh, asserting exit codes + the operator-visible lines (clean /
+# finding / no-verdict fault), the dynamic-route and uploads carve-outs, and the
+# crash guard. No network, no build, no Astro — deterministic.
+#
+# TWO LEGS ON PURPOSE (same reasoning as a11y-audit-selftest.yml): the script runs
+# on bash 5 in CI and, through the fleet's pre-push hook history, its bracket
+# expression has to hold on bash 3.2 + BSD grep too — and the 2026-07-31 no-op was
+# identical on both. Each leg asserts the interpreter it actually got.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'latin-urls/**'
+      - '.github/workflows/latin-urls-selftest.yml'
+  pull_request:
+    paths:
+      - 'latin-urls/**'
+      - '.github/workflows/latin-urls-selftest.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  engine-selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            expect_major: '5'
+          - os: macos-latest
+            expect_major: '3'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Assert the interpreter this leg is meant to cover
+        shell: bash
+        env:
+          EXPECT_MAJOR: ${{ matrix.expect_major }}
+        run: |
+          major="${BASH_VERSINFO[0]}"
+          echo "bash $BASH_VERSION (major $major) on ${{ matrix.os }}"
+          [ "$major" = "$EXPECT_MAJOR" ] || {
+            echo "::error::expected bash major $EXPECT_MAJOR on ${{ matrix.os }}, got $major — this leg is no longer covering the interpreter it claims to"
+            exit 1
+          }
+
+      - name: Behavioural self-test
+        shell: bash
+        run: bash latin-urls/scripts/selftest.sh

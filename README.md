@@ -41,7 +41,20 @@ back at the last-good release; they pick it up on their next run).
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
-`linkcheck`, `verify-homepage`) pins `@v1`; current line is **v1.13.0**.
+`linkcheck`, `verify-homepage`) pins `@v1`. Where `v1` points is read live, never
+from prose: `git tag --points-at v1` (the entries below are in release order,
+newest first — an entry whose tag is not yet cut says so).
+
+**v1.14.0** (pending — cut the tag with the ritual above once merged) — new
+`latin-urls` action: the ASCII page-URL gate the fleet's pre-push hook ran on a
+LOCAL `bun run build` (src/pages directories, dist/ page paths, pulled product
+slugs), taken where the build already happens — the Astro deploy job, after
+`astro build`, before wrangler. A caller whose `deploy.yml` carries the step tells
+the hook so (it greps the pushed tree for `ci-actions/latin-urls@`), and the hook
+stops building locally: every astro push drops from a full pull+build to seconds,
+and the 2026-06-25 class of incident — the hook's `bun run pull` with the backend
+URL unset wiping local gitignored content — cannot recur (PUSH-GATE.md §14m).
+Exit 0 clean · 1 finding (the deploy is refused) · 2 fault, no verdict.
 
 **v1.13.0** — `linkcheck` no longer publishes a verdict about a site it only
 partly crawled. A run whose page count collapses below `crawl-floor-fraction` ×
@@ -650,6 +663,57 @@ measured fleet data, and the standing call are in
 "Selector precision vs. catching markup regressions". Open call as of 2026-07-30;
 the recommendation there is to keep scoped selectors and let the v1.8.0 advisory
 carry the regression signal.
+
+## `latin-urls` — ASCII page-URL gate for Astro sites
+
+Shareable **page** URLs must be ASCII: a non-ASCII path percent-encodes (breaks
+WhatsApp/SMS/email link previews) and a pulled product slug outside
+`[a-zA-Z0-9._-]` 404s in prod. Three audits, run **after the build step and
+before wrangler**, so nothing non-ASCII reaches Cloudflare Pages through a job
+that carries the step:
+
+1. every directory under `pages-dir` (`src/pages`) is ASCII — Astro dynamic
+   routes (`[slug]`, `[...path]`) are literal and allowed;
+2. every file path under `dist` is ASCII — `uploads-exclude`
+   (`/wp-content/uploads/`) is exempt, those are downloads, not page URLs;
+3. every entry under `products-dir` (`src/content/products`, lampakia shape) is
+   `[a-zA-Z0-9._-]` with no `%` — skipped when the directory is absent.
+
+`greek-urls-ok: 'true'` exempts 1 + 2 for a site whose page slugs are
+deliberately Greek (prevedourougr); 3 still runs — a bad product slug 404s
+regardless of policy.
+
+```yaml
+      - name: Build
+        run: bun run astro build
+
+      - name: Latin URLs (ASCII page-URL gate)
+        uses: mvalasis/ci-actions/latin-urls@v1
+        # with:
+        #   greek-urls-ok: 'true'   # prevedourougr only
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@…
+```
+
+Exit `0` clean · `1` a finding — the step fails, so the deploy never runs ·
+`2` the gate faulted (no `dist/`, an abort) — also fails, and says it is a fault,
+never a verdict. The regex is the fleet's regression anchor
+`[^]a-zA-Z0-9._/[-]` (literal `]` first, `-` last, no backslashes: the
+backslashed form was a permanent no-op on every grep, 2026-07-31);
+`latin-urls/scripts/selftest.sh` pins it by mutation, and the self-test
+workflow runs it on bash 5 (ubuntu) and bash 3.2 (macos).
+
+**Why this exists (2026-09-22).** The same three audits lived in the fleet's
+pre-push hook, which needed a full local `bun run build` — on the content sites
+`build` = `pull && astro build && pagefind`, so every push hit the WP backend and
+built twice (hook, then CI), and a hook `pull` with the backend URL unset once
+wiped a worktree's gitignored content. CI is the deploy on every Astro repo: a
+broken build there never reaches prod. The hook now greps the pushed tree's
+`.github/workflows/*.yml` for `ci-actions/latin-urls@` and, when present, skips
+its build and dist audit (keeping the instant `src/pages` audit + the secret
+scan) — a repo migrates itself the moment its `deploy.yml` adopts the step, with
+no window where neither side grades `dist/` (PUSH-GATE.md §14m).
 
 ## Roadmap
 

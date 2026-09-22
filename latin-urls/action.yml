@@ -1,0 +1,48 @@
+name: 'Latin URLs (ASCII page-URL gate for Astro sites)'
+description: >-
+  Fails the deploy job when a built page URL would percent-encode: a non-ASCII
+  directory under src/pages, a non-ASCII page path under dist/ (uploads are
+  downloads and are exempt), or a pulled product slug that is not
+  [a-zA-Z0-9._-]. Runs AFTER the build step, BEFORE wrangler — the same three
+  audits the fleet's pre-push hook ran on a local build, moved to the build CI
+  already does. Exit 0 = clean, 1 = a finding, 2 = the gate faulted (no verdict).
+
+inputs:
+  dist:
+    description: 'Built output directory to audit (must exist — run after the build step).'
+    required: false
+    default: 'dist'
+  pages-dir:
+    description: 'Astro pages directory; every directory name under it must be ASCII.'
+    required: false
+    default: 'src/pages'
+  products-dir:
+    description: >-
+      Pulled product-content directory (lampakia shape). Each entry's basename
+      must be [a-zA-Z0-9._-] and contain no "%". Skipped when the directory
+      does not exist (content sites have none).
+    required: false
+    default: 'src/content/products'
+  greek-urls-ok:
+    description: >-
+      'true' exempts the src/pages and dist/ audits (a site whose page slugs
+      are deliberately Greek — prevedourougr). The product-slug audit still runs.
+    required: false
+    default: 'false'
+  uploads-exclude:
+    description: 'Path fragment whose dist/ files are DOWNLOADS, not page URLs — never flagged.'
+    required: false
+    default: '/wp-content/uploads/'
+
+runs:
+  using: composite
+  steps:
+    - name: Audit page URLs
+      shell: bash
+      env:
+        DIST: ${{ inputs.dist }}
+        PAGES_DIR: ${{ inputs.pages-dir }}
+        PRODUCTS_DIR: ${{ inputs.products-dir }}
+        GREEK_URLS_OK: ${{ inputs.greek-urls-ok }}
+        UPLOADS_EXCLUDE: ${{ inputs.uploads-exclude }}
+      run: bash "${{ github.action_path }}/scripts/audit.sh"
