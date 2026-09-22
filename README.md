@@ -45,8 +45,14 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.14.0** (pending — cut the tag with the ritual above once merged) — new
-`latin-urls` action: the ASCII page-URL gate the fleet's pre-push hook ran on a
+**v1.14.0** (pending — cut the tag with the ritual above once merged) — two
+actions that take the Astro push path from minutes to seconds. `pull-tier`
+decides whether a deploy run must re-pull the CMS content: a code push that
+touched no pull input builds from the catalogue `actions/cache` restored, trusted
+only on the cache's own evidence (the marker `mode: record` left after the last
+successful pull, ≤ 8 days old, fingerprint intact); content events, pull-input
+changes and every unknown pull. Measured 2026-09-21: the pull was 136 s of a
+393 s lampakia code push, 106 s of 242 s on epn-astro. And `latin-urls`: the ASCII page-URL gate the fleet's pre-push hook ran on a
 LOCAL `bun run build` (src/pages directories, dist/ page paths, pulled product
 slugs), taken where the build already happens — the Astro deploy job, after
 `astro build`, before wrangler. A caller whose `deploy.yml` carries the step tells
@@ -663,6 +669,62 @@ measured fleet data, and the standing call are in
 "Selector precision vs. catching markup regressions". Open call as of 2026-07-30;
 the recommendation there is to keep scoped selectors and let the v1.8.0 advisory
 carry the regression signal.
+
+## `pull-tier` — does this deploy run need to re-pull the CMS content?
+
+An Astro deploy job's `bun run pull` was running on **every** push (44–136 s,
+measured 2026-09-21), although content changes arrive by `repository_dispatch`
+incrementally and `actions/cache` had already restored the last pulled state.
+`pull-tier` makes the pull conditional on evidence, never on hope:
+
+| `decide` says **pull** when | otherwise |
+| --- | --- |
+| the event is a content event (`repository_dispatch`, `schedule`, `workflow_dispatch` — `force-events`) | |
+| the push / PR changed a file matching `paths` (pull scripts, the transforms they import, the content schema, the lockfile, the workflow) | |
+| there is no marker, the marker is older than `max-age-days` (8), or the on-disk fingerprint of `count-paths` differs from the marker's (a partly evicted / clobbered cache) | **`pull=false`** — build from the cached content |
+| the base commit is unknown (first push, new branch, shallow clone), or the script faulted | |
+
+`mode: record` writes the marker after a successful pull — put it inside a path
+the caller caches (`content-cache/pull-marker.json` by default).
+
+```yaml
+      - name: Pull tier
+        id: tier
+        uses: mvalasis/ci-actions/pull-tier@v1
+        with:
+          mode: decide
+          paths: |
+            scripts/migrate-*.ts
+            src/lib/**
+            src/content.config.ts
+            package.json
+            bun.lock
+            .github/workflows/deploy.yml
+          count-paths: |
+            src/content/posts
+            src/content/pages
+
+      - name: Pull latest from WP
+        if: steps.tier.outputs.pull == 'true'
+        run: bun run pull
+
+      - name: Record the pull marker
+        if: steps.tier.outputs.pull == 'true'
+        uses: mvalasis/ci-actions/pull-tier@v1
+        with:
+          mode: record
+          count-paths: |
+            src/content/posts
+            src/content/pages
+```
+
+Drift is bounded twice: any content edit dispatches (incremental pull, marker
+refreshed), and a weekly `schedule:` on the deploy workflow forces a full pull,
+so a taxonomy edit that dispatches nothing waits at most a week. A dispatch
+`client_payload` still drives the incremental product list exactly as before —
+this action only decides whether the pull step runs. Pair it with skipping
+`astro check` on `repository_dispatch` (no code changed) and each event does
+only its half.
 
 ## `latin-urls` — ASCII page-URL gate for Astro sites
 

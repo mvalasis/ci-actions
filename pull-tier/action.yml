@@ -1,0 +1,67 @@
+name: 'Pull tier (does this run need to re-pull the CMS content?)'
+description: >-
+  Decides whether an Astro deploy job must run its `bun run pull` or can build
+  from the catalogue the actions/cache step restored. A content event (dispatch,
+  schedule, manual) always pulls; a push that touched a pull input always pulls;
+  otherwise the cached content is used only when its own marker — written by
+  `mode: record` after the last successful pull — is present, young enough, and
+  still describes what is on disk. Every unknown resolves to "pull".
+
+inputs:
+  mode:
+    description: "'decide' → outputs pull=true|false + reason; 'record' → write the marker after a successful pull."
+    required: true
+  paths:
+    description: >-
+      Newline-separated path globs (GitHub `paths:` syntax: `**` any depth, `*`
+      one segment). A push or PR whose changed files match any of them forces a
+      pull — the pull scripts, the transforms they import, the content schema,
+      the lockfile, this workflow.
+    required: false
+    default: ''
+  count-paths:
+    description: >-
+      Newline-separated paths the marker fingerprints: a directory counts its
+      files, a file counts its bytes. `decide` pulls when the fingerprint on disk
+      differs from the marker's (a partly evicted or clobbered cache).
+    required: false
+    default: ''
+  marker:
+    description: 'Marker file, inside a path the caller caches (default content-cache/pull-marker.json).'
+    required: false
+    default: 'content-cache/pull-marker.json'
+  max-age-days:
+    description: 'Oldest marker `decide` accepts; older → pull. Bounds drift for content that never dispatches.'
+    required: false
+    default: '8'
+  force-events:
+    description: 'Space-separated event names that always pull.'
+    required: false
+    default: 'repository_dispatch schedule workflow_dispatch'
+
+outputs:
+  pull:
+    description: "'true' when the job must run its pull step, else 'false' (decide mode)."
+    value: ${{ steps.tier.outputs.pull }}
+  reason:
+    description: 'One line saying why.'
+    value: ${{ steps.tier.outputs.reason }}
+
+runs:
+  using: composite
+  steps:
+    - name: Pull tier (${{ inputs.mode }})
+      id: tier
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        PATHS: ${{ inputs.paths }}
+        COUNT_PATHS: ${{ inputs.count-paths }}
+        MARKER: ${{ inputs.marker }}
+        MAX_AGE_DAYS: ${{ inputs.max-age-days }}
+        FORCE_EVENTS: ${{ inputs.force-events }}
+        EVENT_NAME: ${{ github.event_name }}
+        BEFORE_SHA: ${{ github.event.before }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.sha }}
+      run: bash "${{ github.action_path }}/scripts/tier.sh"

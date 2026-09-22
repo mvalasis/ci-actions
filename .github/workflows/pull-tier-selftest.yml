@@ -1,0 +1,54 @@
+name: pull-tier engine self-test
+
+# Offline regression guard for the content-pull tier: every decide branch, the record marker and the
+# crash guard, against a throwaway git repo. Exit 0 = pass, 1 = a regression.
+#
+# TWO LEGS ON PURPOSE (same reasoning as a11y-audit-selftest.yml): tier.sh runs on
+# bash 5 in CI, and its `case`-glob matching, `<<<` here-strings and `trap … EXIT`
+# guard are exactly the areas where bash 3.2 (macOS, the operators' laptops, where
+# the selftest is run by hand) differs. Each leg asserts the interpreter it got.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pull-tier/**'
+      - '.github/workflows/pull-tier-selftest.yml'
+  pull_request:
+    paths:
+      - 'pull-tier/**'
+      - '.github/workflows/pull-tier-selftest.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  engine-selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            expect_major: '5'
+          - os: macos-latest
+            expect_major: '3'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Assert the interpreter this leg is meant to cover
+        shell: bash
+        env:
+          EXPECT_MAJOR: ${{ matrix.expect_major }}
+        run: |
+          major="${BASH_VERSINFO[0]}"
+          echo "bash $BASH_VERSION (major $major) on ${{ matrix.os }}"
+          [ "$major" = "$EXPECT_MAJOR" ] || {
+            echo "::error::expected bash major $EXPECT_MAJOR on ${{ matrix.os }}, got $major — this leg is no longer covering the interpreter it claims to"
+            exit 1
+          }
+
+      - name: Behavioural self-test
+        shell: bash
+        run: bash pull-tier/scripts/selftest.sh
