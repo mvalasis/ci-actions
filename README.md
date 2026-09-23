@@ -33,11 +33,15 @@ across the whole fleet — a bad commit on `@main` would lock merges everywhere.
 ```bash
 git tag -a v1.2.0 -m "v1.2.0 — <what changed>"   # optional immutable anchor
 git push origin v1.2.0
-git tag -f v1 HEAD && git push -f origin v1       # move the floating major
+git tag -f --no-sign v1 HEAD && git push -f origin v1   # move the floating major
 ```
 
-**Rollback:** `git tag -f v1 v1.1.0 && git push -f origin v1` (point callers
-back at the last-good release; they pick it up on their next run).
+**Rollback:** `git tag -f --no-sign v1 v1.1.0 && git push -f origin v1` (point
+callers back at the last-good release; they pick it up on their next run).
+
+`--no-sign` keeps `v1` a lightweight pointer for an operator whose git signs tags
+(`tag.gpgsign`). Without it, the move fails for lack of a message, or turns `v1`
+into an annotated tag that `git tag --points-at v1` no longer lists its anchor beside.
 
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
