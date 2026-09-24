@@ -270,7 +270,7 @@ check('.sh with no trap is a finding',
   missing('a/scripts/x.sh', src('set -euo pipefail', 'echo hi', 'exit 0')));
 // The documented limit, asserted so it stays a KNOWN limit rather than a
 // surprise: a pure cleanup trap satisfies the bash heuristic. This is exactly why
-// link-crawl.sh carries an explicit pragma instead of relying on detection.
+// link-crawl.sh (deleted in v1.15.0) carried an explicit pragma instead of relying on detection.
 check('.sh cleanup-only trap satisfies the heuristic (documented limit)',
   !missing('a/scripts/x.sh', src('set -uo pipefail', 'trap \'rm -f "$TMP"\' EXIT')));
 
@@ -289,7 +289,7 @@ say('\n# discoverExecuted — read from action.yml, not guessed');
 const executedSet = discoverExecuted(root);
 check('finds the executed scripts across every language',
   ['a11y-audit/scripts/audit.sh', 'linkcheck/scripts/linkcheck.py', 'linkcheck/scripts/sitemap-urls.py',
-   'verify-homepage/scripts/render-check.mjs', 'verify-homepage/scripts/link-crawl.sh',
+   'verify-homepage/scripts/render-check.mjs',
    'security-baseline/scripts/scan.mjs'].every((f) => executedSet.has(f)),
   JSON.stringify([...executedSet].sort()));
 // The distinction the rule depends on: pure library modules are NOT executed.

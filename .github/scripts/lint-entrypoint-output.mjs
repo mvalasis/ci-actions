@@ -363,10 +363,10 @@ export function lintSource(src, file = '<input>') {
 //
 // KNOWN LIMIT, stated rather than papered over: for bash this matches any
 // `trap … EXIT`, so a pure CLEANUP trap (`trap 'rm -f "$TMP"' EXIT`) reads as a
-// guard. link-crawl.sh has exactly that shape. It carries an explicit exemption
-// pragma anyway, so its rationale is on the record and does not rest on this
-// heuristic — but a future bash entrypoint could satisfy the rule with a cleanup
-// trap and no guard. The behavioural selftests are the layer that catches that;
+// guard. link-crawl.sh (deleted in v1.15.0) had exactly that shape and carried an
+// explicit exemption pragma anyway, so its rationale was on the record rather
+// than resting on this heuristic — but a future bash entrypoint could satisfy
+// the rule with a cleanup trap and no guard. The behavioural selftests are the layer that catches that;
 // tightening this regex to guess intent would trade a known limit for a false
 // sense of one.
 const GUARD_PRESENT = {
@@ -388,10 +388,10 @@ const GUARD_PRESENT = {
 // `# lint-allow-no-crash-guard: <reason>` (or `//` for JS). A reason is REQUIRED,
 // same as the raw-output pragma — a bare pragma does not pass, because the point
 // is to record WHY an entrypoint is allowed to fail loud, not to switch the rule
-// off. The two exemptions in this repo are linkcheck/scripts/sitemap-urls.py and
-// verify-homepage/scripts/link-crawl.sh: neither has a report-mode input to
-// consult, and each one's wrapper already attributes its failure correctly, so
-// there is no misattribution to fix. That — misattribution, not the exit code —
+// off. The exemption in this repo is linkcheck/scripts/sitemap-urls.py (and was
+// verify-homepage/scripts/link-crawl.sh, until v1.15.0 deleted it): it has no
+// report-mode input to consult, and its wrapper already attributes its failure
+// correctly, so there is no misattribution to fix. That — misattribution, not the exit code —
 // is the test for whether an entrypoint needs this rule.
 // `[ \t]` and not `\s`: this regex is tested against the WHOLE file, so a `\s*`
 // here would happily cross the newline and let the next line's first character
@@ -527,7 +527,7 @@ const REMEDY_MISSING = [
   '  # lint-allow-no-crash-guard: <why a fault here must not be softened>',
   '  The test is MISATTRIBUTION, not the exit code: an entrypoint with no',
   '  report-mode input whose wrapper already reports the fault correctly has',
-  '  nothing to align (see sitemap-urls.py, link-crawl.sh).',
+  '  nothing to align (see sitemap-urls.py).',
 ];
 
 const REMEDY = [

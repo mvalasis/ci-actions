@@ -5,9 +5,8 @@ description: >-
   collapsed (0-height) landmarks, overlapping in-flow landmarks — plus a nav
   inventory assert (the primary-nav items present, in declared order, against a
   tiny per-repo verify-nav.json) so a silently wrong / missing / reordered menu
-  fails the gate. Optionally also runs the curl link-crawl (the T1 tier), the
-  one canonical copy of the per-repo verify-homepage-t1.sh. Mechanical
-  structure/render = BLOCK; visual taste stays advisory (design-critic). Cost:
+  fails the gate. Mechanical structure/render = BLOCK; visual taste stays
+  advisory (design-critic). Cost:
   the browser matrix is meant for the WEEKLY schedule + cutover, NOT per-push.
 
 inputs:
@@ -23,11 +22,11 @@ inputs:
     required: false
     default: 'desktop:1920x1080,laptop:1440x900,iphone:393x852,android:384x854'
   checks:
-    description: 'Comma list of: render (overflow/overlap/collapse), nav (inventory), links (curl T1 crawl).'
+    description: 'Comma list of: render (overflow/overlap/collapse), nav (inventory). `links` was retired in v1.15.0 and fails the step: the T1 link crawl is each repo''s own scripts/verify-homepage-t1.sh.'
     required: false
     default: 'render,nav'
   fail-on-structure:
-    description: 'true = BLOCK on any render/nav failure; false = report-only (WARN). links always fails loud on a broken link.'
+    description: 'true = BLOCK on any render/nav failure; false = report-only (WARN).'
     required: false
     default: 'true'
   max-urls:
@@ -83,13 +82,14 @@ runs:
         OVERLAP_TOL: ${{ inputs.overlap-tolerance }}
       run: node scripts/render-check.mjs
 
-    - name: Link crawl (T1)
+    # RETIRED in v1.15.0 (2026-09-25). No caller ever enabled `links`, and its
+    # script was a v1-lineage copy of the per-repo verify-homepage-t1.sh that
+    # fell three versions behind — serial, one exit code, and the ARGUMENT as its
+    # same-origin filter, the bug the per-repo v2.2 fixes. A caller that still
+    # asks for it fails here instead of silently getting no crawl.
+    - name: Link crawl (T1) — retired
       if: ${{ contains(inputs.checks, 'links') }}
       shell: bash
-      working-directory: ${{ github.workspace }}
-      env:
-        URLS: ${{ inputs.urls }}
-        VERIFY_HOMEPAGE_TOKEN: ${{ inputs.verify-token }}
-      # Word-split URLS into args (passed via env, not interpolated into the
-      # command, so a caller's URL list can't inject shell).
-      run: bash "${{ github.action_path }}/scripts/link-crawl.sh" $URLS
+      run: |
+        echo "::error title=verify-homepage::checks: links was retired in ci-actions v1.15.0. Run the repo's own scripts/verify-homepage-t1.sh for the T1 link crawl, and drop 'links' from checks."
+        exit 1

@@ -15,9 +15,11 @@ name: verify-homepage self-test
 #     this can never block ci-actions itself). Proves npm ci + Chromium install +
 #     the composite action wire up end-to-end against a real page. ci-actions
 #     carries no scripts/verify-nav.json, so it also exercises the
-#     nav-file-missing skip path. Dispatch to point it at any site or enable the
-#     `links` crawl (links fails loud on a genuinely broken link — dispatch-only
-#     by default, so a flaky outbound can't redden pushes).
+#     nav-file-missing skip path. Dispatch to point it at any site.
+#
+# (3) links-retired — `checks: links` was retired in v1.15.0; a caller that
+#     still asks for it must FAIL the step, never silently get no crawl. Needs
+#     no browser (render/nav are not in checks), so it costs seconds.
 
 on:
   push:
@@ -30,7 +32,7 @@ on:
         required: false
         default: 'https://www.lampakia.gr/'
       checks:
-        description: 'Any subset of: render,nav,links'
+        description: 'Any subset of: render,nav'
         required: false
         default: 'render,nav'
 
@@ -65,3 +67,21 @@ jobs:
           fail-on-structure: 'false'
           verify-token: ${{ secrets.VERIFY_HOMEPAGE_TOKEN }}
           max-urls: '4'
+
+  links-retired:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - id: links
+        uses: ./verify-homepage
+        continue-on-error: true   # the failure IS the assertion; the next step grades it
+        with:
+          urls: 'https://www.lampakia.gr/'
+          checks: 'links'
+      - name: checks=links must fail the step
+        env:
+          OUTCOME: ${{ steps.links.outcome }}
+        run: |
+          echo "checks: links -> $OUTCOME"
+          [ "$OUTCOME" = failure ] || { echo "::error::checks: links did not fail — the retired tier must fail loud"; exit 1; }

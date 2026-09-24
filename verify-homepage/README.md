@@ -25,11 +25,13 @@ menu and responsive breakage until they were caught by eye across four devices
   the repo's `nav_selector` (read regardless of visibility, so it works at any
   breakpoint) and compare to the declared `items` — **count, order, label, href**.
   Catches a silently wrong / missing / reordered menu.
-- **links** (optional) — the curl link-crawl (T1 tier). This action carries the
-  **one canonical copy** (`scripts/link-crawl.sh`) of the per-repo
-  `verify-homepage-t1.sh` (ci-actions roadmap: fold the duplicates here).
+- **links** — **retired in v1.15.0** (2026-09-25); `checks: links` now fails the
+  step. It was meant to fold the per-repo `verify-homepage-t1.sh` copies in, but
+  no caller ever enabled it and its copy fell behind (serial, one exit code, the
+  argument as its same-origin filter). The T1 crawl is each repo's own
+  `scripts/verify-homepage-t1.sh`, kept byte-identical fleet-wide.
 
-`render`+`nav` need a browser; `links` is pure curl. The browser matrix is the
+`render`+`nav` need a browser. The browser matrix is the
 costly part — **run it on the weekly schedule + at cutover, not per-push.**
 
 ## Use it (weekly + manual)
@@ -62,7 +64,7 @@ jobs:
 | `urls` | yes | — | Live URLs (production at cutover — **never a preview host**). |
 | `nav-file` | no | `scripts/verify-nav.json` | Nav inventory + landmarks, read from your checkout. Missing = nav skipped (render still runs). |
 | `viewports` | no | `desktop:1920x1080,laptop:1440x900,iphone:393x852,android:384x854` | `[name:]WxH`; width ≤600 emulates mobile. |
-| `checks` | no | `render,nav` | Any of `render`, `nav`, `links`. |
+| `checks` | no | `render,nav` | Any of `render`, `nav`. (`links` retired in v1.15.0 — fails the step.) |
 | `fail-on-structure` | no | `true` | `true` = BLOCK; `false` = report-only (WARN). |
 | `max-urls` | no | `12` | Cap the rendered URL count. |
 | `verify-token` | no | `''` | `X-Verify-Source`, sent **only** to the target host (+ www/apex). |

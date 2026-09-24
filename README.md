@@ -49,7 +49,21 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.14.0** (pending — cut the tag with the ritual above once merged) — two
+**v1.15.0** —
+`verify-homepage` **retires `checks: links`** and deletes `scripts/link-crawl.sh`.
+Checked before removal: all seven `verify-homepage` callers across both owners
+leave `checks` at `render,nav`, so nothing ran it. It was a v1-lineage copy of the
+per-repo `verify-homepage-t1.sh` that fell three versions behind — serial, one
+exit code, and its same-origin filter was the ARGUMENT, so a URL that redirected
+to another host crawled almost nothing and passed (the fleet's per-repo copy
+fixed that in v2.2). The one thing it did better, keeping the WAF token off
+cross-host redirects, is in v2.2 too. Folding T1 into this action is abandoned
+rather than deferred: the callers run T1 inside their own deploy steps and
+branch on its exit code (warn on 1, fail on 3), which a composite step's
+pass/fail cannot carry. **Newly blocks nobody**, which is why this stays in `v1`:
+no caller passes `links`, and one that did would fail the step loudly rather
+than silently lose its crawl.
+**v1.14.0** — two
 actions that take the Astro push path from minutes to seconds. `pull-tier`
 decides whether a deploy run must re-pull the CMS content: a code push that
 touched no pull input builds from the catalogue `actions/cache` restored, trusted
@@ -116,10 +130,10 @@ because the guard is built out of `trap … EXIT` and `set -u` abort semantics).
 Statically, `lint-entrypoint-output.mjs` grew **rule 3** — crash-guard presence
 across `.mjs` / `.py` / `.sh`, scoped to the scripts an `action.yml` actually
 executes (pure library modules cannot set an exit code, so a guard in one would
-be noise). Two entrypoints carry a documented `lint-allow-no-crash-guard:`
+be noise). Two entrypoints carried a documented `lint-allow-no-crash-guard:`
 exemption: `linkcheck/scripts/sitemap-urls.py` and
-`verify-homepage/scripts/link-crawl.sh`. **The test for the exemption is
-misattribution, not the exit code** — both are wrapped by steps that already
+`verify-homepage/scripts/link-crawl.sh` (deleted in v1.15.0). **The test for the exemption is
+misattribution, not the exit code** — both were wrapped by steps that already
 report their failure for what it is, so there is nothing to realign; `linkcheck.py`
 is guarded despite equally having no report mode precisely because its wrapper
 did misattribute.
@@ -440,8 +454,8 @@ Mechanized as **rule 3** of the entrypoint lint (below) and asserted
 behaviourally by each action's self-test, which crashes the real entrypoint
 rather than grepping it for a handler. An entrypoint may opt out with
 `lint-allow-no-crash-guard: <reason>`, but the test is **misattribution, not the
-exit code**: `sitemap-urls.py` and `link-crawl.sh` are exempt because their
-wrapper steps already report their failure for what it is, while `linkcheck.py`
+exit code**: `sitemap-urls.py` is exempt because its wrapper step already
+reports its failure for what it is (as `link-crawl.sh` was, until v1.15.0), while `linkcheck.py`
 is guarded despite equally having no report-mode input, because its wrapper
 filed a false "broken links found" issue on a crawler crash.
 
@@ -490,8 +504,9 @@ distinguish from correct code:
 
 Known limit, stated rather than papered over: for bash, rule 3 matches any
 `trap … EXIT`, so a pure **cleanup** trap reads as a guard. That is why
-`link-crawl.sh` carries an explicit pragma instead of relying on detection, and
-why the behavioural self-tests — not this lint — are the load-bearing layer.
+`link-crawl.sh` carried an explicit pragma instead of relying on detection (until
+it was deleted in v1.15.0), and why the behavioural self-tests — not this lint —
+are the load-bearing layer.
 
 The seven `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
 `console.log(…)` then `process.exit(…)`, but emit 1375–4117 bytes, an order of
