@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  lintSource, lintEntrypoint, lintCrashGuardPresence, lintArgvSecret,
+  lintSource, lintEntrypoint, lintCrashGuardPresence, lintArgvSecret, lintStdioPath,
   discoverEntrypoints, discoverExecuted, blankNonCode,
 } from './lint-entrypoint-output.mjs';
 
@@ -409,6 +409,137 @@ check('reports the VALUE\'s line and column, and names the variable',
   JSON.stringify(argv('a/scripts/x.py', ...EXPLODED)));
 
 // ---------------------------------------------------------------------------
+// RULE 5 — stdout/stderr opened BY PATH.
+//
+// The positive is the shipped defect verbatim (test-suite run.mjs before v1.19.3)
+// and the load-bearing negatives are the shipped FIX verbatim, so the rule is
+// pinned from both sides on the exact text it exists for. Two fixtures carry the
+// allowance's edges: a comparison and a fallback on ONE line (an allowance that
+// excused the whole line passes every other case here), and a bash assignment,
+// whose `=` differs from a test's `=` only by the blanks around it.
+say('\n# rule 5: stdout/stderr opened by path (.mjs / .sh / .py)');
+
+const stdio = (file, ...lines) => lintStdioPath(src(...lines), file);
+const opens = (file, ...lines) => stdio(file, ...lines).length;
+
+// --- the shipped defect, and the other ways to open the path (JS).
+check('JS: the `|| \'/dev/stdout\'` summary fallback (test-suite run.mjs before v1.19.3)',
+  opens('a/scripts/x.mjs', "const summaryFile = env.GITHUB_STEP_SUMMARY || '/dev/stdout';") === 1);
+check('JS: a `??` fallback, a ternary branch and an assignment',
+  opens('a/scripts/x.mjs', "const a = env.S ?? '/dev/stdout';", "const b = env.S ? env.S : '/dev/stdout';",
+    "let c; c = '/dev/stdout';") === 3);
+check('JS: a literal handed to appendFileSync / writeFileSync / openSync / createWriteStream',
+  opens('a/scripts/x.mjs',
+    "fs.appendFileSync('/dev/stdout', report);",
+    "fs.writeFileSync(\"/dev/stdout\", report);",
+    "const fd = fs.openSync(`/dev/stdout`, 'a');",
+    "const out = fs.createWriteStream('/dev/stdout');") === 4);
+check('JS: the path inside a command string for a child',
+  opens('a/scripts/x.mjs', "execSync('report >> /dev/stdout');") === 1);
+check('every spelling of fd 1 and of fd 2',
+  opens('a/scripts/x.mjs', "o('/dev/fd/1');", "o('/proc/self/fd/1');",
+    "o('/dev/stderr');", "o('/dev/fd/2');", "o('/proc/self/fd/2');") === 5);
+check('NOT another fd or device (/dev/fd/3, /dev/fd/10, /proc/self/fd/3, /proc/self/fd/12, /dev/null, /dev/stdin)',
+  opens('a/scripts/x.mjs', "o('/dev/fd/3');", "o('/dev/fd/10');", "o('/proc/self/fd/3');", "o('/proc/self/fd/12');",
+    "o('/dev/null');", "o('/dev/stdin');") === 0);
+
+// --- the allowed comparison: the shipped fix, verbatim.
+check('NOT the fix: `!== \'/dev/stdout\'` (the v1.16.0–v1.19.3 summaryFile line)',
+  opens('a/scripts/x.mjs',
+    "const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';") === 0);
+check('NOT render-check.mjs\'s crash-note guard, nor ===, ==, !=, nor the path on the left',
+  opens('a/scripts/x.mjs', "if (sink && sink !== '/dev/stdout') {", 'if (s === "/dev/stdout") s = \'\';',
+    'if (s == `/dev/stdout`) s = \'\';', "if ('/dev/stdout' != s) go(s);") === 0);
+check('the allowance is per OCCURRENCE: a comparison and a fallback on one line is one finding',
+  (() => {
+    const f = stdio('a/scripts/x.mjs', "const s = env.S !== '/dev/stdout' ? env.S : '/dev/stdout';");
+    return f.length === 1 && f[0].col === 46;
+  })(),
+  JSON.stringify(stdio('a/scripts/x.mjs', "const s = env.S !== '/dev/stdout' ? env.S : '/dev/stdout';")));
+check('a comparison operator that is not equality does not excuse (`=>`, `>=`, `+=`)',
+  opens('a/scripts/x.mjs', "const f = () => '/dev/stdout';", "if (a >= '/dev/stdout') b();",
+    "cmd += '/dev/stdout';") === 3);
+// A guard against a NEAR MISS never matches the value a user sets, so the append
+// it was meant to skip still opens /dev/stdout: the operand must be the path exactly.
+check('a comparison against a near miss (`\'/dev/stdout \'`) does not excuse — that guard is broken',
+  opens('a/scripts/x.mjs', "const summaryFile = env.S && env.S !== '/dev/stdout ' ? env.S : '';") === 1);
+
+// --- comments are prose: "a string in a comment" in every shape the scrubber sees.
+check('NOT a JS comment — line, trailing or block — even with the path quoted in it',
+  opens('a/scripts/x.mjs',
+    "// never fall back to '/dev/stdout': it is the job log again",
+    "const s = env.S; // not appendFileSync('/dev/stdout')",
+    '/*', " * env.GITHUB_STEP_SUMMARY || '/dev/stdout' crashed on a Linux socket", ' */') === 0);
+check('NOT a bash or Python comment line (the fixed entrypoints explain the fix in one)',
+  opens('a/scripts/x.sh', "  # never >> '/dev/stdout': ENXIO on a Linux socket stdout") === 0
+  && opens('a/scripts/x.py', "    # never open('/dev/stdout', 'a')") === 0);
+// The documented limit, asserted so it stays a KNOWN limit (rule 4 reads bash and
+// Python comments the same way): a trailing `#` comment is scanned.
+check('a trailing # comment on a bash code line IS scanned (documented limit)',
+  opens('a/scripts/x.sh', 'summary="${GITHUB_STEP_SUMMARY:-}"  # not /dev/stdout') === 1);
+
+// --- bash.
+check('bash: the `${GITHUB_STEP_SUMMARY:-/dev/stdout}` sink (a11y-audit, latin-urls) and GITHUB_OUTPUT\'s (pull-tier)',
+  opens('a/scripts/x.sh', 'summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"',
+    '{ printf \'pull=true\\n\'; } >> "${GITHUB_OUTPUT:-/dev/stdout}" 2>/dev/null || true') === 2);
+check('bash: a redirect, quoted or bare, tee, and exec',
+  opens('a/scripts/x.sh', 'echo x >> /dev/stdout', 'echo x > "/dev/stderr"', 'cmd | tee /dev/fd/1',
+    'exec 3>/proc/self/fd/1') === 4);
+check('bash: an assignment is not a test (`sink=/dev/stdout`, no blanks around the `=`)',
+  opens('a/scripts/x.sh', 'sink=/dev/stdout', "sink='/dev/stdout'") === 2);
+check('NOT a bash test: = / == / !=, quoted or bare, either side',
+  opens('a/scripts/x.sh',
+    '[ "$GITHUB_STEP_SUMMARY" != /dev/stdout ] && summary="$GITHUB_STEP_SUMMARY"',
+    '[ "$s" = "/dev/stdout" ] && s=""',
+    "[[ $s == '/dev/stdout' ]] && s=''",
+    '[ /dev/stdout = "$s" ] && s=""') === 0);
+check('a bash test against a near miss (`/dev/stdout/`) does not excuse',
+  opens('a/scripts/x.sh', '[ "$s" != /dev/stdout/ ] && summary="$s"') === 1);
+check('NOT an fd duplication, which writes without re-opening (>&1, >&2, 2>/dev/null)',
+  opens('a/scripts/x.sh', 'echo x >&2', 'printf y >&1', 'cmd 2>/dev/null') === 0);
+
+// --- Python.
+check('Python: an `or` fallback and an open()',
+  opens('a/scripts/x.py', 'summary = os.environ.get("GITHUB_STEP_SUMMARY") or "/dev/stdout"',
+    'with open("/dev/stdout", "a") as f:') === 2);
+check('NOT a Python comparison (!= / ==, either side, a string prefix)',
+  opens('a/scripts/x.py', 'if summary != "/dev/stdout":', "if r'/dev/stdout' == summary:",
+    'if summary == f"/dev/stdout":') === 0);
+
+// --- the pragma: a reason is required, it names THIS rule, and it reaches one line up.
+check('pragma with a reason, same line (# in bash) and line above (// in JS)',
+  opens('a/scripts/x.sh', 'summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"  # lint-allow-stdio-path: the notes\' one local copy') === 0
+  && opens('a/scripts/x.mjs', '// lint-allow-stdio-path: a local-run fallback, guarded', "const s = env.S || '/dev/stdout';") === 0);
+check('a BARE pragma does NOT exempt',
+  opens('a/scripts/x.sh', '# lint-allow-stdio-path:', 'summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"') === 1);
+check('a pragma two lines above does NOT exempt',
+  opens('a/scripts/x.sh', '# lint-allow-stdio-path: stale', '', 'summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"') === 1);
+check('another rule\'s pragma does NOT exempt',
+  opens('a/scripts/x.mjs', "const s = env.S || '/dev/stdout'; // lint-allow-raw-output: the wrong rule") === 1);
+
+// --- scope, dispatch and reporting.
+// A library is in scope, unlike for rules 3 and 4: a helper that opens the path
+// does it inside the entrypoint's process.
+check('lintEntrypoint runs rule 5 on a LIBRARY module (executed=false) and on .sh and .py',
+  lintEntrypoint(src("export const sink = process.env.S || '/dev/stdout';"), 'a/scripts/lib.mjs', false)
+    .filter((f) => f.kind === 'stdio-path').length === 1
+  && lintEntrypoint(src('trap on_exit EXIT', 'summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"'), 'a/scripts/x.sh', true)
+    .filter((f) => f.kind === 'stdio-path').length === 1
+  && lintEntrypoint(src('out = open("/dev/stdout", "a")'), 'a/scripts/x.py', false)
+    .filter((f) => f.kind === 'stdio-path').length === 1);
+check('an unknown extension is out of scope',
+  opens('a/scripts/x.rb', "File.open('/dev/stdout', 'a')") === 0);
+const FDS = ['set -u', 'echo x >> /dev/stdout', 'echo y > /dev/fd/2', 'exec 3>/proc/self/fd/1'];
+check('reports the path\'s line and column, and the fd it re-opens',
+  (() => {
+    const [a, b, c] = stdio('a/scripts/x.sh', ...FDS);
+    return a && b && c && a.line === 2 && a.col === 11 && a.what === '/dev/stdout' && a.detail === 'fd 1'
+      && b.line === 3 && b.what === '/dev/fd/2' && b.detail === 'fd 2'
+      && c.line === 4 && c.what === '/proc/self/fd/1' && c.detail === 'fd 1';
+  })(),
+  JSON.stringify(stdio('a/scripts/x.sh', ...FDS)));
+
+// ---------------------------------------------------------------------------
 say('\n# the live tree is clean (the lint is wired as blocking)');
 
 let live = 0;
@@ -427,6 +558,21 @@ check('discovery covers .py and .sh entrypoints, not just .mjs',
 check('the three v1.12.0 entrypoints are guarded in the live tree',
   ['verify-homepage/scripts/render-check.mjs', 'linkcheck/scripts/linkcheck.py', 'a11y-audit/scripts/audit.sh']
     .every((f) => !lintCrashGuardPresence(fs.readFileSync(path.join(root, f), 'utf8'), f, true).length));
+// The deliberate bash fallbacks are clean because their PRAGMAS exempt them, not
+// because rule 5 cannot see `${VAR:-/dev/stdout}`: with each pragma's name spoiled,
+// every one of them fires. A rule blind to the shape would pass the clean-tree
+// check above just the same.
+const STDIO_PRAGMAD = { 'a11y-audit/scripts/audit.sh': 1, 'latin-urls/scripts/audit.sh': 2, 'pull-tier/scripts/tier.sh': 2 };
+check('the 5 deliberate bash fallbacks are exempt by pragma, not unseen',
+  Object.entries(STDIO_PRAGMAD).every(([f, n]) => {
+    const raw = fs.readFileSync(path.join(root, f), 'utf8');
+    return lintStdioPath(raw, f).length === 0
+      && lintStdioPath(raw.replaceAll('lint-allow-stdio-path:', 'lint-allow-spoiled:'), f).length === n;
+  }),
+  JSON.stringify(Object.keys(STDIO_PRAGMAD).map((f) => {
+    const raw = fs.readFileSync(path.join(root, f), 'utf8');
+    return [f, lintStdioPath(raw, f).length, lintStdioPath(raw.replaceAll('lint-allow-stdio-path:', 'lint-allow-spoiled:'), f).length];
+  })));
 
 // The exempt selftests must stay exempt AND stay small — the exemption is
 // "1-4 KB of output cannot reach a 64 KiB pipe buffer", not "selftests are

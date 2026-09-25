@@ -34,6 +34,14 @@ set -uo pipefail
 # The sentinel separates a deliberate verdict from an abort: every intentional
 # exit goes through `finish`, which sets it. Anything reaching the trap without it
 # aborted early.
+#
+# The /dev/stdout fallback serves local runs only: Actions always sets
+# GITHUB_STEP_SUMMARY. The notes then print on stdout, their one copy there (pa11y-ci's
+# per-URL results reach the log on their own), and note() swallows a failed append, so
+# where /dev/stdout will not open (ENXIO on Linux when stdout is a socket) a local run
+# loses only the notes, never the results or the exit code. Kept on purpose (README,
+# v1.19.3).
+# lint-allow-stdio-path: the notes' one local copy, and a failed append is swallowed
 summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 # `|| true`: the crash reporter runs THROUGH note, so note must never be the thing
 # that fails while reporting that something failed (an unwritable summary sink is

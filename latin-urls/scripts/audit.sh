@@ -26,6 +26,9 @@ _on_exit() {
   local rc=$?
   [ -n "$_finished" ] && return 0
   echo "::error title=latin-urls FAULT (no verdict)::audit.sh aborted with rc=$rc before it could grade anything. This is a fault in the gate, not a finding about the site — the deploy is still refused (exit 2) because an ungraded dist must not ship." >&2
+  # The same local-run fallback as $summary below, read from the env because an abort
+  # can come before that line. The ::error line above carries the fault either way.
+  # lint-allow-stdio-path: the crash note's local copy, and a failed append is swallowed
   { printf '## latin-urls: crashed (no verdict)\n\nThe audit aborted with rc=%s before grading anything. Exit 2 — fix the action, do not treat this as clean.\n' "$rc"; } >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}" 2>/dev/null || true
   exit 2
 }
@@ -38,6 +41,13 @@ PAGES_DIR="${PAGES_DIR:-src/pages}"
 PRODUCTS_DIR="${PRODUCTS_DIR:-src/content/products}"
 GREEK_URLS_OK="${GREEK_URLS_OK:-false}"
 UPLOADS_EXCLUDE="${UPLOADS_EXCLUDE:-/wp-content/uploads/}"
+# The /dev/stdout fallback serves local runs only: Actions always sets
+# GITHUB_STEP_SUMMARY. The notes are then a local run's only copy of the per-audit ✓
+# lines and the verdict, and note() swallows a failed append, so where /dev/stdout
+# will not open (ENXIO on Linux when stdout is a socket) only the notes are lost —
+# the findings' stderr mirror and the exit code are not. Kept on purpose (README,
+# v1.19.3).
+# lint-allow-stdio-path: the notes' one local copy, and a failed append is swallowed
 summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 note() { printf '%s\n' "$*" >> "$summary" 2>/dev/null || true; }
 

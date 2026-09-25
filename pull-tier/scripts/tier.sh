@@ -23,6 +23,7 @@ _on_exit() {
   local rc=$?
   [ -n "$_finished" ] && return 0
   echo "::warning title=pull-tier FAULT::tier.sh aborted (rc=$rc, mode=${MODE:-?}) — resolving to pull=true (fail-safe); fix the action" >&2
+  # lint-allow-stdio-path: the same local-run fallback as $out below, and swallowed if it fails
   { printf 'pull=true\nreason=pull-tier faulted (rc=%s) — fail-safe pull\n' "$rc"; } >> "${GITHUB_OUTPUT:-/dev/stdout}" 2>/dev/null || true
   exit 0
 }
@@ -39,6 +40,12 @@ EVENT_NAME="${EVENT_NAME:-}"
 BEFORE_SHA="${BEFORE_SHA:-}"
 PR_BASE_SHA="${PR_BASE_SHA:-}"
 HEAD_SHA="${HEAD_SHA:-}"
+# The /dev/stdout fallback serves local runs only: Actions always sets GITHUB_OUTPUT. By
+# hand, stdout is where the step outputs show; stderr carries the human line. decide()'s
+# append is not guarded, but errexit is off and every path exits 0, so where /dev/stdout
+# will not open (ENXIO on Linux when stdout is a socket) bash prints its error and the
+# run goes on: the decision still reaches stderr, and the exit code is unchanged.
+# lint-allow-stdio-path: the outputs' one local copy; a failed open cannot change the exit
 out="${GITHUB_OUTPUT:-/dev/stdout}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
 

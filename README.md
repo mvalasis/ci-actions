@@ -806,7 +806,7 @@ one adjacent to a `process.exit()` — in the v1.7.1 case the two sat lines apar
 Two allowances: the `catch` fallback of an `fs.writeSync` on the same line, and
 `// lint-allow-raw-output: <reason>` (a reason is required).
 
-It carries **four** rules, all of the same shape — defects a green run cannot
+It carries **five** rules, all of the same shape — defects a green run cannot
 distinguish from correct code:
 
 1. **raw async stdout writes** (above) — `.mjs` only.
@@ -826,6 +826,25 @@ distinguish from correct code:
    skipped. A name that only looks secret takes
    `# lint-allow-argv-secret: <reason>` (`//` in `.mjs`) on the line or the line
    above it, and the reason is required.
+5. **stdout or stderr opened by path** — `.mjs` / `.py` / `.sh`, every discovered
+   file, libraries included, since a helper runs inside the entrypoint's process.
+   Fires on `/dev/stdout`, `/dev/fd/1` or `/proc/self/fd/1` (and the fd-2 spellings)
+   anywhere in code except as an operand of an equality comparison.
+   `env.GITHUB_STEP_SUMMARY || '/dev/stdout'` is the shape fixed by hand in
+   security-baseline v1.16.0, four gates in v1.18.0, verify-homepage v1.19.1 and
+   test-suite v1.19.3; a `${VAR:-/dev/stdout}` sink, a redirect or an fs call's
+   argument fire the same way. Opening the path re-opens the fd: on Linux that fails
+   (ENXIO) when stdout is a socket, which is what node's `child_process` hands a
+   child, and elsewhere a report also echoed to the log prints twice. The allowed
+   form is the fix's own guard, `GITHUB_STEP_SUMMARY !== '/dev/stdout'`, and it must
+   name the path exactly. Comments are skipped (whole `#` lines only in bash and
+   Python, as for rule 4). A deliberate fallback takes
+   `# lint-allow-stdio-path: <reason>` (`//` in `.mjs`) on the line or the line
+   above it, and the reason is required: `a11y-audit` and `latin-urls` keep a guarded
+   summary fallback and `pull-tier` a `GITHUB_OUTPUT` one, each annotated with why.
+   Not seen: a path built at run time, and a user-set
+   `GITHUB_STEP_SUMMARY=/dev/stdout` appended to without the guard. Each action's
+   local-run self-test legs cover that.
 
 Known limit, stated rather than papered over: for bash, rule 3 matches any
 `trap … EXIT`, so a pure **cleanup** trap reads as a guard. That is why

@@ -3,8 +3,8 @@ name: lint
 # Repo-internal hygiene gate — NOT consumed by any caller, so a change here
 # needs no version bump and no `v1` tag move.
 #
-# Guards four defect classes in action entrypoints (every rule, its rationale and
-# its pragma: .github/scripts/lint-entrypoint-output.mjs). All four are INVISIBLE
+# Guards five defect classes in action entrypoints (every rule, its rationale and
+# its pragma: .github/scripts/lint-entrypoint-output.mjs). All five are INVISIBLE
 # on a green CI run, which is why they survived review and why this job blocks
 # rather than reports.
 #
@@ -30,6 +30,13 @@ name: lint
 # 4. SECRET IN ARGV (a11y-audit v1.15.1, linkcheck v1.15.2) — a `-H` header whose
 #    value expands a TOKEN/SECRET/KEY/PASS variable. `ps` shows argv to every
 #    process on the runner; the run itself stays green.
+#
+# 5. STDOUT OPENED BY PATH (security-baseline v1.16.0, four gates v1.18.0,
+#    verify-homepage v1.19.1, test-suite v1.19.3) — `/dev/stdout` (or /dev/fd/1,
+#    /proc/self/fd/1, the fd-2 spellings) used as anything but an equality
+#    operand, e.g. `GITHUB_STEP_SUMMARY || '/dev/stdout'`. Re-opening the fd fails
+#    ENXIO on Linux when stdout is a socket (a run spawned from node) and prints the
+#    report twice elsewhere; Actions always sets the summary, so CI never sees it.
 #
 # No `paths:` filter, deliberately: the gate must also re-run when a NEW action
 # directory lands (entrypoints are discovered from `action.yml`, not a list) and
@@ -60,5 +67,5 @@ jobs:
       - name: Lint self-test (scrubber + matcher fixtures)
         run: node .github/scripts/lint-entrypoint-output.selftest.mjs
 
-      - name: No async stdout, dead or missing crash guards, or secrets in argv, in action entrypoints
+      - name: No async stdout, dead or missing crash guards, secrets in argv, or stdout opened by path, in action entrypoints
         run: node .github/scripts/lint-entrypoint-output.mjs

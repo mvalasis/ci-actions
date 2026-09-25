@@ -2,18 +2,21 @@
 // ---------------------------------------------------------------------------
 // lint-entrypoint-output — repo-internal hygiene gate (NOT a shipped action).
 //
-// FOUR RULES, one theme: defects in action entrypoints that a green run cannot
+// FIVE RULES, one theme: defects in action entrypoints that a green run cannot
 // distinguish from correct code.
 //   1. async stdout writes before process.exit()  — see below.
 //   2. crash guards registered after main runs     — see "rule 2" further down.
 //   3. no crash guard at all, in any language      — see "rule 3" further down.
 //   4. a secret spelled into a child's argv        — see "rule 4" further down.
+//   5. stdout/stderr opened by path, not by fd     — see "rule 5" further down.
 //
 // Rules 1 and 2 are JavaScript-shaped and apply to `*.mjs` only. Rules 3 and 4
 // apply to every language an action ships an entrypoint in (.mjs, .py, .sh), and
 // only to the files an `action.yml` actually EXECUTES — the pure library modules
 // beside them cannot set an exit code, so a guard there would be noise, and none
 // of them spawns a process today (rule 4's known limit says what that misses).
+// Rule 5 applies to every language and every discovered file, libraries included:
+// a helper that opens /dev/stdout does it inside the entrypoint's own process.
 //
 // THE DEFECT CLASS THIS EXISTS TO KILL
 // `process.stdout` / `process.stderr` writes are ASYNC when the fd is a pipe on
@@ -367,14 +370,114 @@ export function lintArgvSecret(src, file = '<input>', executed = false) {
   }));
 }
 
+// ---------- rule 5: stdout/stderr opened BY PATH ----------
+// THE DEFECT CLASS: an entrypoint that writes to /dev/stdout as a FILE instead of
+// through the fd it already holds. The shape was a step-summary sink that fell back
+// to the job log on a local run — `env.GITHUB_STEP_SUMMARY || '/dev/stdout'` — and
+// opening that path RE-OPENS fd 1, which is two defects a green CI run cannot see:
+//   - on Linux the open goes through /proc/self/fd/1, and re-opening a SOCKET fails
+//     ENXIO. node's child_process hands a child a socket as stdout, so a spawned run
+//     crashed — and under an enforcing input the crash exit is the verdict's own
+//     code, so the leg asserting it stayed green;
+//   - wherever the open works (macOS dups the fd; a Linux file, pipe or TTY), it is
+//     the job log again, so a report also echoed through fd 1 printed twice. Where a
+//     `catch` swallowed the ENXIO, the Linux CI leg printed once and hid that.
+// Actions always sets GITHUB_STEP_SUMMARY, so only local runs were ever hit. Fixed
+// by hand in security-baseline v1.16.0; seo-aeo, contract-check, form-protection
+// and deps-currency v1.18.0; verify-homepage v1.19.1; test-suite v1.19.3. The fd-2
+// spellings re-open the same way, so they are covered too: /dev/stdout, /dev/fd/1,
+// /proc/self/fd/1, /dev/stderr, /dev/fd/2, /proc/self/fd/2.
+//
+// THE RULE: any spelling of those paths in CODE is a finding, unless it is an
+// operand of an equality comparison — `!==` `===` `!=` `==` in JS, `!=` `==` in
+// Python, a bash test's `=` `==` `!=` — the one shape that can only RECOGNISE the
+// path, never open it. It is the fix's own guard:
+//   const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';
+// Deliberately stricter than the defect, like rule 1: a fallback (`||`, `??`, bash
+// `${VAR:-…}`), a ternary branch, an assignment, an fs call's argument, a redirect,
+// a command string for a child — each is a way to open the path, and telling
+// "opened" from "merely named" takes dataflow this lint does not do. The allowance
+// is per OCCURRENCE, not per line: `s !== '/dev/stdout' ? s : '/dev/stdout'` is
+// still a finding, on its second literal. The operand must be exactly the path —
+// the whole literal, or the whole word in bash — because a near miss such as
+// `s !== '/dev/stdout '` never recognises the path, so the guard it spells is
+// broken. In bash the operator must be a word of its own: a test's `=` has a blank
+// on each side, an assignment's (`sink=/dev/stdout`) has none.
+//
+// Comments are not code: every JS comment via the scrubber, run with its literals
+// kept (the path lives in a literal), and whole `#` comment lines in bash and
+// Python, as rule 4 reads them. `# lint-allow-stdio-path: <reason>` (`//` in JS),
+// on the flagged line or the line directly above it, reason REQUIRED: a11y-audit
+// and latin-urls keep a guarded summary fallback and pull-tier a GITHUB_OUTPUT one,
+// each annotated at the line with why a failed open costs nothing there.
+//
+// KNOWN LIMITS, stated rather than papered over. Not seen: a path built at run
+// time (`'/dev/' + name`, `/proc/${process.pid}/fd/1`), and a user who SETS
+// GITHUB_STEP_SUMMARY=/dev/stdout for an entrypoint that appends to it without the
+// comparison — there is no literal to find. Each action's local-run selftest legs,
+// which run with exactly that value, are the layer for that. Seen when it should
+// not be: a trailing `#` comment on a bash or Python code line (scanned, as in
+// rule 4), and a string that only mentions a path, such as a message. Move the
+// comment to its own line, reword the message, or annotate it.
+const STDIO_PATH = /\/dev\/std(?:out|err)|\/dev\/fd\/[12](?!\d)|\/proc\/self\/fd\/[12](?!\d)/g;
+const STDIO_PRAGMA = /(?:\/\/|#)[ \t]*lint-allow-stdio-path:[ \t]*\S/;
+const STDIO_LANG = { '.mjs': 'js', '.py': 'py', '.sh': 'sh' };
+
+// The source with its comments blanked and every literal kept — offsets and line
+// numbers preserved, so a match maps straight back to the raw line.
+function stdioCode(src, lang) {
+  if (lang === 'js') return blankNonCode(src, { literals: false });
+  return src.split('\n').map((l) => (/^\s*#/.test(l) ? ' '.repeat(l.length) : l)).join('\n');
+}
+
+// Is the path at [s, e) of `code` exactly an operand of an equality comparison?
+// JS and Python: the whole literal, quotes on both sides (a Python string prefix
+// such as f/r is skipped), with the operator before it or after it. Bash: the
+// whole word, quoted or bare, with an operator word before it or after it.
+function isCompared(code, s, e, lang) {
+  const q = code[s - 1];
+  const quoted = (q === "'" || q === '"' || (lang === 'js' && q === '`')) && code[e] === q;
+  const before = code.slice(0, quoted ? s - 1 : s), after = code.slice(quoted ? e + 1 : e);
+  if (lang === 'sh') {
+    const word = /(?:^|\s)$/.test(before) && /^(?:[\s;\]]|$)/.test(after);
+    return word && (/\s(?:==?|!=)\s+$/.test(before) || /^\s+(?:==?|!=)\s/.test(after));
+  }
+  if (!quoted) return false;
+  const op = lang === 'js' ? '[!=]==?' : '[!=]=';
+  const lhs = lang === 'py' ? before.replace(/[rRbBuUfF]{1,2}$/, '') : before;
+  return new RegExp(`${op}\\s*$`).test(lhs) || new RegExp(`^\\s*${op}`).test(after);
+}
+
+export function lintStdioPath(src, file = '<input>') {
+  const lang = STDIO_LANG[path.extname(file)];
+  if (!lang) return [];
+  const code = stdioCode(src, lang);
+  const rawLines = src.split('\n');
+  const findings = [];
+  for (const m of code.matchAll(STDIO_PATH)) {
+    if (isCompared(code, m.index, m.index + m[0].length, lang)) continue;
+    const before = code.slice(0, m.index).split('\n');
+    const line = before.length, col = before[before.length - 1].length + 1;
+    if (STDIO_PRAGMA.test(rawLines[line - 1] || '') || STDIO_PRAGMA.test(rawLines[line - 2] || '')) continue;
+    findings.push({
+      file, line, col, kind: 'stdio-path', what: m[0],
+      text: (rawLines[line - 1] || '').trim(),
+      detail: /stdout|\/1$/.test(m[0]) ? 'fd 1' : 'fd 2',
+    });
+  }
+  return findings;
+}
+
 // Dispatch the whole rule set for one entrypoint. The JS rules (raw output,
 // guard ordering) are JS-only — running the JS scrubber over Python or bash
 // would produce noise, not findings — while rules 3 and 4 apply to every
-// language, but only to files that action.yml actually executes.
+// language, but only to files that action.yml actually executes, and rule 5 to
+// every language and every file.
 export function lintEntrypoint(src, file = '<input>', executed = false) {
   const findings = path.extname(file) === '.mjs' ? lintSource(src, file) : [];
   findings.push(...lintCrashGuardPresence(src, file, executed));
   findings.push(...lintArgvSecret(src, file, executed));
+  findings.push(...lintStdioPath(src, file));
   return findings.sort((a, b) => a.line - b.line || a.col - b.col);
 }
 
@@ -496,6 +599,27 @@ const REMEDY_ARGV = [
   '  # lint-allow-argv-secret: <why this value is not a secret>',
 ];
 
+const REMEDY_STDIO = [
+  '',
+  'Why this is a finding:',
+  '  Opening /dev/stdout (/dev/fd/1, /proc/self/fd/1; /dev/stderr and the fd-2 spellings',
+  '  alike) RE-OPENS the process\'s own stream by path instead of writing to the fd it',
+  '  already holds. On Linux that open fails (ENXIO) when the fd is a socket, which is',
+  '  what node\'s child_process hands a child, so an unguarded append crashes the run;',
+  '  wherever the open works it is the job log again, so a report also echoed through',
+  '  the fd prints twice. Fixed by hand in security-baseline v1.16.0, four gates in',
+  '  v1.18.0, verify-homepage v1.19.1 and test-suite v1.19.3.',
+  '',
+  'Fix — write through the fd, and treat GITHUB_STEP_SUMMARY=/dev/stdout as no summary:',
+  '  const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== \'/dev/stdout\' ? env.GITHUB_STEP_SUMMARY : \'\';',
+  '  if (summaryFile) fs.appendFileSync(summaryFile, text);',
+  '  bash: `>&1` / `>&2`, never `> /dev/stdout` or a `${VAR:-/dev/stdout}` sink.',
+  '',
+  'A deliberate local-run fallback? Annotate it (a reason is required):',
+  '  # lint-allow-stdio-path: <why a failed open, and a second copy in the log, are acceptable here>',
+  '  (`//` in .mjs; on the line or the line directly above it)',
+];
+
 const REMEDY = [
   '',
   'Why this is a finding:',
@@ -550,7 +674,7 @@ function main() {
   if (findings.length === 0) {
     // Name every file scanned: a green run has to be auditable, or "0 findings"
     // is indistinguishable from "scanned nothing".
-    say(`lint-entrypoint-output: ✅ clean — ${files.length} action entrypoint(s), no raw stdout/stderr writes, no dead crash guards, no missing crash guards, no secrets in argv`);
+    say(`lint-entrypoint-output: ✅ clean — ${files.length} action entrypoint(s), no raw stdout/stderr writes, no dead crash guards, no missing crash guards, no secrets in argv, no stdout/stderr opened by path`);
     for (const f of files) say(`  · ${f}`);
     return 0;
   }
@@ -560,6 +684,7 @@ function main() {
   const guards = findings.filter((f) => f.kind === 'dead-crash-guard');
   const missing = findings.filter((f) => f.kind === 'missing-crash-guard');
   const argv = findings.filter((f) => f.kind === 'argv-secret');
+  const stdio = findings.filter((f) => f.kind === 'stdio-path');
   const raws = findings.filter((f) => f.kind === 'raw-output');
   for (const f of findings) {
     // Annotation content is derived from our own repo tree, never from input.
@@ -570,6 +695,8 @@ function main() {
       msg = `${f.detail}. Add one, or annotate the file with \`lint-allow-no-crash-guard: <why failing loud is correct here>\`. See .github/scripts/lint-entrypoint-output.mjs`;
     } else if (f.kind === 'argv-secret') {
       msg = `a header value expands ${f.detail} into a child process's argv, which ps and /proc show to every process on the runner. Pass it as -H @file from a mode-600 file, or annotate with \`lint-allow-argv-secret: <why this is not a secret>\`. See .github/scripts/lint-entrypoint-output.mjs`;
+    } else if (f.kind === 'stdio-path') {
+      msg = `${f.what} outside an equality comparison — as a write target it re-opens ${f.detail} by path, which fails (ENXIO) on Linux when that fd is a socket, as node's child_process hands a child, and elsewhere writes to the job log a second time. Write through the fd and treat GITHUB_STEP_SUMMARY=/dev/stdout as no summary, or annotate with \`lint-allow-stdio-path: <reason>\`. See .github/scripts/lint-entrypoint-output.mjs`;
     } else {
       msg = `${f.what} in an action entrypoint — output must go through a synchronous write (fs.writeSync), not an async stdout/stderr write. See .github/scripts/lint-entrypoint-output.mjs`;
     }
@@ -581,8 +708,11 @@ function main() {
   if (guards.length) for (const l of REMEDY_GUARD) say(l);
   if (missing.length) for (const l of REMEDY_MISSING) say(l);
   if (argv.length) for (const l of REMEDY_ARGV) say(l);
+  if (stdio.length) for (const l of REMEDY_STDIO) say(l);
 
-  const summary = process.env.GITHUB_STEP_SUMMARY;
+  // Rule 5 applies here too: `/dev/stdout` as the summary means none, or a local
+  // run prints the findings a second time, as a table.
+  const summary = process.env.GITHUB_STEP_SUMMARY !== '/dev/stdout' && process.env.GITHUB_STEP_SUMMARY;
   if (summary) {
     const md = [
       '### ❌ lint-entrypoint-output',
@@ -591,11 +721,12 @@ function main() {
       guards.length ? `${guards.length} crash guard(s) registered after the main invocation — dead code that has never run.` : '',
       missing.length ? `${missing.length} executed entrypoint(s) with no crash guard — a fault in the tool blocks a report-mode caller and arrives looking like a finding about their site.` : '',
       argv.length ? `${argv.length} secret(s) spelled into a child process's argv — \`ps\` and /proc show argv to every process on the runner.` : '',
+      stdio.length ? `${stdio.length} stdout/stderr path(s) outside a comparison — re-opening the fd by path fails (ENXIO) on a Linux socket, and elsewhere writes the report to the job log a second time.` : '',
       '',
       '| file | line | finding |',
       '| --- | --- | --- |',
       ...findings.map((f) => {
-        const label = { 'dead-crash-guard': ' — dead crash guard', 'missing-crash-guard': ' — missing crash guard', 'argv-secret': ' — secret in argv' }[f.kind] || '';
+        const label = { 'dead-crash-guard': ' — dead crash guard', 'missing-crash-guard': ' — missing crash guard', 'argv-secret': ' — secret in argv', 'stdio-path': ' — stdio opened by path' }[f.kind] || '';
         return `| \`${f.file}\` | ${f.line} | \`${f.what}\`${label} |`;
       }),
       '',
@@ -603,6 +734,7 @@ function main() {
       guards.length ? 'Fix: hoist the `process.on(...)` registration above the main IIFE invocation.' : '',
       missing.length ? 'Fix: add a guard that reports the fault and exits `FAIL_ON_X ? 1 : 0`, or annotate with `lint-allow-no-crash-guard: <reason>`.' : '',
       argv.length ? 'Fix: pass the header as `-H @file` from a mode-600 file, or annotate with `lint-allow-argv-secret: <reason>`.' : '',
+      stdio.length ? 'Fix: write through the fd (`fs.writeSync(1, …)`, `>&1`) and treat `GITHUB_STEP_SUMMARY=/dev/stdout` as no summary, or annotate with `lint-allow-stdio-path: <reason>`.' : '',
       '',
     ].join('\n');
     try { fs.appendFileSync(summary, md + '\n'); } catch { /* summary is best-effort */ }
