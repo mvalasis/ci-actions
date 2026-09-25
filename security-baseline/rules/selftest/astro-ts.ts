@@ -77,8 +77,13 @@ async function storeOk(jwt: string) {
 
 // ---- ts-cleartext-http-fetch ----
 async function httpBad() {
+  // The community react-insecure-request (p/security-audit, ERROR) fires here too, so this
+  // repo's own self-scan reported a T0 critical on the fixture. The nosemgrep names only that
+  // rule: this pack's rule still fires on this line, in `semgrep --test` and in the self-scan
+  // (rn-cleartext-http). Excluding rules/selftest/ instead would drop every fixture finding,
+  // the smoke's only proof that the vendored packs load through scan.mjs.
   // ruleid: ts-cleartext-http-fetch
-  return fetch('http://api.lux-airport.lu/flights');
+  return fetch('http://api.lux-airport.lu/flights'); // nosemgrep: typescript.react.security.react-insecure-request.react-insecure-request
 }
 async function httpOk() {
   // ok: ts-cleartext-http-fetch

@@ -43,6 +43,8 @@ jobs:
       - uses: actions/checkout@v6
         with: { fetch-depth: 0 }
       # report-mode self-scan of this repo — proves the full action wires up and never blocks itself.
+      # Expect `critical: 0`: the three waivers that keep it there are listed in
+      # security-baseline/README.md (§Self-test), so a critical in this report is a real one.
       - uses: ./security-baseline
         with:
           scan-scope: full

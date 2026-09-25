@@ -254,6 +254,23 @@ page — now caught by **`wp-rest-error-detail-laundered`** (see §Honest limits
 
 Both run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a report-mode self-scan.
 
+The self-scan (`scan-scope: full`) covers this repo's whole tree, the rule fixtures included,
+and should report **critical: 0**. The fixtures' T1/T2 findings are expected: they are the
+only run of the real vendored packs through `scan.mjs` (`selftest-rules.sh` calls semgrep
+directly), so they are left in, not excluded. Three waivers keep the T0 count at zero, and
+each is scoped to named findings:
+
+- `rules/selftest/astro-ts.ts` carries a `nosemgrep` for the community `react-insecure-request`
+  rule on its cleartext-`fetch` fixture line only. The pack's own rule still fires there.
+- `linkcheck/scripts/sitemap-urls.py` carries one for `use-defused-xml` on its `xml` imports.
+  That rule flags the import itself and cannot see the parse under it, which refuses any
+  DOCTYPE before ElementTree runs (linkcheck v1.16.1).
+- The repo-root `.gitleaksignore` pins two historical gitleaks lookalikes to the commits that
+  added them. In full scope the T0 gitleaks leg reads all of history, where reshaping a file
+  cannot reach.
+
+A new critical in the self-scan is therefore a real one.
+
 ## Implementation
 
 `scripts/tiers.mjs` — pure, network-free tier engine (the `CHECKS` map is the single source of
