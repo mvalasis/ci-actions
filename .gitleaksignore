@@ -1,0 +1,13 @@
+# gitleaks fingerprints this repo's own security-baseline self-scan skips.
+#
+# Two HISTORICAL generic-api-key hits, neither one a credential: a canary in a11y-audit's
+# selftest and Google's documented reCAPTCHA universal test site key in form-protection's.
+# Both files were reshaped so the tree no longer carries either shape. The self-scan
+# (scan-scope: full) runs gitleaks over the whole git HISTORY, though, and there only a
+# rewrite could remove them. Each entry is pinned to the commit that added the line
+# (commit:file:rule:line), so it cannot hide the same shape added again in any other commit.
+#
+# Read only when gitleaks scans THIS repo: it loads the .gitleaksignore of the tree it
+# scans, and a caller's scan runs over the caller's own checkout, never this one.
+bc893909e29c8a2bf5ec34383d7f5689d039b2d7:a11y-audit/scripts/selftest.sh:generic-api-key:164
+2bc10a395673a6dd16725660d92604d2ec1bc903:form-protection/scripts/selftest.mjs:generic-api-key:75
