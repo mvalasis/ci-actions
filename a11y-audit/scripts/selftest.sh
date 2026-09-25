@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Offline self-test for a11y-audit — the CRASH-GUARD + ATTRIBUTION layer.
+# Offline self-test for a11y-audit — the CRASH-GUARD + ATTRIBUTION layer, and
+# (cases H–I) where the verify-token may and may not go.
 #
 # No network, no Chromium, no real pa11y-ci: every case stubs `pa11y-ci` on PATH
 # and runs the REAL audit.sh, then reads the exit code and the step summary an
-# operator would actually see.
+# operator would actually see. H–I also stand in `curl` and `mktemp`.
 #
 # WHY BEHAVIOURAL. The guard is a `trap … EXIT` plus a sentinel, and both halves
 # fail silently when wrong: a trap armed one line too late still LOOKS armed, and
@@ -148,6 +149,120 @@ rc=$?
 check "still exits 0 in report mode with an unwritable summary" "$([ "$rc" -eq 0 ] && echo 0 || echo 1)"
 grep -q 'a11y-audit crashed' "$WORK/stderr.txt"
 check "the crash reaches stderr when the summary cannot be written" $?
+
+echo
+echo "# (H) the verify-token stays out of argv, the environment and readable files"
+# Before v1.15.1 the token rode curl's ARGV (-H "X-Verify-Source: $VERIFY_TOKEN"),
+# which `ps` shows to every process on the runner and an argv-logging wrapper on
+# PATH records; it sat in /tmp/pa11y-ci.json under the default umask, never
+# removed; and it stayed exported into pa11y-ci, Chromium and their npm deps.
+# Each stand-in records what one of those surfaces saw: `curl` logs its argv and
+# the headers it was told to send, `pa11y-ci` records its environment and stats
+# its --config WHILE audit.sh runs, and `mktemp` logs every dir it makes, so a dir
+# left behind on any exit path is caught. They find their log dir from their own
+# path, so nothing is added to the environment under test.
+TOKEN="a11y-selftest-canary-4d1f"   # a canary, not a secret
+cat > "$WORK/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+W="$(cd "$(dirname "$0")/.." && pwd)"
+{ printf 'curl'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; } >> "$W/curl-argv.log"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-H" ] || [ "$prev" = "--header" ]; then
+    case "$a" in
+      @*) ls -l "${a#@}" | cut -c1-10 >> "$W/curl-hdrfile-mode.log"; cat "${a#@}" >> "$W/curl-headers.log" ;;
+      *) printf '%s\n' "$a" >> "$W/curl-headers.log" ;;
+    esac
+  fi
+  prev="$a"
+done
+printf '<urlset><url><loc>https://example.com/</loc></url></urlset>\n'
+EOF
+cat > "$WORK/bin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+W="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -e "$W/mktemp-fail" ]; then echo "mktemp: injected failure" >&2; exit 1; fi
+out=$(/usr/bin/mktemp "$@") || exit $?
+printf '%s\n' "$out" >> "$W/mktemp-made.log"
+printf '%s\n' "$out"
+EOF
+cat > "$WORK/bin/pa11y-ci" <<'EOF'
+#!/usr/bin/env bash
+W="$(cd "$(dirname "$0")/.." && pwd)"
+env > "$W/pa11y-env.txt"
+cfg=""
+while [ $# -gt 0 ]; do case "$1" in --config) cfg="$2"; shift 2 ;; *) shift ;; esac; done
+printf '%s\n' "$cfg" > "$W/pa11y-cfg-path.txt"
+if [ -f "$cfg" ]; then
+  ls -l "$cfg" | cut -c1-10 > "$W/pa11y-cfg-mode.txt"
+  ls -ld "$(dirname "$cfg")" | cut -c1-10 > "$W/pa11y-cfgdir-mode.txt"
+  cp "$cfg" "$W/pa11y-cfg-seen.json"
+fi
+[ -e "$W/pa11y-fault" ] && exit 1
+echo "> https://example.com/ - 0 errors"
+exit 0
+EOF
+chmod +x "$WORK/bin/curl" "$WORK/bin/mktemp" "$WORK/bin/pa11y-ci"
+reset_h() {
+  rm -f "$WORK"/curl-argv.log "$WORK"/curl-headers.log "$WORK"/curl-hdrfile-mode.log \
+        "$WORK"/mktemp-made.log "$WORK"/mktemp-fail "$WORK"/pa11y-fault "$WORK"/pa11y-env.txt \
+        "$WORK"/pa11y-cfg-path.txt "$WORK"/pa11y-cfg-mode.txt "$WORK"/pa11y-cfgdir-mode.txt \
+        "$WORK"/pa11y-cfg-seen.json
+}
+# every dir the mktemp stand-in made is gone (fails closed when it made none)
+workdirs_gone() {
+  [ -s "$WORK/mktemp-made.log" ] || return 1
+  while IFS= read -r d; do [ -e "$d" ] && return 1; done < "$WORK/mktemp-made.log"
+  return 0
+}
+in_file() { [ -f "$2" ] && grep -qF -- "$1" "$2"; }
+
+reset_h
+run_audit_sh "$AUDIT" true VERIFY_TOKEN="$TOKEN" SITEMAP_URL=https://example.com/sitemap.xml
+check "a clean audit still exits 0" "$([ "$RC" -eq 0 ] && echo 0 || echo 1)"
+check "curl fetched the sitemap (the token path was exercised)" "$([ -s "$WORK/curl-argv.log" ] && echo 0 || echo 1)"
+check "the token is NOT in curl's argv (what ps, or an argv-logging wrapper, sees)" "$(in_file "$TOKEN" "$WORK/curl-argv.log" && echo 1 || echo 0)"
+check "…yet curl still sends X-Verify-Source: <token>" "$([ -f "$WORK/curl-headers.log" ] && grep -qxF "X-Verify-Source: $TOKEN" "$WORK/curl-headers.log" && echo 0 || echo 1)"
+check "…read from a mode-600 file" "$(grep -qx -- '-rw-------' "$WORK/curl-hdrfile-mode.log" 2>/dev/null && echo 0 || echo 1)"
+# -L would replay the token to whatever host a 3xx names; so would a cluster like -fsSL.
+check "…and follows no redirect (no -L / --location)" "$(grep -qE '\[(-[A-Za-z]*L[A-Za-z]*|--location|--location-trusted)\]' "$WORK/curl-argv.log" 2>/dev/null && echo 1 || echo 0)"
+check "pa11y-ci does NOT inherit the token (nor do Chromium and its deps)" "$(in_file "$TOKEN" "$WORK/pa11y-env.txt" && echo 1 || echo 0)"
+check "…but its config still sends X-Verify-Source to the audited page" "$(in_file "\"X-Verify-Source\": \"$TOKEN\"" "$WORK/pa11y-cfg-seen.json" && echo 0 || echo 1)"
+check "the config is not the shared, fixed /tmp/pa11y-ci.json" "$([ -s "$WORK/pa11y-cfg-path.txt" ] && ! grep -qx '/tmp/pa11y-ci.json' "$WORK/pa11y-cfg-path.txt" && echo 0 || echo 1)"
+check "…it is mode 600 while the script runs" "$(grep -qx -- '-rw-------' "$WORK/pa11y-cfg-mode.txt" 2>/dev/null && echo 0 || echo 1)"
+check "…inside a 0700 dir" "$(grep -qx 'drwx------' "$WORK/pa11y-cfgdir-mode.txt" 2>/dev/null && echo 0 || echo 1)"
+check "…which is gone after exit" "$(workdirs_gone && echo 0 || echo 1)"
+check "the token reaches neither the step summary nor stderr" "$( { in_file "$TOKEN" "$SUMMARY" || in_file "$TOKEN" "$STDERR"; } && echo 1 || echo 0)"
+
+reset_h
+run_audit_sh "$AUDIT" true SITEMAP_URL=https://example.com/sitemap.xml
+# bash 3.2 reads "${arr[@]}" on an empty array as unbound under `set -u`: with no
+# token the sitemap command substitution died before curl ran, and the run
+# reported a clean skip. Only the macOS (3.2) leg can go red here.
+check "no token: the sitemap is still fetched (bash 3.2 empty-array abort)" "$([ -s "$WORK/curl-argv.log" ] && echo 0 || echo 1)"
+check "…and audited, not reported as a skip" "$(in_summary 'no URLs to audit' && echo 1 || echo 0)"
+check "…with no X-Verify-Source header" "$(in_file 'X-Verify-Source' "$WORK/curl-headers.log" && echo 1 || echo 0)"
+
+reset_h; touch "$WORK/pa11y-fault"
+run_audit_sh "$AUDIT" true VERIFY_TOKEN="$TOKEN" URLS=https://example.com/
+check "a pa11y-ci fault is still a crash, not a verdict" "$(in_summary 'a11y-audit crashed' && echo 0 || echo 1)"
+check "…and the work dir holding the token is still removed" "$(workdirs_gone && echo 0 || echo 1)"
+reset_h
+run_audit_sh "$AUDIT" true VERIFY_TOKEN="$TOKEN"
+check "a no-URL skip removes the work dir too" "$(in_summary 'no URLs to audit' && workdirs_gone && echo 0 || echo 1)"
+
+echo
+echo "# (I) no private work dir (mktemp fails) — a TOOL fault, and nothing is written"
+reset_h; touch "$WORK/mktemp-fail"
+run_audit_sh "$AUDIT" false VERIFY_TOKEN="$TOKEN" URLS=https://example.com/
+check "report mode exits 0" "$([ "$RC" -eq 0 ] && echo 0 || echo 1)"
+check "…and reports the crash, naming the work dir" "$(in_summary 'a11y-audit crashed' && in_summary 'private work dir' && echo 0 || echo 1)"
+check "…and pa11y-ci never ran" "$([ -e "$WORK/pa11y-env.txt" ] && echo 1 || echo 0)"
+touch "$WORK/mktemp-fail"
+run_audit_sh "$AUDIT" true VERIFY_TOKEN="$TOKEN" URLS=https://example.com/
+check "fail-on-violations exits 1" "$([ "$RC" -eq 1 ] && echo 0 || echo 1)"
+reset_h
+rm -f "$WORK/bin/curl" "$WORK/bin/mktemp"
 
 echo
 if [ "$fails" -eq 0 ]; then

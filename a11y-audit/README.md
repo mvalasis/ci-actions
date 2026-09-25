@@ -54,6 +54,15 @@ Rollout: start `fail-on-violations: false` (surface the backlog), fix it, then f
   prefer an origin-bound / IP-allowlisted WAF rule over a portable bearer token. The
   no-broadcast guarantee is a property of pa11y@9's interception code, so the `pa11y-ci@4`
   pin is a security control — re-audit before a major bump.
+- **`verify-token` on the runner** (v1.15.1). The token never appears in a process's argv,
+  in the environment `pa11y-ci`, Chromium and their npm dependencies inherit, or in a file
+  another user can read. `audit.sh` writes everything into a private `mktemp -d` dir (0700),
+  which the crash guard's EXIT handler removes on every path: the sitemap `curl` reads the
+  header from a mode-600 file there (`-H @file`), the pa11y-ci config (which carries the
+  token) is written there under `umask 077`, and `export -n VERIFY_TOKEN` follows. Before
+  that, the token was in curl's argv (`ps` shows argv to every process on the runner) and in
+  `/tmp/pa11y-ci.json`, world-readable and never removed. `scripts/selftest.sh` cases H–I
+  pin each of these properties with stand-ins for `curl`, `pa11y-ci` and `mktemp`.
 - **A scanner fault is not accessibility debt** (v1.12.0). If the audit itself breaks —
   `pa11y-ci` missing, an unwritable config, Chromium failing to start, or an abort inside
   `audit.sh` — the step reports **`a11y-audit crashed`** and exits

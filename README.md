@@ -49,6 +49,28 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.15.1** — `a11y-audit` keeps `verify-token` out of argv, out of its children's
+environment and out of world-readable files. The sitemap `curl` took the token as
+`-H "X-Verify-Source: <token>"`, so it sat in curl's argv, which `ps` shows to every
+process on the runner and an argv-logging wrapper on `PATH` records. The pa11y-ci
+config that carries it was `/tmp/pa11y-ci.json`, written under the default umask
+(world-readable) and never removed, and `VERIFY_TOKEN` stayed exported into pa11y-ci,
+Chromium and their npm dependencies. `audit.sh` now works in a private `mktemp -d` dir
+that the crash guard's EXIT handler removes on every path. curl reads the header from a
+mode-600 file there (`-H @file`), the config is written there under `umask 077`, and
+`export -n` drops the variable from the children's environment; nothing downstream reads
+it, since the config is built from the shell variable. That is the shape of the fleet's
+`verify-homepage-t1.sh` v2.2 and lux's `smoke-rest.sh`. Token **scope** is unchanged:
+the config pa11y-ci reads is byte-identical, so the header still rides only each audited
+URL's navigation request, and the sitemap curl still follows no redirect. A bash 3.2 bug
+on the same line is fixed too: with a `sitemap-url` and no token, `"${hdr[@]}"` on the
+empty array aborted the sitemap fetch under `set -u`, and the run reported a clean skip
+(macOS only; the runners are bash 5). `scripts/selftest.sh` cases H–I stand in `curl`
+(argv log), `pa11y-ci` (its environment, its config's mode mid-run) and `mktemp` (every
+dir it made is gone on pass, crash and skip, and a failure injected there is a tool
+fault). Each assertion goes red under a targeted mutant. **Caller-visible:** nothing. No
+input changed, and none of the seven callers reads either `/tmp` path.
+
 **v1.15.0** —
 `verify-homepage` **retires `checks: links`** and deletes `scripts/link-crawl.sh`.
 Checked before removal: all seven `verify-homepage` callers across both owners

@@ -5,6 +5,9 @@ name: a11y-audit engine self-test
 # reported as a tool fault (never as WCAG debt) and exits
 # `fail-on-violations ? 1 : 0`, while a genuine WCAG verdict passes through
 # untouched. No network, no Chromium, no pa11y-ci install — deterministic.
+# Cases H–I also pin the verify-token's handling on the runner: never in argv,
+# never in pa11y-ci's environment, only in 0600 files inside a 0700 dir that is
+# gone on every exit path.
 #
 # TWO LEGS ON PURPOSE. audit.sh ships to callers and runs wherever they run, and
 # the guard is built out of `trap … EXIT`, `set -u` abort semantics and `$?`

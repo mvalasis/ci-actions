@@ -42,6 +42,10 @@ summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 note() { printf '%s\n' "$*" >>"$summary" 2>/dev/null || true; }
 
 verdict_reached=0
+# The private work dir (created below the config block). Assigned HERE, before
+# the trap, for the same reason as verdict_reached: on_exit reads it on every
+# path, and a name bash imported from the environment must never reach its rm -rf.
+workdir=""
 finish() { verdict_reached=1; exit "$1"; }
 
 report_fault() {   # $1 = one-line reason
@@ -65,6 +69,10 @@ crash() {
 
 on_exit() {
   rc=$?
+  # The work dir holds the token header and the pa11y-ci config, which carries the
+  # token too, so it goes on EVERY path: verdict, crash, abort. `|| true`: the tail
+  # of this script runs under errexit, and a failed rm must not replace $rc.
+  if [ -n "${workdir:-}" ]; then rm -rf "$workdir" 2>/dev/null || true; fi
   # A verdict was reached — pass its status through untouched.
   if [ "$verdict_reached" -eq 1 ]; then exit "$rc"; fi
   report_fault "unexpected exit $rc before any verdict was reached (unbound variable under \`set -u\`, an errexit abort, or a fatal signal)"
@@ -78,18 +86,39 @@ RUNNER="${RUNNER:-axe htmlcs}"
 FAIL_ON_VIOLATIONS="${FAIL_ON_VIOLATIONS:-false}"
 MAX_URLS="${MAX_URLS:-25}"
 
+# Everything this script writes goes in a private dir: the token header curl
+# reads, the pa11y-ci config (which carries the token too) and pa11y-ci's log.
+# mktemp -d makes it 0700 and on_exit removes it. Before v1.15.1 the config and
+# the log were fixed /tmp paths, written under the default umask (world-readable)
+# and never removed.
+workdir=$(mktemp -d) || crash "mktemp -d failed, so there is no private work dir for the token header and the pa11y-ci config. No page was audited."
+
 # Header for sitemap fetch (pa11y gets it via the config below).
+# The token goes to curl as `-H @file` from a mode-600 file, never as
+# `-H "X-Verify-Source: $VERIFY_TOKEN"`: argv is world-readable (`ps`, /proc) to
+# every process on the runner, and an argv-logging wrapper on PATH records it.
+# `export -n` then keeps it out of the environment pa11y-ci, Chromium and their
+# npm dependencies inherit. The shell variable survives it — the config below is
+# its only other reader — and nothing downstream reads the env var.
 # NOTE: this curl has NO -L, so a 3xx on the sitemap is not followed and the
 # token can never be replayed to a redirect target (curl re-sends a custom -H
 # across a cross-host redirect — it strips only Cookie/Authorization). Keep it
 # that way: do NOT add -L here, or the token would leak to the redirect host.
 hdr=()
-[ -n "${VERIFY_TOKEN:-}" ] && hdr=(-H "X-Verify-Source: $VERIFY_TOKEN")
+if [ -n "${VERIFY_TOKEN:-}" ]; then
+  ( umask 077; printf 'X-Verify-Source: %s\n' "$VERIFY_TOKEN" > "$workdir/token-header" ) ||
+    crash "could not write the token header file. No page was audited."
+  hdr=(-H "@$workdir/token-header")
+  export -n VERIFY_TOKEN
+fi
 
 # Build the URL list (sitemap expansion + explicit urls).
+# ${hdr[@]+…}: bash 3.2 treats "${hdr[@]}" on an EMPTY array as unbound under
+# `set -u`, which killed this command substitution when no token was set — the
+# sitemap then yielded no URLs and the run reported a clean skip.
 urls=""
 if [ -n "${SITEMAP_URL:-}" ]; then
-  urls=$(curl -fsS --max-time 30 "${hdr[@]}" "$SITEMAP_URL" 2>/dev/null | grep -oE '<loc>[^<]+</loc>' | sed 's#</\?loc>##g')
+  urls=$(curl -fsS --max-time 30 ${hdr[@]+"${hdr[@]}"} "$SITEMAP_URL" 2>/dev/null | grep -oE '<loc>[^<]+</loc>' | sed 's#</\?loc>##g')
 fi
 if [ -n "${URLS:-}" ]; then
   urls=$(printf '%s\n%s\n' "$urls" "$URLS")
@@ -135,13 +164,16 @@ headers_json="\"headers\": { $hdr_pairs }, "
 # them (DISCIPLINES.md: mechanical → gate, judgment → advisory). Confirmed
 # axe violations + htmlcs errors still report as errors and block.
 # wait: a short settle so any post-load entrance animation finishes first.
-cat > /tmp/pa11y-ci.json <<EOF
+# umask 077: the config carries the token, so it is mode 600 inside the 0700 dir.
+( umask 077
+cat > "$workdir/pa11y-ci.json" <<EOF
 { "defaults": { ${headers_json}"standard": "$STANDARD", "runners": [$runners_json], "timeout": 60000,
     "wait": 3000,
     "levelCapWhenNeedsReview": "warning",
     "chromeLaunchConfig": { "args": ["--no-sandbox", "--disable-dev-shm-usage"] } },
   "urls": [ $urls_json ] }
 EOF
+)
 
 # Run pa11y-ci, capturing the log so we can tell a flaky *run* error apart from a
 # URL that ran and reported violations. pa11y-ci prints one structured summary
@@ -154,7 +186,7 @@ EOF
 # match nothing and silently disable the retry. Force plain output and strip any
 # stray escapes so summary-line detection is deterministic across colour envs.
 # Capture pa11y-ci's real exit via PIPESTATUS[0] (the pipe ends in sed|tee).
-run_audit() { NO_COLOR=1 pa11y-ci --config /tmp/pa11y-ci.json 2>&1 | sed $'s/\x1b\\[[0-9;]*m//g' | tee /tmp/pa11y-out.txt; return "${PIPESTATUS[0]}"; }
+run_audit() { NO_COLOR=1 pa11y-ci --config "$workdir/pa11y-ci.json" 2>&1 | sed $'s/\x1b\\[[0-9;]*m//g' | tee "$workdir/pa11y-out.txt"; return "${PIPESTATUS[0]}"; }
 
 # A genuine WCAG violation is always a "> <url> - N errors" line; a transient
 # failure is a "> <url> - Failed to run" line. Anchor to the reporter's per-URL
@@ -173,8 +205,8 @@ rc=$?
 # A persistent run error (both attempts fail) still falls through non-zero, so
 # enforce mode blocks.
 if [ "$rc" -ne 0 ] \
-   && grep -qE "$ran_errline" /tmp/pa11y-out.txt \
-   && ! grep -qE "$viol_errline" /tmp/pa11y-out.txt; then
+   && grep -qE "$ran_errline" "$workdir/pa11y-out.txt" \
+   && ! grep -qE "$viol_errline" "$workdir/pa11y-out.txt"; then
   note "- ⚠️ transient run error only (no WCAG violations) — retrying once"
   run_audit
   rc=$?
@@ -193,7 +225,7 @@ if [ "$rc" -eq 0 ]; then
 fi
 
 # A non-zero rc is NOT automatically "WCAG errors found". pa11y-ci exits non-zero
-# for a fault too — a missing binary (127), an unwritable /tmp config, a Chromium
+# for a fault too — a missing binary (127), an unwritable config, a Chromium
 # that will not launch — and until now every one of those was reported to the
 # operator as accessibility debt and BLOCKED an enforcing caller under a verdict
 # the tool never actually reached. The per-URL reporter lines are the evidence
@@ -201,9 +233,9 @@ fi
 # (Anchored on the leading ">" reporter shape, same as the retry logic above, so
 # the audited page's own HTML can never spoof its way into looking like one.)
 have_viol=0
-if grep -qE "$viol_errline" /tmp/pa11y-out.txt 2>/dev/null; then have_viol=1; fi
+if grep -qE "$viol_errline" "$workdir/pa11y-out.txt" 2>/dev/null; then have_viol=1; fi
 have_runerr=0
-if grep -qE "$ran_errline" /tmp/pa11y-out.txt 2>/dev/null; then have_runerr=1; fi
+if grep -qE "$ran_errline" "$workdir/pa11y-out.txt" 2>/dev/null; then have_runerr=1; fi
 
 if [ "$have_viol" -eq 0 ]; then
   if [ "$have_runerr" -eq 1 ]; then
