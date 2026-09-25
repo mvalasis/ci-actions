@@ -536,12 +536,17 @@ console.log('\n# scan.mjs end to end — the job log carries the report; at/abov
     // report and before the annotations. manageIssue pushes it into `infra` only once the report,
     // scanner notes included, is out, so until v1.18.1 none of it printed: a workflow without
     // `issues: write` got a green run, no issue, and no word why. The stub gh lists GH_STUB_OPEN's
-    // issue (or none) and refuses the verbs in GH_STUB_DENY with a 403 whose second line is a planted
-    // workflow command. ECOSYSTEMS adds a scanner note, which must stay in the report and only there.
+    // issue (or none), prints GH_STUB_LIST instead when it is set, refuses the verbs in GH_STUB_DENY
+    // with a 403 whose second line is a planted workflow command, and appends every verb it runs to
+    // GH_STUB_CALLS — so each row also pins what the run DID: a failed lookup must stop at `list`,
+    // never go on to `create`, which duplicates an issue that is open. ECOSYSTEMS adds a scanner
+    // note, which must stay in the report and only there.
     const gh = path.join(tmp, 'gh-stub');
     fs.writeFileSync(gh, String.raw`#!/bin/sh
 [ "$1" = "--version" ] && { echo 'gh version 0.0.0-stub'; exit 0; }
+[ -n "$GH_STUB_CALLS" ] && echo "$2" >> "$GH_STUB_CALLS"
 case " $GH_STUB_DENY " in *" $2 "*) printf 'HTTP 403: Resource not accessible by integration\n::error title=forged::planted-by-gh\n' >&2; exit 1 ;; esac
+[ "$2" = list ] && [ -n "$GH_STUB_LIST" ] && { echo "$GH_STUB_LIST"; exit 0; }
 [ "$2" = list ] && { [ -n "$GH_STUB_OPEN" ] && printf '[{"number":%s,"title":"deps-currency: dependency advisories"}]\n' "$GH_STUB_OPEN" || echo '[]'; }
 [ "$2" = create ] && [ -n "$GH_STUB_BREAK_SUMMARY" ] && { rm -f "$GITHUB_STEP_SUMMARY"; mkdir "$GITHUB_STEP_SUMMARY"; }
 exit 0
@@ -550,26 +555,39 @@ exit 0
     const count = (text, s) => text.split(s).length - 1;
     const DENIED = 'HTTP 403: Resource not accessible by integration ::error title=forged::planted-by-gh';
     const CLEAN = { OSV_STUB_CLEAN: '1', FIRST_PARTY_OWNERS: 'oven-sh' };   // no advisory, no unpinned action → close
-    const lifecycle = [   // [case, env, the one note it prints (null: none)]
-      ['no issue open, create succeeds', {}, 'opened tracking issue'],
-      ['no issue open, create refused (403)', { GH_STUB_DENY: 'create' }, `failed to open tracking issue: ${DENIED}`],
-      ['#7 open, comment succeeds', { GH_STUB_OPEN: '7' }, 'updated tracking issue #7'],
-      ['#7 open, comment refused (403)', { GH_STUB_OPEN: '7', GH_STUB_DENY: 'comment' }, `failed to update tracking issue #7: ${DENIED}`],
-      ['clean, #7 open, close succeeds', { ...CLEAN, GH_STUB_OPEN: '7' }, 'closed tracking issue #7 — the sweep is clean'],
-      ['clean, #7 open, close refused (403)', { ...CLEAN, GH_STUB_OPEN: '7', GH_STUB_DENY: 'comment close' }, `failed to close issue #7: ${DENIED}`],
-      ['clean, no issue open', CLEAN, null],
-      ['no gh', { GH_BIN: path.join(tmp, 'no-such-gh') }, 'gh CLI not available — issue management skipped'],
-      ['no GITHUB_REPOSITORY', { GITHUB_REPOSITORY: '' }, 'GITHUB_REPOSITORY unset — issue management skipped'],
+    const LOOKUP = 'failed to look up the tracking issue:';
+    const lifecycle = [   // [case, env, the one note it prints (null: none), the gh verbs it runs]
+      ['no issue open, create succeeds', {}, 'opened tracking issue', 'list create'],
+      ['no issue open, create refused (403)', { GH_STUB_DENY: 'create' }, `failed to open tracking issue: ${DENIED}`, 'list create'],
+      ['#7 open, comment succeeds', { GH_STUB_OPEN: '7' }, 'updated tracking issue #7', 'list comment'],
+      ['#7 open, comment refused (403)', { GH_STUB_OPEN: '7', GH_STUB_DENY: 'comment' }, `failed to update tracking issue #7: ${DENIED}`, 'list comment'],
+      ['clean, #7 open, close succeeds', { ...CLEAN, GH_STUB_OPEN: '7' }, 'closed tracking issue #7 — the sweep is clean', 'list comment close'],
+      ['clean, #7 open, close refused (403)', { ...CLEAN, GH_STUB_OPEN: '7', GH_STUB_DENY: 'comment close' }, `failed to close issue #7: ${DENIED}`, 'list comment close'],
+      ['clean, no issue open', CLEAN, null, 'list'],
+      // The lookup itself fails. #7 IS open in each, so a run that read the failure as "none open"
+      // would create a duplicate (dirty) or leave #7 open and say nothing (clean).
+      ['dirty, #7 open, lookup refused (403)', { GH_STUB_OPEN: '7', GH_STUB_DENY: 'list' }, `${LOOKUP} ${DENIED} — nothing opened or updated`, 'list'],
+      ['clean, #7 open, lookup refused (403)', { ...CLEAN, GH_STUB_OPEN: '7', GH_STUB_DENY: 'list' }, `${LOOKUP} ${DENIED} — nothing closed`, 'list'],
+      ['dirty, #7 open, lookup prints no JSON', { GH_STUB_OPEN: '7', GH_STUB_LIST: 'Resource not accessible by integration' }, `${LOOKUP} gh printed no JSON list — nothing opened or updated`, 'list'],
+      ['clean, #7 open, lookup prints JSON but no list', { ...CLEAN, GH_STUB_OPEN: '7', GH_STUB_LIST: '{"number":7}' }, `${LOOKUP} gh printed no JSON list — nothing closed`, 'list'],
+      ['no gh', { GH_BIN: path.join(tmp, 'no-such-gh') }, 'gh CLI not available — issue management skipped', ''],
+      ['no GITHUB_REPOSITORY', { GITHUB_REPOSITORY: '' }, 'GITHUB_REPOSITORY unset — issue management skipped', ''],
     ];
-    for (const [label, extra, note] of lifecycle) {
-      const env = { GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, ECOSYSTEMS: 'npm cobol', ...extra };
+    const calls = path.join(tmp, 'gh-calls');
+    const ran = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').join(' ') : '');
+    for (const [label, extra, note, verbs] of lifecycle) {
+      const env = { GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, GH_STUB_CALLS: calls, ECOSYSTEMS: 'npm cobol', ...extra };
+      fs.rmSync(calls, { force: true });
       const off = scan({ ...env, MANAGE_ISSUE: 'false' });
+      const ranOff = ran();
+      fs.rmSync(calls, { force: true });
       const on = scan({ ...env, MANAGE_ISSUE: 'true' });
       const block = note ? `\n### ℹ️ issue lifecycle\n- ${note}\n` : '';
       if (note) check(`issue lifecycle, ${label}: note in the log once, the summary once`, count(on.stdout, `\n- ${note}\n`) === 1 && count(on.summary, `\n- ${note}\n`) === 1, why(on));
       check(`issue lifecycle, ${label}: report byte-identical, ${note ? 'block before the annotations' : 'no block'}, same exit, no new command`,
         off.summary.includes('unknown ecosystem') && on.summary === off.summary + block && on.stdout === on.summary + off.stdout.slice(off.summary.length)
           && on.status === off.status && JSON.stringify(commands(on.stdout)) === JSON.stringify(commands(off.stdout)), JSON.stringify(on.stdout.slice(off.summary.length - 60)));
+      check(`issue lifecycle, ${label}: gh verbs run — ${verbs || 'none'}`, ranOff === '' && ran() === verbs, JSON.stringify({ off: ranOff, on: ran() }));
     }
 
     // (F) The summary turns unwritable while the issue opens: the block is in the log anyway, because

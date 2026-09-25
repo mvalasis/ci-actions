@@ -135,21 +135,34 @@ function loadWorkflows() {
 
 // ---------- issue lifecycle (gh CLI; mirrors linkcheck) ----------
 // Every outcome is pushed to `infra` and printed after the report as `### ℹ️ issue lifecycle`.
-function ghJSON(args) { const r = run(GH_BIN, args, { timeout: 60000 }); if (r.status !== 0) return null; try { return JSON.parse(r.stdout || 'null'); } catch { return null; } }
 // Why a gh call failed: its stderr, flattened and capped, or its exit status when it printed none. A
 // workflow without `issues: write` gets GitHub's 403, "Resource not accessible by integration".
 const ghFailure = (r) => safe(r.stderr.trim(), 120) || `exit ${r.status}`;
+// The open tracking issue: { num } (null when none is open), or { error } when the lookup failed —
+// gh refused, or printed something other than a JSON list.
 function findOpenIssue(repo) {
-  const list = ghJSON(['issue', 'list', '-R', repo, '--state', 'open', '--search', `${ISSUE_TITLE} in:title`, '--json', 'number,title']);
-  if (!Array.isArray(list)) return null;
+  const r = run(GH_BIN, ['issue', 'list', '-R', repo, '--state', 'open', '--search', `${ISSUE_TITLE} in:title`, '--json', 'number,title'], { timeout: 60000 });
+  if (r.status !== 0) return { error: ghFailure(r) };
+  let list; try { list = JSON.parse(r.stdout); } catch { /* not JSON — a failed lookup, below */ }
+  if (!Array.isArray(list)) return { error: 'gh printed no JSON list' };
   const hit = list.find((i) => i.title === ISSUE_TITLE);
-  return hit ? hit.number : null;
+  return { num: hit ? hit.number : null };
 }
 function manageIssue(decision, body) {
   const repo = env.GITHUB_REPOSITORY;
   if (!repo) { infra.push('GITHUB_REPOSITORY unset — issue management skipped'); return; }
   if (!have(GH_BIN)) { infra.push('gh CLI not available — issue management skipped'); return; }
-  const num = findOpenIssue(repo);
+  const found = findOpenIssue(repo);
+  // A failed lookup leaves the issue as it is, on both paths. A clean sweep cannot close an issue
+  // whose number it did not get. A dirty one could still open one, and does not: with an issue
+  // already open that is a duplicate, and a lookup that keeps failing would open another on every
+  // dirty run, none of which a clean run could find to close. A transient failure costs one run —
+  // whose report and annotations still carry every advisory — and the next run looks again.
+  // Until v1.19.2 a failed lookup read as "none open": a clean sweep left the issue open without a
+  // word, and a dirty one went on to `gh issue create`. linkcheck already stops here: its lookup runs
+  // under `bash -eo pipefail`, so a failed `gh issue list` ends the step before it creates or closes.
+  if (found.error) { infra.push(`failed to look up the tracking issue: ${found.error} — ${decision.action === 'open' ? 'nothing opened or updated' : 'nothing closed'}`); return; }
+  const num = found.num;
   const runUrl = `${env.GITHUB_SERVER_URL || 'https://github.com'}/${repo}/actions/runs/${env.GITHUB_RUN_ID || ''}`;
   const stamp = new Date().toISOString().slice(0, 10);
   if (decision.action === 'open') {

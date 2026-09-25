@@ -49,6 +49,33 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.19.2** *(tag not yet cut; lands with the next `v1` move)* — `deps-currency` tells a failed
+issue lookup apart from "no issue open". `findOpenIssue` read the open tracking issue through a
+helper that returned `null` on any gh failure (a non-zero exit, or output that was not JSON), which
+is also what it returned when no issue was open. A clean sweep whose lookup failed therefore left
+the open issue open and printed nothing, and a dirty one went on to `gh issue create`: a duplicate
+whenever an issue was open and the create went through, with no note saying why. The lookup now
+returns the issue, none, or why it failed, and a failed lookup prints `failed to look up the
+tracking issue: <reason> — nothing opened or updated` after a dirty sweep, or `… — nothing closed`
+after a clean one, in the `### ℹ️ issue lifecycle` block. The reason is gh's stderr through
+`safe()`, as in every other note, or `gh printed no JSON list`. On both paths the run then touches
+no issue. A dirty sweep could still create one and deliberately does not: with an issue already
+open that is a duplicate, and a lookup that kept failing would open another on every dirty run,
+none of which a clean run could find to close. A transient failure costs one run, whose report and
+annotations still carry every advisory. `linkcheck` already stopped there, since its lookup runs
+under `bash -eo pipefail`. The report is byte-identical: the old and new `scan.mjs`, run over 1,416
+env combinations, match byte for byte in the 312 whose lookup succeeds or never runs, and in the
+1,104 whose lookup fails differ only in the lifecycle block, which now holds the lookup note, and in
+gh stopping at `list`; report and exit code match in all of them. `scripts/selftest.mjs`'s
+issue-lifecycle table gains a lookup refused after a dirty and after a clean sweep and a lookup
+answered with no JSON list, each with an issue open, and every row now pins the gh verbs the run
+called. The new rows go red on the old `scan.mjs`, and each of 16 targeted mutants turns the
+self-test red, two of them only through the verb column. Measured before release, the fleet's four
+open tracking issues are one per repository, so no duplicate is waiting to be closed.
+**Caller-visible:** only when the lookup fails: a note where a clean sweep said nothing, and no
+issue where a dirty sweep could have opened a duplicate. No input, verdict or exit code changed; a
+failed issue call still never fails the run. The `v1` move newly-blocks nobody.
+
 **v1.19.1** — `verify-homepage` prints its
 report once on a local run. `render-check.mjs` echoes the report to the job log through fd 1 on
 every run, and with no `GITHUB_STEP_SUMMARY` it also appended it to its fallback sink,

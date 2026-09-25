@@ -33,7 +33,8 @@ blocking only after it has cleared its backlog.
   `manage-issue`) opens/updates a single
   **`deps-currency: dependency advisories`** tracking issue, auto-closing it when the next run is
   clean — the same issue lifecycle as `linkcheck`. What happened to the issue (opened, updated,
-  closed, or the error that stopped it) follows the report in both places.
+  closed, or the error that stopped it) follows the report in both places; a run that cannot look
+  the open issue up opens, updates and closes nothing.
 - Exits non-zero **only** when `fail-on-vuln: true` **and** an advisory at/above the floor exists.
 - **A scanner fault is not a finding.** If the scan itself crashes, the report says so
   (`❌ deps-currency crashed: …` in the job log and the job summary) and the exit code follows the same
@@ -164,6 +165,19 @@ Since **v1.18.0** the report is in three places, so a scheduled run's findings n
   accessible by integration* when the workflow lacks `permissions: issues: write`. A failed issue
   call never changes the exit code. Before v1.18.1 these lines were computed but never printed: a
   workflow without `issues: write` got a green run, no issue, and no word why.
+- **A failed issue lookup leaves the issue alone.** Each run first finds the open issue with `gh
+  issue list`. If gh refuses (a 403, an outage) or prints no JSON list, the block reads `failed to
+  look up the tracking issue: <gh's error> — nothing opened or updated` after a dirty sweep, or
+  `… — nothing closed` after a clean one, and the run touches no issue. A clean sweep cannot close
+  an issue whose number it did not get. A dirty one could still open one, and deliberately does
+  not: with an issue already open that is a duplicate, and a lookup that keeps failing would open
+  another on every dirty run, none of which a clean run could find to close. A transient failure
+  therefore costs one run — whose report and annotations still carry every advisory — and the next
+  run (or a `workflow_dispatch` re-run) looks again; a persistent one says so on every run. Before
+  v1.19.2 a failed lookup read as "no issue open": a clean sweep left the issue open without a
+  word, and a dirty one went on to create one, a duplicate whenever an issue was open and the
+  create went through. `linkcheck` already stopped there: its lookup runs under
+  `bash -eo pipefail`, so a failed `gh issue list` ends the step before it creates or closes.
 
 Tool output never reaches the start of a log line, where the runner would read it as a workflow
 command: every osv-scanner string (a package name, a version, an advisory id, a path) and gh's
@@ -228,13 +242,17 @@ commands (stdout a socket, as node's child_process gives it — the case that cr
 `appendFileSync('/dev/stdout')` fallback on Linux), report-mode annotating as `::warning`, and an
 unwritable summary still reaching the log under the caller's exit setting. 23 targeted mutants each
 turn it red. The same leg then drives the tracking issue through a stub `gh`: opened, updated and
-closed, each also refused with a 403 whose second line plants a workflow command, plus no `gh`, no
-`GITHUB_REPOSITORY`, and a clean run with nothing to close. Each note must reach the log and the
-summary exactly once, after the report and before the annotations, with the report byte-identical
-to a `manage-issue: false` run, the same exit code and no new command-shaped line; a summary made
-unwritable while the issue opens must still leave the block in the log. 16 targeted mutants turn
-that part red; dropping one of the two `safe()` passes a note goes through is equivalent (the other
-still flattens it). Runs in CI on `deps-currency/**`.
+closed, each also refused with a 403 whose second line plants a workflow command; the lookup
+itself refused after a dirty and after a clean sweep, and answered with no JSON list, each with an
+issue open; plus no `gh`, no `GITHUB_REPOSITORY`, and a clean run with nothing to close. Each note
+must reach the log and the summary exactly once, after the report and before the annotations, with
+the report byte-identical to a `manage-issue: false` run, the same exit code and no new
+command-shaped line, and each row pins the `gh` verbs the run called: a failed lookup must stop at
+`list`. A summary made unwritable while the issue opens must still leave the block in the log. 16
+targeted mutants turn that part red, and 16 more the lookup rows and the verb column; two of those,
+a `create` after the lookup note and a close without its resolving comment, only the verb column
+catches. Dropping one of the two `safe()` passes a note goes through is equivalent (the other still
+flattens it). Runs in CI on `deps-currency/**`.
 
 > The owner-set fixtures deliberately use **different** literals for the caller's owner and the
 > action's owner (`creme-ypsilon` vs `mvalasis`). The original fixture used the same literal for
