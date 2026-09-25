@@ -217,9 +217,15 @@ workdirs_gone() {
 }
 in_file() { [ -f "$2" ] && grep -qF -- "$1" "$2"; }
 
-reset_h
-run_audit_sh "$AUDIT" true VERIFY_TOKEN="$TOKEN" SITEMAP_URL=https://example.com/sitemap.xml
+reset_h; mkdir -p "$WORK/tmp-h"
+run_audit_sh "$AUDIT" true VERIFY_TOKEN="$TOKEN" SITEMAP_URL=https://example.com/sitemap.xml TMPDIR="$WORK/tmp-h"
 check "a clean audit still exits 0" "$([ "$RC" -eq 0 ] && echo 0 || echo 1)"
+# A bare `mktemp -d` ignores $TMPDIR on macOS; only an explicit template honours it.
+tmpl=1
+if [ -f "$WORK/mktemp-made.log" ]; then
+  while IFS= read -r d; do case "$d" in "$WORK/tmp-h/a11y-audit."*) tmpl=0 ;; esac; done < "$WORK/mktemp-made.log"
+fi
+check "the work dir honours \$TMPDIR (an explicit mktemp template)" "$tmpl"
 check "curl fetched the sitemap (the token path was exercised)" "$([ -s "$WORK/curl-argv.log" ] && echo 0 || echo 1)"
 check "the token is NOT in curl's argv (what ps, or an argv-logging wrapper, sees)" "$(in_file "$TOKEN" "$WORK/curl-argv.log" && echo 1 || echo 0)"
 check "…yet curl still sends X-Verify-Source: <token>" "$([ -f "$WORK/curl-headers.log" ] && grep -qxF "X-Verify-Source: $TOKEN" "$WORK/curl-headers.log" && echo 0 || echo 1)"

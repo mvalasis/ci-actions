@@ -90,8 +90,9 @@ MAX_URLS="${MAX_URLS:-25}"
 # reads, the pa11y-ci config (which carries the token too) and pa11y-ci's log.
 # mktemp -d makes it 0700 and on_exit removes it. Before v1.15.1 the config and
 # the log were fixed /tmp paths, written under the default umask (world-readable)
-# and never removed.
-workdir=$(mktemp -d) || crash "mktemp -d failed, so there is no private work dir for the token header and the pa11y-ci config. No page was audited."
+# and never removed. The explicit template is what makes macOS honour $TMPDIR;
+# a bare `mktemp -d` there ignores it.
+workdir=$(mktemp -d "${TMPDIR:-/tmp}/a11y-audit.XXXXXX") || crash "mktemp -d failed, so there is no private work dir for the token header and the pa11y-ci config. No page was audited."
 
 # Header for sitemap fetch (pa11y gets it via the config below).
 # The token goes to curl as `-H @file` from a mode-600 file, never as
