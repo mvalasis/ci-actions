@@ -49,39 +49,39 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.18.0** *(tag not yet cut; lands with the next `v1` move)* — `seo-aeo`, `contract-check`,
-`form-protection` and `deps-currency` print their report to the **job log** as well as the step
-summary, and annotate every CRITICAL: v1.16.0's `security-baseline` change, ported to the four
-siblings whose report still reached only `$GITHUB_STEP_SUMMARY`, where a blocked run's
-`gh run view --log-failed` said `Process completed with exit code 1` and nothing else. Each
-entrypoint echoes the report lines to stdout through `fs.writeSync(1, …)` first, byte-identical to
-the summary, which is unchanged outside a crash: the old and new entrypoints write byte-identical
-summaries and the same exit codes on 17 fixture runs. Then one annotation per CRITICAL: the three live-URL gates grade
-pages and endpoints, not files of the repo, so they carry no `file=` and put the location in the
-message, `::error title=<action> <check>::<check> at <url>` (`form-protection` adds the probe,
-`server-rejects tokenless at <endpoint>`; `contract-check` names the endpoint as the manifest does).
-`deps-currency` annotates each at/above-floor advisory, the findings `fail-on-vuln` blocks on, as
-`::error file=<lockfile>,title=deps-currency <SEVERITY>::<SEVERITY> <pkg>@<version> <ids> at
-<lockfile>`, with osv-scanner's absolute runner path made workspace-relative. A run that does not
-enforce (the default for all four) annotates at `::warning`, at most 10 per step with one line
-counting the rest; a WARN, a below-floor advisory or an unpinned-action advisory is never
-annotated. The CRITICALs that have no check annotate as `no-urls-resolved`,
-`no-endpoints-resolved` and `config-error`. An annotation never carries a finding's message; what it
-does carry (a URL, which a sitemap may supply; for `deps-currency` the package, version and advisory
-ids) goes through `safe()` and is escaped (`%`, CR, LF, and `:`/`,` in properties). Every
-page/payload/tool string in a report line already went through the action's `safe()`, which strips
-CR/LF and brackets, so no hostile value reaches the start of a log line (`::…`) or spells the
-runner's legacy `##[…]` form; `deps-currency`'s `[:]//` URL defang can write `##[:]`, which names no
-command. The crash line now goes through `safe()` too, where it printed a raw multi-line stack. A
-local run with no `GITHUB_STEP_SUMMARY` writes through fd 1 instead of appending to `/dev/stdout`,
-which on Linux fails with ENXIO when stdout is a socket. The crash path survives an unwritable
-summary and exits under the caller's setting; in the three URL gates it used to throw again inside
-the crash handler and exit 1 even in report-only. Each `scripts/selftest.mjs` gains an end-to-end
-leg that runs the real entrypoint (against a local `node:http` server, or a stub osv-scanner) with
-workflow commands planted in page, payload and tool strings. It asserts the whole report in the log
-once, one annotation per CRITICAL and none for a WARN, nothing else command-shaped, a local run
-printing once, `::warning` under report-only, an unwritable summary still reaching the log, and the
-early exits that run before the first `await`; 21, 24, 24 and 23 targeted mutants turn them red.
+**v1.18.0** — `seo-aeo`, `contract-check`, `form-protection` and `deps-currency` print their report
+to the **job log** as well as the step summary, and annotate every CRITICAL: v1.16.0's
+`security-baseline` change, ported to the four siblings whose report still reached only
+`$GITHUB_STEP_SUMMARY`, where a blocked run's `gh run view --log-failed` said `Process completed
+with exit code 1` and nothing else. Each entrypoint echoes the report lines to stdout through
+`fs.writeSync(1, …)` first, byte-identical to the summary, which is unchanged outside a crash: the
+old and new entrypoints write byte-identical summaries and the same exit codes on 17 fixture runs.
+Then one annotation per CRITICAL: the three live-URL gates grade pages and endpoints, not files of
+the repo, so they carry no `file=` and put the location in the message, `::error title=<action>
+<check>::<check> at <url>` (`form-protection` adds the probe, `server-rejects tokenless at
+<endpoint>`; `contract-check` names the endpoint as the manifest does). `deps-currency` annotates
+each at/above-floor advisory, the findings `fail-on-vuln` blocks on, as `::error
+file=<lockfile>,title=deps-currency <SEVERITY>::<SEVERITY> <pkg>@<version> <ids> at <lockfile>`,
+with osv-scanner's absolute runner path made workspace-relative. A run that does not enforce (the
+default for all four) annotates at `::warning`, at most 10 per step with one line counting the
+rest; a WARN, a below-floor advisory or an unpinned-action advisory is never annotated. The
+CRITICALs that have no check annotate as `no-urls-resolved`, `no-endpoints-resolved` and
+`config-error`. An annotation never carries a finding's message; what it does carry (a URL, which a
+sitemap may supply; for `deps-currency` the package, version and advisory ids) goes through
+`safe()` and is escaped (`%`, CR, LF, and `:`/`,` in properties). Every page/payload/tool string in
+a report line already went through the action's `safe()`, which strips CR/LF and brackets, so no
+hostile value reaches the start of a log line (`::…`) or spells the runner's legacy `##[…]` form;
+`deps-currency`'s `[:]//` URL defang can write `##[:]`, which names no command. The crash line now
+goes through `safe()` too, where it printed a raw multi-line stack. A local run with no
+`GITHUB_STEP_SUMMARY` writes through fd 1 instead of appending to `/dev/stdout`, which on Linux
+fails with ENXIO when stdout is a socket. The crash path survives an unwritable summary and exits
+under the caller's setting; in the three URL gates it used to throw again inside the crash handler
+and exit 1 even in report-only. Each `scripts/selftest.mjs` gains an end-to-end leg that runs the
+real entrypoint (against a local `node:http` server, or a stub osv-scanner) with workflow commands
+planted in page, payload and tool strings. It asserts the whole report in the log once, one
+annotation per CRITICAL and none for a WARN, nothing else command-shaped, a local run printing
+once, `::warning` under report-only, an unwritable summary still reaching the log, and the early
+exits that run before the first `await`; 21, 24, 24 and 23 targeted mutants turn them red.
 **Caller-visible:** more log output, and annotations on a run with CRITICALs (`::warning` ones on a
 report-only caller). No input and no verdict changed; the one exit-code change is that crash path,
 which now follows `fail-on-critical` like every other fault. The `v1` move newly-blocks nobody.
