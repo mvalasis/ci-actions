@@ -3,8 +3,9 @@ name: security-baseline self-test
 # Two offline regression guards (no network, no secrets): (1) the pure tier-engine self-test
 # (block-by-default, never-newly-block, promotion, redaction); (2) the vendored semgrep rule
 # packs via `semgrep --test` (each bad fixture fires, each good fixture stays silent). Plus a
-# report-mode self-scan smoke so a syntax/wiring break in scan.mjs is caught, and a pass of the
-# real scanners that fails when any leg could not look (a FAULT a green smoke would hide).
+# report-mode self-scan smoke so a syntax/wiring break in scan.mjs is caught, a pass of the
+# real scanners that fails when any leg could not look (a FAULT a green smoke would hide), and a
+# pull_request-shaped checkout scanned with the real trufflehog (the walk must reach the PR's commit).
 
 on:
   push:
@@ -72,3 +73,9 @@ jobs:
             echo "::error title=security-baseline self-test::a scanner leg could not look on a healthy runner; see the reports above"
             exit 1
           fi
+      # Both runs above are a push: a sha for a base, a checkout on a branch. A pull_request run is
+      # detached on GitHub's test merge with a ref name for a base, which faulted every PR run from
+      # v1.19.0 to v1.19.5 (v1.19.6). The script builds that shape; its header says what it pins.
+      - name: A pull_request checkout — trufflehog walks the PR's commit (real scanners)
+        shell: bash
+        run: bash security-baseline/scripts/selftest-pr-shape.sh

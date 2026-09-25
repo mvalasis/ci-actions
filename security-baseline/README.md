@@ -27,7 +27,7 @@ so **adding a new check or moving `@v1` can never newly-block a caller** — pro
 8 repos (CRITICAL = 0 on every one).
 
 > **`secret-verified` is the only ADDED blocking signal, and it is safe by construction.** It is
-> scoped to the diff range (`--since-commit`), so it fires only on a **newly-committed** live
+> scoped to the new commits (§What the verified probe walks), so it fires only on a **newly-committed** live
 > credential — never on pre-existing state — and a verified hit is a true positive (the
 > credential's own provider authenticated it). It does **not** replace the gitleaks pattern floor
 > (which still blocks unverifiable shapes like a private key or a dead-host DB string).
@@ -64,7 +64,7 @@ keeps those working with zero edits**; the new WARN tiers ride along automatical
 | Input | Default | Notes |
 |---|---|---|
 | `scan-scope` | `diff` | `diff` (changed files vs base) or `full` (whole tree). Keep `diff` — `full` re-scans vendored WP core / deps and can newly-block. |
-| `base-ref` | _(auto)_ | PR base → push `event.before` (full pushed range) → `HEAD~1`. |
+| `base-ref` | _(auto)_ | PR base → push `event.before` (full pushed range) → `HEAD~1`. trufflehog is handed commit ids, never this ref (§What the verified probe walks). |
 | `fail-on-critical` | `true` | `true` = BLOCK on any CRITICAL (T0 or a promoted T1), and FAULT when a scanner leg that could have found one could not look (§When a scanner cannot look). |
 | `critical-checks` | `''` | Comma/space list of **T1** ids to elevate to CRITICAL for **this** caller. T0 ids are already critical; T2/unknown ids are reported and ignored. |
 | `first-party-owners` | `''` | **Extra** owners exempt from `gha-unpinned-action`. Already exempt with no config: `actions`/`github`, the caller's own owner, and **this action's own owner**. Only needed for a *third* owner (a second org whose actions you also control). |
@@ -138,7 +138,7 @@ it looked and found nothing, or it **could not look**:
 | any | not installed; killed or timed out; output over the 64 MB cap; its collector crashed. A run of 10 s or more says how long it took: a registry stall leaves no other trace. |
 | semgrep | exit 2 or higher, or 1 with no results (without `--error`, which this gate never passes, 1 is not "findings"); no JSON report; an `errors[]` entry at `level: "error"`: a rule or config that did not load, or semgrep's engine failing on a file (an AST builder or fatal error, which semgrep itself exits 2 for). A per-file `warn` (a file it could not fully parse or finish) is listed under scanner notes and is not a fault. |
 | gitleaks | exit other than 0 (it runs with `--exit-code 0`); exit 0 with no report written; a report that is not a JSON array; no git history to read, checked before it runs, because outside a repository gitleaks exits 0 with `[]` |
-| trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short |
+| trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short; on the diff, no commit to stop its walk at (`git merge-base` of the base and the walk's head failed), checked before it runs |
 | osv-scanner | exit other than 0, 1 or 128; exit 1 with no results; 128 with `Error during extraction` on stderr (a lockfile it could not parse), or with a tracked npm/composer lockfile and no `Scanned … found N packages` line (one it did not read, such as a `bun.lockb`). Otherwise 128 is nothing to audit: no lockfile, or every lockfile read and empty (v1.19.5; measured on v2.4.0) |
 | hadolint | no JSON array; exit other than 0 or 1 (1 = a rule fired) |
 | git | the diff that lists the changed files failed: a `base-ref` or PR base that does not resolve, which gitleaks would read as an empty range and exit 0 on; `git ls-files` failed |
@@ -169,6 +169,33 @@ Measured on the pinned tools (semgrep 1.178.0, gitleaks 8.30.1, trufflehog 3.95.
 and semgrep's own shapes (a registry config that will not download exits 7 with the reason in
 `errors[]`; no network exits 2 with no JSON at all; its exit code follows only the last error it
 recorded, which is why `errors[]` is read in full).
+
+## What the verified probe walks
+
+trufflehog does not scan a range. It clones `file://.` into a temp directory (it does not trust the
+checkout's git config), walks `git log` there from `--branch` (from every ref without it), newest
+commit date first, and stops at `--since-commit`. Measured on 3.95.6 and read in its source
+(`PrepareRepo`, `normalizeConfig`, `ScanCommits`), both halves of that broke every `pull_request`
+run until **v1.19.6**:
+
+- **A ref name resolves in trufflehog's clone, not in the checkout.** actions/checkout leaves a
+  pull_request run detached on GitHub's test merge (`refs/remotes/pull/N/merge`) with no local
+  branch, and a clone copies only local branches (as `origin/*`), tags and HEAD. The PR base,
+  `origin/main`, never resolved: `unable to resolve ref: no base refs succeeded for base:
+  "origin/main"`. Without `--fail-on-scan-errors` that exits 0, so every PR run's verified probe
+  scanned nothing from v1.3.0 to v1.18.x; with it (v1.19.0) every PR run FAULTed.
+- **Walked from the test merge, it stops too early.** The base branch's tip comes before every PR
+  commit dated earlier than it, so the walk never reached the commits of a PR behind its base.
+
+So the probe gets two commit ids: `--branch` is the PR's own head
+(`github.event.pull_request.head.sha`, used only when the checkout holds it; else HEAD) and
+`--since-commit` is where that head left the base (`git merge-base <base> <head>`). Both are
+ancestors of HEAD, so both are in trufflehog's clone. For a linear PR branch the walk is exactly its
+commits: not the test merge, not base commits newer than the fork. Off a pull_request the walk is
+HEAD back to the base, as before. **Still not walked:** a PR branch that merged its base in stops at
+the newest base commit it merged, so its commits dated before that one are skipped; so are a merged
+branch's commits dated before `event.before` on a push. gitleaks' `<base>..HEAD` range, the T0
+pattern floor, walks both.
 
 ## Sovereignty — honest egress enumeration
 
@@ -373,13 +400,29 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   exit 128 with the extraction error notes it and PASS stands, and FAULTs once `sca-critical` is
   promoted; with no `Scanned` line it names `web/package-lock.json` alone, since `node_modules` stays
   out of the list; read and empty, it is nothing to audit. 17 targeted mutants each turn it red.
+  Its **pull_request** leg (v1.19.6) builds the checkout actions/checkout leaves a PR on: detached
+  on a test merge, no local branch, a PR commit dated before main's tip, and origin/main moved on
+  after the merge. Its trufflehog stub behaves as 3.95.6 does (clone, resolve in the clone, walk
+  `git log` and stop at the base). Controls first: v1.19.5's `--since-commit origin/main` exits 1,
+  origin/main's tip as a sha exits 1, and a walk from the test merge looks but never reaches the PR
+  commit. Then the run, with the env of the faulting runs: PASS, and the walk is exactly the PR's
+  commit, handed over as `--branch <PR head> --since-commit <fork point>`. A PR head the checkout
+  lacks is a scanner note and a walk from HEAD, an unresolvable base is could-not-look before
+  trufflehog runs, and `action.yml` must wire `PR_HEAD_SHA`. 9 targeted mutants each turn it red.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
+- `bash scripts/selftest-pr-shape.sh` — the pull_request checkout again, scanned with the REAL
+  trufflehog: `--only-verified` is swapped for an offline pass that prints unverified results, and
+  per-run minted tokens in a PR commit and in a newer main commit show what it walked. It fails
+  unless the walk reaches the PR's and none of main's. It pins the walk on every
+  `trufflehog-version` bump; v1.19.5's `scan.mjs` fails it, and so do the two near-misses (a walk
+  from the test merge, and a walk without `--branch`).
 
-Both run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a report-mode self-scan,
+All three run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a report-mode self-scan,
 after which the same job runs `scan.mjs` over this repo with the real scanners the action just
 installed, in both scopes, and fails if any leg could not look: the one place real scanner output,
-not a stub's, goes through `outcome.mjs` before a release.
+not a stub's, goes through `outcome.mjs` before a release. Both of those runs are a push; the
+pull_request shape is `selftest-pr-shape.sh`'s.
 
 The self-scan (`scan-scope: full`) covers this repo's whole tree, the rule fixtures included,
 and should report **critical: 0**. The fixtures' T1/T2 findings are expected: they are the

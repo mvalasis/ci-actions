@@ -226,13 +226,45 @@ function collectGitleaks() {
 }
 
 // ---------- trufflehog (verified-live secrets) ----------
+const isSha = (s) => /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(s);
+// The commits the verified probe walks, handed over as two commit ids, never as ref names.
+// trufflehog does not scan a range. It clones `file://.` (it does not trust this checkout's git
+// config), walks `git log` in that clone from --branch (from every ref without it), newest commit
+// date first, and stops at --since-commit. Both halves failed every pull_request run (v1.19.6):
+//   - A ref NAME resolves in trufflehog's clone, not here. actions/checkout leaves a PR detached on
+//     refs/remotes/pull/N/merge with no local branch, and a clone copies only local branches (as
+//     origin/*), tags and HEAD. So `origin/main`, the PR base, never resolved: exit 0 having
+//     scanned nothing until v1.19.0, a FAULT on every PR run since.
+//   - Walked from that test merge, the base branch's tip comes before every PR commit dated earlier
+//     than it, so a PR behind its base would scan nothing and pass. Walked from the PR's own head,
+//     the stop is where the PR left its base: exactly the PR's commits when its branch is linear.
+//     A branch that merged its base in stops at the newest base commit it merged, and its commits
+//     older than that are not walked. gitleaks' `BASE..HEAD` range, the T0 pattern floor, has no
+//     such gap.
+// Off a pull_request (a push, a dispatch, a local run) the walk starts at HEAD.
+function trufflehogRange() {
+  let head = '';
+  const pr = String(env.PR_HEAD_SHA || '').trim().toLowerCase();
+  if (isSha(pr)) {
+    if (run('git', ['merge-base', '--is-ancestor', pr, 'HEAD'], { timeout: 30000 }).status === 0) head = pr;
+    else infra.push(`trufflehog: the PR head ${pr.slice(0, 7)} is not in this checkout, so the walk starts at HEAD`);
+  }
+  if (!head) head = sh(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
+  if (!isSha(head)) return { reason: 'no commit checked out to walk from' };
+  const r = run('git', ['merge-base', BASE, head], { timeout: 30000 });
+  const since = r.status === 0 ? r.stdout.trim() : '';
+  if (isSha(since)) return { head, since };
+  const err = errorLine(r.stderr);
+  const why = err ? `exit ${r.status}: ${scrub(err)}` : r.status === 1 ? 'they share no commit' : `exit ${r.status}`;
+  return { reason: `no commit to stop the walk at: git merge-base ${safe(BASE, 60)} ${head.slice(0, 7)} failed, ${why}` };
+}
 function collectTrufflehog() {
   const out = [];
   if (VERIFIED_SECRETS === 'off') { infra.push('verified-secrets:off — live-credential probe disabled (gitleaks pattern floor still blocks)'); return out; }
   const scoped = DIFF && !!BASE;
   const leg = scoped ? LEGS.trufflehog : LEGS.trufflehogHistory;
   if (!have(BIN.trufflehog)) { couldNotLook(leg, 'trufflehog not installed — verified-secrets: off runs without it, on the gitleaks pattern floor'); return out; }
-  // CRITICAL `secret-verified` is the DIFF-scoped check: --since-commit bounds it to the NEW
+  // CRITICAL `secret-verified` is the DIFF-scoped check: the walk (trufflehogRange) covers the NEW
   // commits, so it can only fire on a just-added live key (never pre-existing state). When there
   // is no diff range (scan-scope:full, or an unresolved base), the verified probe widens to full
   // history — a pre-existing live key must NOT block, so those are emitted as WARN `secrets-history`
@@ -240,8 +272,10 @@ function collectTrufflehog() {
   // NEVER printed (not even redacted) — detector + file:line is enough.
   // --fail-on-scan-errors: without it, a scan that failed inside (a --since-commit it cannot
   // resolve) exits 0, having scanned nothing.
+  const range = scoped ? trufflehogRange() : null;
+  if (range && range.reason) { couldNotLook(leg, range.reason); return out; }
   const args = ['git', 'file://.', '--only-verified', '--no-update', '--json', '--fail-on-scan-errors'];
-  if (scoped) args.push('--since-commit', BASE);
+  if (range) args.push('--branch', range.head, '--since-commit', range.since);
   const o = trufflehogOutcome(run(BIN.trufflehog, args, { timeout: 300000 }));
   if (!o.looked) couldNotLook(leg, `trufflehog ${o.reason}`);
   for (const obj of o.results) {

@@ -153,6 +153,9 @@ runs:
         SCAN_SCOPE: ${{ inputs.scan-scope }}
         BASE_REF: ${{ inputs.base-ref }}
         GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        # The PR's own head, empty off a pull_request. trufflehog walks back from it, not from the
+        # test merge actions/checkout leaves a PR on (scan.mjs trufflehogRange, v1.19.6).
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         FAIL_ON_CRITICAL: ${{ inputs.fail-on-critical }}
         CRITICAL_CHECKS: ${{ inputs.critical-checks }}
         # First-party ownership for the GHA supply-chain rule. Passed EXPLICITLY rather than relying

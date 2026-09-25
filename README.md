@@ -56,6 +56,35 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.19.6** *(tag not yet cut; lands with the next `v1` move)* — `security-baseline`'s verified
+probe looks on a `pull_request` run again, and walks the PR's own commits. Since the v1.19.1 move
+every PR run FAULTed (`trufflehog verified-live secrets — trufflehog exit 1`) while every push
+passed. v1.19.0 did not break the leg, it exposed it. trufflehog clones `file://.` and resolves
+`--since-commit` in that clone, and actions/checkout leaves a PR detached on GitHub's test merge
+with no local branch. A clone copies only local branches, so the PR base `origin/main` never
+resolved (`unable to resolve ref: no base refs succeeded for base: "origin/main"`). Without
+`--fail-on-scan-errors` that exits 0, so every PR run's verified probe scanned nothing from
+v1.3.0 (2026-06-29) to the v1.19.1 move. A sha alone does not fix it: trufflehog walks `git log`
+newest commit date first and stops at the base. Walked from the test merge back to main's tip, it
+looks, exits 0 and never reaches a PR commit dated before that tip, so a PR behind its base would
+pass unscanned. Now it gets `--branch <PR head> --since-commit <where the PR left its base>`. The
+head is `github.event.pull_request.head.sha` (a new `PR_HEAD_SHA` in `action.yml`, used only when
+the checkout holds it) and the stop is `git merge-base`. Both are ancestors of HEAD, so both are
+in the clone. Off a pull_request the walk is HEAD back to the base, now with `--branch HEAD`. A
+base it cannot walk to is could-not-look before trufflehog runs; unscoped it would widen to all
+history under a T0 leg. Still not walked, and documented in security-baseline §What the verified
+probe walks: the commits of a PR branch that merged its base in, dated before the newest base
+commit it merged. gitleaks' range covers them. The self-test gains a pull_request leg: a stub
+trufflehog that clones, resolves and walks as 3.95.6 does, controls that reproduce both defects,
+12 new or changed assertions, and 9 targeted mutants that each turn it red. The selftest workflow
+gains `selftest-pr-shape.sh`, the same shape through the REAL trufflehog with minted tokens. It
+fails unless the walk reaches the PR's commit and none of main's; v1.19.5 fails it, and so do the
+two near-misses (a walk from the test merge, and a walk without `--branch`). **Measured before
+release** with the real trufflehog 3.95.6 `--only-verified`, v1.19.5's and this `scan.mjs`: on
+the push shape of all 10 callers' `main`, both PASS; on the 4 open PRs (luxairport-frontend #24
+and #95, prevedourougr #37 and #38), v1.19.5 FAULTs and this PASSes. **Caller-visible:** PR runs
+get a verdict again. No input changed. On the measured state the `v1` move newly-blocks nobody.
+
 **v1.19.5** — `deps-currency` and
 `security-baseline` no longer read an osv-scanner exit 128 as "nothing to audit" when the tree has a
 lockfile it could not read. Both took 128 ("No package sources found", nothing on stdout) as a scan

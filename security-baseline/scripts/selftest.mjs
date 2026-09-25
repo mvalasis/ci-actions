@@ -765,7 +765,12 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('(G) findings are not failures: hadolint exit 1 with a finding is a WARN, not a fault', g.stdout.includes('### ⚠️ `dockerfile-lint` · T1 · 1 finding(s)'));
     const thArgv = fs.existsSync(path.join(tmp, 'trufflehog-argv.log')) ? fs.readFileSync(path.join(tmp, 'trufflehog-argv.log'), 'utf8') : '';
     check('(G) trufflehog runs with --fail-on-scan-errors (without it a --since-commit it cannot resolve exits 0, scanning nothing)',
-      /(^| )--fail-on-scan-errors( |$)/m.test(thArgv) && /(^| )--since-commit HEAD~1( |$)/m.test(thArgv), thArgv);
+      /(^| )--fail-on-scan-errors( |$)/m.test(thArgv), thArgv);
+    // Off a pull_request the walk is HEAD back to the base, both as commit ids: trufflehog resolves
+    // them in its own clone, where a ref name may not exist (see (T)).
+    const revOf = (rev) => (git('rev-parse', rev).stdout || '').trim();
+    check('(G) trufflehog walks HEAD back to the base (BASE_REF HEAD~1), both handed over as shas',
+      new RegExp(`(^| )--branch ${revOf('HEAD')} --since-commit ${revOf('HEAD~1')}( |$)`, 'm').test(thArgv), thArgv);
 
     // (H) The registry fetch for the default p/security-audit fails.
     // semgrep 1.178.0's own answer, measured: exit 7 and two error entries.
@@ -882,6 +887,8 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     const n = broken({}, { BASE_REF: 'no-such-ref' });
     check('(N) an unresolvable diff base: FAULT on the changed-file list, exit 1', n.status === 1
       && n.stdout.includes("- ❌ changed-file list — git diff no-such-ref...HEAD failed, exit 128: fatal: ambiguous argument 'no-such-ref...HEAD': unknown revision"), verdict(n));
+    check('(N) trufflehog is not run on it (unscoped it would walk all history under a T0 leg): its leg says why',
+      n.stdout.includes(`- ❌ trufflehog verified-live secrets — no commit to stop the walk at: git merge-base no-such-ref ${revOf('HEAD').slice(0, 7)} failed, exit 128: fatal: `), verdict(n));
 
     // (O) A collector that throws: its legs could not look (was a scanner note under a PASS).
     const o = broken({ SEMGREP_BIN: stub('semgrep-null-result', `echo '{"results":[null],"errors":[]}'`) });
@@ -919,6 +926,99 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     const stall = broken({ SEMGREP_BIN: stub('semgrep-stall', semgrepAnswers('sleep 10; exit 2')) });
     check('(S) a stalled registry fetch: FAULT, and the reason says how long it took', stall.status === 1
       && /\n- ❌ semgrep community SAST — semgrep exit 2 after 1\d s: no JSON report\n/.test(stall.stdout), verdict(stall));
+
+    // (T) The pull_request checkout (v1.19.6). Every case above runs on a branch, with a sha or HEAD~1
+    // for a base, as a push does. actions/checkout leaves a pull_request run DETACHED on GitHub's test
+    // merge (refs/remotes/pull/N/merge) with no local branch, and the base arrives as a ref NAME:
+    // GITHUB_BASE_REF → origin/<base>, BASE_REF empty, which is the env of every PR run that faulted.
+    // Here the PR is one commit off main, older than main's tip, and main moved again after GitHub
+    // computed the merge, so origin/main's tip is not in HEAD's history either. The stub is trufflehog
+    // 3.95.6 as measured and as its source reads: it clones file://., resolves --branch and
+    // --since-commit IN THE CLONE (as given, then under refs/heads/ and refs/remotes/origin/), takes
+    // their merge base when given both, walks `git log` from --branch (every ref without it) and
+    // stops at the base. It logs the commits it walked.
+    const walkLog = path.join(tmp, 'trufflehog-walk.log');
+    const realArgv = path.join(tmp, 'trufflehog-as-measured-argv.log');
+    const thAsMeasured = stub('trufflehog-as-measured', [
+      `printf '%s\\n' "$*" >> '${realArgv}'`,
+      'branch=""; since=""',
+      'while [ $# -gt 0 ]; do case "$1" in --branch) shift; branch="$1" ;; --since-commit) shift; since="$1" ;; esac; shift; done',
+      'd=$(mktemp -d "$TMPDIR/th-clone.XXXXXX") || exit 1',
+      'trap \'rm -rf "$d"\' EXIT',
+      'git clone -q "file://$PWD" "$d/c" 2>/dev/null || exit 1',
+      'resolve() { for p in "" refs/heads/ refs/remotes/origin/; do git -C "$d/c" rev-parse -q --verify "$p$1^{commit}" && return 0; done; return 1; }',
+      'base=""; head="--all"',
+      'if [ -n "$since" ]; then base=$(resolve "$since") || { echo "unable to resolve ref: no base refs succeeded for base: \\"$since\\"" >&2; exit 1; }; fi',
+      'if [ -n "$branch" ]; then head=$(resolve "$branch") || exit 1; if [ -n "$base" ]; then base=$(git -C "$d/c" merge-base "$head" "$base") || exit 1; fi; fi',
+      `: > '${walkLog}'`,
+      `git -C "$d/c" log --format=%H $head | while read -r c; do [ "$c" = "$base" ] && break; echo "$c" >> '${walkLog}'; done`,
+    ].join('\n'));
+    const walked = () => (fs.existsSync(walkLog) ? fs.readFileSync(walkLog, 'utf8').split('\n').filter(Boolean) : null);
+    const gitAt = (dir, iso) => (...a) => spawnSync('git', ['-c', 'user.name=selftest', '-c', 'user.email=selftest@example.invalid', '-c', 'commit.gpgsign=false', ...a],
+      { cwd: dir, env: { ...base, ...(iso ? { GIT_AUTHOR_DATE: iso, GIT_COMMITTER_DATE: iso } : {}) }, encoding: 'utf8' });
+    const shaIn = (dir, rev) => (gitAt(dir)('rev-parse', rev).stdout || '').trim();
+    const up = path.join(tmp, 'pr-upstream');     // the caller's repository on GitHub
+    const prRepo = path.join(tmp, 'pr-checkout'); // what actions/checkout leaves a pull_request run on
+    fs.mkdirSync(up);
+    fs.mkdirSync(prRepo);
+    const commitIn = (iso, file, msg) => {
+      fs.writeFileSync(path.join(up, file), '<?php // fixture\n');
+      gitAt(up)('add', file);
+      gitAt(up, iso)('commit', '-q', '-m', msg);
+      return shaIn(up, 'HEAD');
+    };
+    gitAt(up)('init', '-q', '-b', 'main');
+    const forkPoint = commitIn('2026-09-01T10:00:00Z', 'README.md', 'where the PR leaves main');
+    gitAt(up)('checkout', '-q', '-b', 'feature');
+    const prCommit = commitIn('2026-09-01T11:00:00Z', 'pr.php', 'the PR, older than main tip');
+    gitAt(up)('checkout', '-q', 'main');
+    const mainTip = commitIn('2026-09-01T12:00:00Z', 'main.php', 'main moves on');
+    const pr = gitAt(prRepo);
+    pr('init', '-q');
+    pr('fetch', '-q', '--no-tags', up, '+refs/heads/*:refs/remotes/origin/*');
+    pr('checkout', '-q', '--detach', 'refs/remotes/origin/main');
+    gitAt(prRepo, '2026-09-01T13:00:00Z')('merge', '-q', '--no-ff', '--no-edit', 'refs/remotes/origin/feature');
+    pr('update-ref', 'refs/remotes/pull/1/merge', 'HEAD');
+    pr('checkout', '-q', '--detach', 'refs/remotes/pull/1/merge');
+    const mainLater = commitIn('2026-09-01T14:00:00Z', 'later.php', 'main moves on after the merge was computed');
+    pr('fetch', '-q', '--no-tags', up, '+refs/heads/*:refs/remotes/origin/*');
+    check('(T) the fixture is a pull_request checkout: detached on the test merge, no local branch, origin/main past it',
+      pr('symbolic-ref', '-q', 'HEAD').status !== 0 && (pr('for-each-ref', 'refs/heads').stdout || '') === ''
+      && shaIn(prRepo, 'HEAD^1') === mainTip && shaIn(prRepo, 'HEAD^2') === prCommit && shaIn(prRepo, 'refs/remotes/origin/main') === mainLater
+      && pr('merge-base', '--is-ancestor', mainLater, 'HEAD').status === 1);
+    // Controls: the stub reproduces both defects, so the passing case below cannot pass vacuously.
+    const thBy = (...args) => {
+      fs.rmSync(walkLog, { force: true });
+      const res = spawnSync(thAsMeasured, ['git', 'file://.', '--only-verified', '--no-update', '--json', '--fail-on-scan-errors', ...args], { cwd: prRepo, env: base, encoding: 'utf8' });
+      return { status: res.status, walked: walked() };
+    };
+    const asV1195 = thBy('--since-commit', 'origin/main');
+    check("(T) control: v1.19.5's argv (--since-commit origin/main) does not resolve in trufflehog's clone — exit 1", asV1195.status === 1, JSON.stringify(asV1195));
+    const asTipSha = thBy('--since-commit', mainLater);
+    check("(T) control: origin/main's tip as a sha is not in the clone either — exit 1", asTipSha.status === 1, JSON.stringify(asTipSha));
+    const fromMerge = thBy('--since-commit', mainTip);   // merge-base(origin/main, HEAD): resolves, and walks the wrong commits
+    check('(T) control: walked from the test merge back to the base tip it looks, and never reaches the PR commit',
+      fromMerge.status === 0 && Array.isArray(fromMerge.walked) && fromMerge.walked.length > 0 && !fromMerge.walked.includes(prCommit), JSON.stringify(fromMerge));
+    // The run, with the env of the faulting runs plus the PR head action.yml now passes.
+    const prEnv = { BASE_REF: '', GITHUB_BASE_REF: 'main', GITHUB_EVENT_BEFORE: '', PR_HEAD_SHA: prCommit };
+    fs.rmSync(walkLog, { force: true });
+    const tpr = broken({ TRUFFLEHOG_BIN: thAsMeasured }, prEnv, prRepo);
+    check('(T) a pull_request checkout: trufflehog looks — PASS, exit 0, no leg that could not look',
+      tpr.status === 0 && tpr.stdout.includes('\nPASS — no critical findings.\n') && !tpr.stdout.includes('could not look'), verdict(tpr));
+    check("(T) it walks exactly the PR's commit: not main's newer tip, not the test merge, nothing before the fork",
+      JSON.stringify(walked()) === JSON.stringify([prCommit]), JSON.stringify({ walked: walked(), prCommit }));
+    const prArgv = fs.existsSync(realArgv) ? fs.readFileSync(realArgv, 'utf8').split('\n').filter(Boolean).pop() : '';
+    check('(T) handed over as shas: --branch the PR head, --since-commit where it left origin/main',
+      new RegExp(`(^| )--branch ${prCommit} --since-commit ${forkPoint}( |$)`).test(prArgv), prArgv);
+    // A PR head the checkout does not hold (a caller checking out something else): noted, walked from HEAD.
+    const noSuchHead = shaOf('a PR head this checkout never fetched');
+    const tnh = broken({ TRUFFLEHOG_BIN: thAsMeasured }, { ...prEnv, PR_HEAD_SHA: noSuchHead }, prRepo);
+    check('(T) a PR head not in the checkout: a scanner note, the walk starts at HEAD, and it still looks',
+      tnh.status === 0 && tnh.stdout.includes(`- trufflehog: the PR head ${noSuchHead.slice(0, 7)} is not in this checkout, so the walk starts at HEAD`)
+      && !tnh.stdout.includes('could not look'), verdict(tnh));
+    const actYml = fs.readFileSync(new URL('../action.yml', import.meta.url), 'utf8');
+    check('(T) action.yml wires the pull_request head into the Scan step as PR_HEAD_SHA',
+      /^\s+PR_HEAD_SHA:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\}\}\s*$/m.test(actYml));
 
     // Each gitleaks run reports into a directory made for it, removed after — none may be left behind.
     check('every gitleaks report directory is removed afterwards', fs.readdirSync(tmp).filter((d) => d.startsWith('sb-gitleaks-')).length === 0,
