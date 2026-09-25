@@ -49,7 +49,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.19.1** *(tag not yet cut; lands with the next `v1` move)* — `verify-homepage` prints its
+**v1.19.1** — `verify-homepage` prints its
 report once on a local run. `render-check.mjs` echoes the report to the job log through fd 1 on
 every run, and with no `GITHUB_STEP_SUMMARY` it also appended it to its fallback sink,
 `/dev/stdout`, which is the log again. Measured on macOS, a run from a terminal, into a pipe, into
@@ -74,7 +74,7 @@ the same rule. Annotating FAIL rows like the v1.18.0 gates was considered and no
 to revisit. **Caller-visible:** nothing on Actions. A local run prints the report once. No input,
 verdict or exit code changed. The `v1` move newly-blocks nobody.
 
-**v1.19.0** *(tag not yet cut; lands with the next `v1` move)* — `security-baseline` no longer
+**v1.19.0** *(anchor `a7b2b60`, shipped with the v1.19.1 move; `v1` never pointed here)* — `security-baseline` no longer
 reads a scanner that could not look as one that found nothing. Every adapter did: semgrep's exit
 status and `errors[]` went unread, a gitleaks run that died before writing its report parsed as
 `[]`, a failed trufflehog or osv-scanner run read as empty output, and a crashed collector became a
@@ -110,7 +110,7 @@ instead of a PASS. A semgrep registry outage now reads as a red run; re-run it, 
 config through `semgrep-config`. No input changed, and on the measured state the `v1` move
 newly-blocks nobody.
 
-**v1.18.1** *(tag not yet cut; lands with the next `v1` move)* — `deps-currency` prints what
+**v1.18.1** *(anchor `70de55d`, shipped with the v1.19.1 move; `v1` never pointed here)* — `deps-currency` prints what
 happened to its tracking issue. `scan.mjs` emitted the report, `### ℹ️ scanner notes` included,
 before it called `manageIssue`, which then pushed its outcome into the same notes list (`opened
 tracking issue`, `failed to open tracking issue: <gh stderr>`, `gh CLI not available — issue
