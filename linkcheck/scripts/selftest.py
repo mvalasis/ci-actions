@@ -18,6 +18,7 @@ environment and the mode of any `-H @file` it is handed.
 
 Run: `python3 linkcheck/scripts/selftest.py`  (exit 0 = pass, 1 = a leak/regression)
 """
+import atexit
 import http.server
 import importlib.util
 import os
@@ -130,7 +131,7 @@ SHIM_LOG = ""
 
 
 def _install_curl_shim():
-    """Put an argv-logging `curl` first on PATH and return its dir. Each call
+    """Put an argv-logging `curl` first on PATH, in a dir removed at exit. Each call
     appends ONE line (a single write, so worker threads never interleave): its
     argv, ENV-VAR / ENV-VALUE when the token's variable or value is in its
     environment, and for a `-H @file` the file's mode, its dir's mode and the dir.
@@ -138,6 +139,7 @@ def _install_curl_shim():
     global SHIM_LOG
     real = shutil.which("curl")
     d = tempfile.mkdtemp(prefix="lc-selftest-shim.")
+    atexit.register(shutil.rmtree, d, True)   # on every exit, a crash in a later section too
     SHIM_LOG = os.path.join(d, "curl.log")
     with open(os.path.join(d, "curl"), "w") as f:
         f.write(textwrap.dedent(f"""\
@@ -161,7 +163,6 @@ def _install_curl_shim():
             """))
     os.chmod(os.path.join(d, "curl"), 0o755)
     os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
-    return d
 
 
 def _shim_lines():
@@ -300,7 +301,7 @@ def main():
     int_srv, INT_PORT = _start("INT")
     ext_srv, EXT_PORT = _start("EXT")
 
-    shim_dir = _install_curl_shim()   # before any curl runs, so runner_checks sees every call
+    _install_curl_shim()   # before any curl runs, so runner_checks sees every call
 
     # Env must be set BEFORE importing the scripts — they read it at module load.
     os.environ["LINKCHECK_HOST"] = "localhost"
@@ -394,7 +395,6 @@ def main():
 
     crash_guard_checks()
     crawl_floor_checks()
-    shutil.rmtree(shim_dir, True)
 
     print()
     if FAILS:
