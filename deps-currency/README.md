@@ -38,21 +38,32 @@ blocking only after it has cleared its backlog.
 - Exits non-zero **only** under `fail-on-vuln: true`: when an advisory at/above the floor exists,
   or when osv-scanner could not look (below).
 - **A scan that did not happen is not a clean one.** osv-scanner's run is judged on its exit status
-  and its report: exit 0 or 1 with a JSON report, or 128 (no package source in the tree, nothing to
-  audit), is a scan that looked. Anything else — the osv.dev API failing (129), an unreachable
-  osv.dev (127, as measured on v2.4.0), an invalid config (130), no JSON report, exit 1 with no
-  results, a timeout or kill, osv-scanner not installed, a `working-directory` that is not there —
-  is **no verdict**: never `PASS`, the tracking issue neither opened nor closed, and the exit is a
-  tool fault's (**0** under the default, **1** under `fail-on-vuln: true`). See
+  and its report: exit 0 or 1 with a JSON report is a scan that looked, and so is 128 when there was
+  nothing to audit (below). Anything else — the osv.dev API failing (129), an unreachable osv.dev
+  (127, as measured on v2.4.0), an invalid config (130), no JSON report, exit 1 with no results, a
+  timeout or kill, osv-scanner not installed, a `working-directory` that is not there — is **no
+  verdict**: never `PASS`, the tracking issue neither opened nor closed, and the exit is a tool
+  fault's (**0** under the default, **1** under `fail-on-vuln: true`). See
   [A scan that could not look](#where-to-read-the-result--job-log-annotations-step-summary). Before
   v1.19.4 such a run read as "no advisories", said `PASS`, and **closed an open tracking issue as
   resolved**.
-- **Known limit: exit 128 reads as nothing to audit.** osv-scanner v2.4.0 also exits 128, with
-  nothing on stdout, when every lockfile it found failed to parse (measured: a truncated
-  `package-lock.json`; junk `bun.lock`, `composer.lock`, `pnpm-lock.yaml`). Only its stderr
-  (`Error during extraction`) tells that apart from a tree with no lockfile, so such a run still
-  says `PASS`. It does not read `bun.lockb` at all. A lockfile it can read beside one it cannot
-  exits 127, which is no verdict.
+- **Exit 128 is read against the lockfiles (v1.19.5).** osv-scanner v2.4.0 exits 128 ("No package
+  sources found", nothing on stdout) for three trees, measured on the binary: one with no lockfile;
+  one whose every lockfile it read and found empty (stderr: `Scanned <path> file and found 0
+  packages`); and one whose lockfiles it could not read. That covers a truncated or junk
+  `package-lock.json`, `bun.lock`, `composer.lock` or `pnpm-lock.yaml`, with `Error during
+  extraction: …` on stderr, and a `bun.lockb`, which it does not read at all and says nothing about.
+  The first two are nothing to audit. The third is no verdict: `osv-scanner could not look — exit
+  128: Error during extraction: …<lockfile>: could not extract: …`, or, when the action's own
+  lockfile walk (the report's `lockfiles scanned`) found one and osv-scanner printed no `Scanned`
+  line, `exit 128: it read none of the tree's lockfiles: bun.lockb`. Before v1.19.5 all three said
+  `PASS`, the third under a `lockfiles scanned` line naming the lockfile nobody had read. A lockfile
+  it can read beside one it cannot exits 127, which is no verdict too.
+- **Known limits.** A `bun.lockb` beside a lockfile osv-scanner can read goes unaudited without a
+  word: it exits 0 or 1 on the readable one. A lockfile osv-scanner skips (anything under
+  `node_modules`, or a path `.gitignore` covers even when tracked) is not audited either; as the
+  tree's only lockfile it reads as could-not-look, because the walk finds it and osv-scanner never
+  says `Scanned`.
 - **A scanner fault is not a finding.** If the scan itself crashes, the report says so
   (`❌ deps-currency crashed: …` in the job log and the job summary) and the exit code follows the same
   report-mode-first rule: **0** under the default, **1** only under `fail-on-vuln: true`. A broken
@@ -296,8 +307,9 @@ fault annotation and `scrub()`. End to end, the stub `osv-scanner` exits 129 wit
 stdout, in both modes with #7 open: the note names the exit and osv's error line once in the log
 and once in the summary, nothing says `PASS` or ✅, the verdict line and the exit are the mode's,
 gh runs `list comment` and never `close`, the comment names the fault, and the only command-shaped
-line is the fault's annotation. Exit 128 with nothing on stdout stays a clean sweep in both modes:
-`PASS`, exit 0, and #7 closed. Seven more ways to fail to look (127, 130, an empty or cut-short
+line is the fault's annotation. Exit 128 with nothing to audit stays a clean sweep in both modes:
+`PASS`, exit 0, and #7 closed (since v1.19.5, see below). Seven more ways to fail to look (127,
+130, an empty or cut-short
 report, exit 1 without results, not installed, a missing `working-directory`, and a kill after the
 whole report) each hold #7, in both modes; a failed run's partial report is listed and marked
 incomplete, with the fault's annotation counted in GitHub's 10. The lifecycle table gains five
@@ -309,6 +321,21 @@ the signal still says could-not-look. A second CI job, `real-osv-scanner`, insta
 the real binary what the stubs assume: on this repository it looked, in an empty directory (exit
 128) the sweep passes, and with osv.dev unreachable (a dead proxy) the run is no verdict and, under
 `fail-on-vuln`, a FAULT with exit 1. It needs osv.dev, so an osv.dev outage turns it red.
+
+**Exit-128 legs (v1.19.5).** Unit legs feed `osvOutcome()` exit 128 with each stderr v2.4.0 was
+measured to print: an `Error during extraction` line (could not look, whether or not the walk
+listed a lockfile, and even beside a lockfile read empty; the reason is osv's line with the scanned
+root cut off), no `Scanned` line beside a listed lockfile (could not look, the lockfile named, a
+long list cut to three), `Scanned … found 0 packages` or `found 1 package` (looked), and no
+lockfile at all (looked). End to end, the stub exits 128 in both modes: having read the tree's
+lockfile and found it empty, `PASS` and #7 closed; in a tree with no lockfile, the same; with an
+extraction error, and with no `Scanned` line, no verdict and #7 held. Each of the 19 new or changed
+assertions turns red under at least one of 17 targeted mutants, all of which turn the self-test red
+(the one dropping `realpath` only where the temp directory is a symlink, as on macOS).
+`real-osv-scanner` asks the real binary three more questions, pinning the stderr wording both
+actions now read on every `osv-version` bump: a truncated `package-lock.json` is no verdict naming
+the extraction error, a valid one with no dependency passes, and a `bun.lockb` alone is no verdict
+naming it.
 
 > The owner-set fixtures deliberately use **different** literals for the caller's owner and the
 > action's owner (`creme-ypsilon` vs `mvalasis`). The original fixture used the same literal for

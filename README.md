@@ -56,6 +56,51 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.19.5** *(tag not yet cut; lands with the next `v1` move)* — `deps-currency` and
+`security-baseline` no longer read an osv-scanner exit 128 as "nothing to audit" when the tree has a
+lockfile it could not read. Both took 128 ("No package sources found", nothing on stdout) as a scan
+that looked and found nothing. Measured on the real v2.4.0 binary, 128 covers three trees: one with
+no lockfile; one whose every lockfile it read and found empty (stderr: `Scanned <path> file and
+found 0 packages`); and one whose lockfiles it could not read. That last covers a truncated or junk
+`package-lock.json`, `bun.lock`, `composer.lock` or `pnpm-lock.yaml`, with `Error during
+extraction: …` on stderr, and a `bun.lockb`, which it does not read at all and prints nothing about.
+The third read `PASS`. deps-currency's report even named the unread lockfile under `lockfiles
+scanned` above its PASS, so a lockfile left unreadable by a botched merge or a lockfile-format bump
+would have kept an enforcing caller green, and would have closed its advisories issue. Found in
+v1.19.4's pre-release rehearsal. Now, on 128, an `Error during extraction` line is could not look,
+with osv's line as the reason and the scanned root cut off (`osv-scanner could not look — exit 128:
+Error during extraction: extracting as javascript/packagelockjson web/package-lock.json: could not
+extract: unexpected end of JSON input`). So is a lockfile listed with no `Scanned … found N
+package(s)` line at all (`exit 128: it read none of the tree's lockfiles: bun.lockb`). Otherwise 128
+still looked. The list is deps-currency's own lockfile walk (the report's `lockfiles scanned`), and
+for security-baseline the tracked npm/composer lockfiles from `git ls-files`, less `node_modules`,
+which osv-scanner skips too. What follows is each action's existing could-not-look path:
+deps-currency is no verdict, holds the issue and FAULTs under `fail-on-vuln`; security-baseline
+notes the osv leg and FAULTs only where a caller promotes an `sca-*` check, which none does. A
+readable lockfile beside an unreadable one already exited 127 (could not look since v1.19.0 and
+v1.19.4). Still unaudited without a word: a `bun.lockb` beside a readable lockfile (exit 0 or 1). A
+lockfile osv-scanner skips, such as a tracked path `.gitignore` covers, reads as could not look when
+it is the only one. The self-tests gain unit legs for each stderr and end-to-end legs in both
+actions: 19 new or changed assertions in deps-currency and 11 in security-baseline, plus a fixture
+guard. Each turns red under at least one of 34 targeted mutants, all of which turn their self-test
+red; the one dropping deps-currency's `realpath` of the scanned root is red only where the temp
+directory is a symlink, as on macOS. A 35th, dropping security-baseline's, proved equivalent
+(`process.cwd()` is already real), so that call was removed. `real-osv-scanner` gains three trees that pin
+osv-scanner's stderr wording on every `osv-version` bump: a truncated `package-lock.json` (no
+verdict, the extraction error named), a valid one with no dependency (PASS), and a `bun.lockb`
+alone (no verdict, named). Over 3,360 stub env combinations, v1.19.4's and this `scan.mjs` match
+byte for byte in all 1,344 that looked and all 1,344 that already could not look, and differ in all
+672 newly could-not-look. **Measured before release** with the real v2.4.0 binary, both actions'
+old and new code on shallow clones of the 11 callers' `main` (every `deps-currency` and
+`security-baseline` caller): output byte-identical on all 11. hlektrologos-vlaves.gr and
+prevedourou-wp exit 128 with no lockfile and stay PASS; the rest exit 0 or 1. On 22 edge trees
+they differ in the 7 where osv-scanner could not read the lockfile. That covers truncated or junk npm,
+bun, composer and pnpm lockfiles, a `bun.lockb` alone, a truncated lockfile beside an empty one,
+and a tracked path `.gitignore` covers. Valid lockfiles with no dependency (npm v1 and v3,
+shrinkwrap, bun, pnpm, yarn, composer) and lockfiles under `node_modules` stay PASS. No caller
+promotes an `sca-*` check. **Caller-visible:** only for a tree whose lockfiles osv-scanner cannot
+read. No input changed. On the measured state the `v1` move newly-blocks nobody.
+
 **v1.19.4** — `deps-currency` no longer reads
 an osv-scanner that could not look as one that found nothing. `runOsv()` never read osv-scanner's
 exit status: it parsed an empty stdout as `{}` and noted an unparseable one as "treated as clean".
@@ -842,7 +887,10 @@ looked / could not look, and a run that could not look is a fault on the same
 terms: never a PASS, never a reason to open or close a tracking issue, exit
 `FAIL_ON_<X> ? 1 : 0`. `security-baseline` does this per scanner leg since v1.19.0
 (`scripts/outcome.mjs`), `deps-currency` for osv-scanner since v1.19.4
-(`osvOutcome` in `scripts/engine.mjs`).
+(`osvOutcome` in `scripts/engine.mjs`). A "nothing to scan" answer is checked against
+an inventory of the action's own: osv-scanner's exit 128 means "no lockfile" and
+"could not read the lockfile" alike, so both actions read it against their own lockfile
+list and osv's per-file stderr (v1.19.5).
 
 ## Repo hygiene — action entrypoints never write to stdout asynchronously
 

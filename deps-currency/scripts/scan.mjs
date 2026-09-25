@@ -119,14 +119,17 @@ function resolveEcosystems() {
 // Returns { findings, looked, reason }. `looked: false` is a scan that did not happen — not
 // installed, a working directory that is not there, an osv.dev outage, a report that never came —
 // and main() reads it as NO VERDICT: never PASS, never a reason to open or close the issue.
-function runOsv() {
+function runOsv(lockfiles) {
   if (!have(OSV_BIN)) return { findings: [], looked: false, reason: 'not installed' };
   // A missing cwd fails the spawn with ENOENT, which run() reports as the binary missing.
   if (!fs.existsSync(WORKDIR)) return { findings: [], looked: false, reason: `working-directory ${safe(env.WORKING_DIRECTORY || '.', 80)} does not exist` };
   // `scan source --recursive .` walks the working dir and audits every lockfile it finds — the FULL
-  // committed tree, not a diff. We pre-discover lockfiles only for the report + ecosystem gating;
-  // osv itself does the authoritative recursive scan.
-  const o = osvOutcome(run(OSV_BIN, ['scan', 'source', '--recursive', '--format', 'json', '.'], { cwd: WORKDIR, timeout: 420000 }));
+  // committed tree, not a diff. We pre-discover lockfiles for the report + ecosystem gating, and so
+  // that an exit 128 with a lockfile it did not read is not taken for a tree with nothing to audit;
+  // osv itself does the authoritative recursive scan. osv prints real paths, hence realpath.
+  let root = WORKDIR;
+  try { root = fs.realpathSync(WORKDIR); } catch { /* the lockfile list still decides; only the reason's paths stay long */ }
+  const o = osvOutcome(run(OSV_BIN, ['scan', 'source', '--recursive', '--format', 'json', '.'], { cwd: WORKDIR, timeout: 420000 }), { lockfiles, root });
   return { findings: parseOsv({ results: o.results }), looked: o.looked, reason: o.reason || '' };
 }
 
@@ -216,7 +219,7 @@ process.on('uncaughtException', (e) => {
 
 (function main() {
   const { ecosystems, lockfiles } = resolveEcosystems();
-  const osv = runOsv();
+  const osv = runOsv(lockfiles);
   const { findings, looked } = osv;
   if (!looked) infra.push(`osv-scanner could not look — ${osv.reason}`);
   const floorFindings = filterByFloor(findings, FLOOR);

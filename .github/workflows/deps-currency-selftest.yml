@@ -66,4 +66,20 @@ jobs:
           case "$out" in *'FAULT — osv-scanner could not look'*) ;; *) bad 'osv.dev unreachable under fail-on-vuln: no FAULT verdict' ;; esac
           case "$out" in *'PASS —'*) bad 'osv.dev unreachable: PASS' ;; esac
           [ "$rc" = 1 ] || bad "osv.dev unreachable under fail-on-vuln: exit $rc, want 1"
+          # Exit 128 beside a lockfile (v1.19.5) rests on osv's stderr wording: `Error during extraction`
+          # for a lockfile it cannot parse, `Scanned … and found N packages` for one it read. These three
+          # trees pin that wording, for both actions, on every osv-version bump.
+          lock() { mkdir -p "$RUNNER_TEMP/$1"; printf '%s' "$3" > "$RUNNER_TEMP/$1/$2"; }
+          lock truncated package-lock.json '{"name":"x","lockfileVersion":3,"packages":{"node_modules/lodash":{"version":"4.17'
+          lock no-dependency package-lock.json '{"name":"x","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"x","version":"1.0.0"}}}'
+          lock lockb-only bun.lockb "$(printf 'bun-lockfile-format-v0 binary')"
+          out="$(scan WORKING_DIRECTORY="$RUNNER_TEMP/truncated" FAIL_ON_VULN=true)"; rc=$?; printf '%s\n\n' "$out"
+          case "$out" in *'osv-scanner could not look — exit 128: Error during extraction: '*'package-lock.json: could not extract'*) ;; *) bad 'a truncated package-lock.json: no could-not-look note naming the extraction error' ;; esac
+          [ "$rc" = 1 ] || bad "a truncated package-lock.json under fail-on-vuln: exit $rc, want 1"
+          out="$(scan WORKING_DIRECTORY="$RUNNER_TEMP/no-dependency" FAIL_ON_VULN=true)"; rc=$?; printf '%s\n\n' "$out"
+          case "$out" in *'PASS — no dependency advisories'*) ;; *) bad 'a valid package-lock.json with no dependency: no PASS' ;; esac
+          [ "$rc" = 0 ] || bad "a valid package-lock.json with no dependency under fail-on-vuln: exit $rc"
+          out="$(scan WORKING_DIRECTORY="$RUNNER_TEMP/lockb-only" FAIL_ON_VULN=true)"; rc=$?; printf '%s\n\n' "$out"
+          case "$out" in *"osv-scanner could not look — exit 128: it read none of the tree's lockfiles: bun.lockb"*) ;; *) bad 'a bun.lockb alone: no could-not-look note naming it' ;; esac
+          [ "$rc" = 1 ] || bad "a bun.lockb alone under fail-on-vuln: exit $rc, want 1"
           exit "$fail"

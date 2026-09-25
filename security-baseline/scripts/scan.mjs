@@ -266,11 +266,21 @@ function scaCheckId(score) {
   if (score > 0) return 'sca-low';
   return 'sca-high'; // no CVSS → conservative WARN (still non-blocking)
 }
+// The npm and composer lockfile names deps-currency looks for (its LOCK_NAMES): the fleet's ecosystems.
+const LOCKFILE_NAMES = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lock', 'bun.lockb', 'composer.lock']);
 function collectOsv() {
   const out = [];
   if (!ENABLE_SCA) return out;
   if (!have(BIN.osv)) { couldNotLook(LEGS.osv, 'osv-scanner not installed — enable-sca: false runs without it'); return out; }
-  const o = osvOutcome(run(BIN.osv, ['scan', 'source', '--recursive', '--format', 'json', '.'], { timeout: 300000 }));
+  // The tracked npm/composer lockfiles, so that an exit 128 with one osv-scanner did not read is not
+  // taken for a tree with nothing to audit. node_modules is left out because osv-scanner skips it
+  // too. A failed listing leaves the list empty: only osv's own extraction error then speaks.
+  const ls = run('git', ['ls-files', '-z'], { timeout: 30000 });
+  const lockfiles = ls.status === 0 && !ls.error
+    ? ls.stdout.split('\0').filter((f) => LOCKFILE_NAMES.has(path.basename(f)) && !/(^|\/)node_modules\//.test(f))
+    : [];
+  const root = process.cwd();   // getcwd() resolves symlinks, as the paths osv-scanner prints do
+  const o = osvOutcome(run(BIN.osv, ['scan', 'source', '--recursive', '--format', 'json', '.'], { timeout: 300000 }), { lockfiles, root });
   if (!o.looked) couldNotLook(LEGS.osv, `osv-scanner ${o.reason}`);
   for (const res of o.results) {
     const src = (res.source && res.source.path) || '';

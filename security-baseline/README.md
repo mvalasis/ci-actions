@@ -139,7 +139,7 @@ it looked and found nothing, or it **could not look**:
 | semgrep | exit 2 or higher, or 1 with no results (without `--error`, which this gate never passes, 1 is not "findings"); no JSON report; an `errors[]` entry at `level: "error"`: a rule or config that did not load, or semgrep's engine failing on a file (an AST builder or fatal error, which semgrep itself exits 2 for). A per-file `warn` (a file it could not fully parse or finish) is listed under scanner notes and is not a fault. |
 | gitleaks | exit other than 0 (it runs with `--exit-code 0`); exit 0 with no report written; a report that is not a JSON array; no git history to read, checked before it runs, because outside a repository gitleaks exits 0 with `[]` |
 | trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short |
-| osv-scanner | exit other than 0, 1 or 128 (128 = no package manifest in the tree, so nothing to audit); exit 1 with no results |
+| osv-scanner | exit other than 0, 1 or 128; exit 1 with no results; 128 with `Error during extraction` on stderr (a lockfile it could not parse), or with a tracked npm/composer lockfile and no `Scanned … found N packages` line (one it did not read, such as a `bun.lockb`). Otherwise 128 is nothing to audit: no lockfile, or every lockfile read and empty (v1.19.5; measured on v2.4.0) |
 | hadolint | no JSON array; exit other than 0 or 1 (1 = a rule fired) |
 | git | the diff that lists the changed files failed: a `base-ref` or PR base that does not resolve, which gitleaks would read as an empty range and exit 0 on; `git ls-files` failed |
 
@@ -317,9 +317,14 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   air-gapped static scan. `turnstile-test-key` here only catches a literal test key in *source*.
 - **Could-not-look is only as honest as each tool's exit status.** A scanner that exits cleanly
   after quietly skipping part of its work still reads as having looked: osv-scanner passing over a
-  lockfile it cannot parse, trufflehog unable to reach a provider for one candidate (it reports it
+  `bun.lockb` beside a lockfile it can read (it exits 0 or 1 on the readable one and says nothing
+  of the other), trufflehog unable to reach a provider for one candidate (it reports it
   unverified, which `--only-verified` drops), and semgrep's per-file parse failures, which are
-  listed but not faulted.
+  listed but not faulted. A lockfile osv-scanner cannot parse is no longer one of them: beside a
+  readable lockfile it exits 127, and alone it exits 128 with `Error during extraction`, both could
+  not look (v1.19.5). A lockfile it skips (under `node_modules`, or a path `.gitignore` covers even
+  when tracked) goes unaudited; as the only lockfile, and outside `node_modules`, it reads as could
+  not look.
 - **First-party exemption is by OWNER, not by ref.** `gha-unpinned-action` trusts *every* action
   under a first-party owner at *whatever* tag it is pinned to — not just `ci-actions`. That is the
   deliberate trade for the fleet's floating-`@v1` policy (the whole point of `@v1` is that it
@@ -360,7 +365,14 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   installed, an unresolvable diff base, a collector that crashes and a scanner killed by a signal.
   Each asserts the note, the verdict and the exit under `fail-on-critical`, `report-mode` and
   `fail-on-critical: false` as it applies, and that a value in a tool's error text never reaches an
-  output whole (trufflehog's, not even redacted). 52 targeted mutants each turn it red.
+  output whole (trufflehog's, not even redacted). 52 targeted mutants each turn it red. Since
+  v1.19.5 the unit legs also feed osv-scanner exit 128 with each stderr v2.4.0 prints (an
+  extraction error, with and without a listed lockfile and beside one read empty; no `Scanned` line
+  beside a listed lockfile; `found 0 packages` and `found 1 package`), and a second fixture
+  repository tracks a truncated `web/package-lock.json` plus one force-added under `node_modules`:
+  exit 128 with the extraction error notes it and PASS stands, and FAULTs once `sca-critical` is
+  promoted; with no `Scanned` line it names `web/package-lock.json` alone, since `node_modules` stays
+  out of the list; read and empty, it is nothing to audit. 17 targeted mutants each turn it red.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
 

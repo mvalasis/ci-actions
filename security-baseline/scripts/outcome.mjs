@@ -139,13 +139,36 @@ export function trufflehogOutcome(r) {
 }
 
 // ---------- osv-scanner ----------
-// 0 = no vulnerabilities, 1 = vulnerabilities found — both looked, both print the report; 128 = no
-// package manifest in the tree, so there was nothing to audit (looked, found nothing; no stdout).
-// 129 is the osv.dev API failing, 130 an invalid config, 127 any other error: none looked.
-export function osvOutcome(r) {
+// 0 = no vulnerabilities, 1 = vulnerabilities found — both looked, both print the report. 128 prints
+// "No package sources found" and no stdout for three different trees (measured on v2.4.0,
+// 2026-09-25): one with no lockfile; one whose every lockfile it read holds no package (stderr:
+// `Scanned <path> file and found 0 packages`); and one whose lockfiles it could not read, a
+// truncated or junk one (stderr: `Error during extraction: …`) or a bun.lockb, which it does not
+// read at all and says nothing about. Only the first two looked. A readable lockfile beside an
+// unreadable one exits 127. 129 is the osv.dev API failing, 130 an invalid config, 127 any other
+// error: none looked.
+const EXTRACT_ERROR = /^Error during extraction\b.*$/m;
+const SCANNED = /^Scanned .+ and found \d+ packages?$/m;
+// osv names a file by its absolute path without the leading slash. Under the scanned root that
+// prefix is noise, and at the reason's 160 characters it would push the error itself out.
+const underRoot = (line, root) => {
+  const prefix = String(root || '').replace(/^\/+|\/+$/g, '');
+  return prefix ? line.split(`${prefix}/`).join('') : line;
+};
+const listed = (files) => `${files.slice(0, 3).join(', ')}${files.length > 3 ? ` and ${files.length - 3} more` : ''}`;
+// `lockfiles` are the tracked npm/composer lockfiles (scan.mjs, git ls-files) and `root` the
+// directory osv-scanner scanned: on exit 128 they tell a tree with nothing to audit from one whose
+// lockfiles osv-scanner could not read.
+export function osvOutcome(r, { lockfiles = [], root = '' } = {}) {
   const pf = processFault(r);
   if (pf) return { looked: false, reason: pf, results: [] };
-  if (r.status === 128) return { looked: true, results: [] };
+  if (r.status === 128) {
+    const stderr = String(r.stderr || '');
+    const failed = stderr.match(EXTRACT_ERROR);
+    if (failed) return { looked: false, reason: exitReason(r, underRoot(failed[0], root)), results: [] };
+    if (lockfiles.length && !SCANNED.test(stderr)) return { looked: false, reason: exitReason(r, `it read none of the tree's lockfiles: ${listed(lockfiles)}`), results: [] };
+    return { looked: true, results: [] };
+  }
   const json = parse(r.stdout);
   const results = json && typeof json === 'object' && Array.isArray(json.results) ? json.results : [];
   if (r.status !== 0 && r.status !== 1) return { looked: false, reason: exitReason(r, errorLine(r.stderr)), results };

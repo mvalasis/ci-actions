@@ -402,6 +402,24 @@ console.log('\n# outcome.mjs — a scanner that could not look never reads as on
   check('osv-scanner exit 0 {"results":[]}: looked', osv(0, '{"results":[]}').looked === true);
   check('osv-scanner exit 1 with results: looked (vulnerabilities found is not a failure)', osv(1, '{"results":[{"packages":[]}]}').looked === true);
   check('osv-scanner exit 128 (no package manifest): looked, nothing to audit', osv(128, '', 'No package sources found').looked === true);
+  // v2.4.0 exits 128 for three trees (measured): no lockfile, lockfiles holding no package, and
+  // lockfiles it could not read. scan.mjs passes the tracked lockfiles and the root osv scanned.
+  const at = (stderr, lockfiles) => osvOutcome(R({ status: 128, stdout: '', stderr }), { lockfiles, root: '/home/runner/work/x/x' });
+  const extract = at('Scanning dir .\nError during extraction: (extracting as javascript/packagelockjson) home/runner/work/x/x/web/package-lock.json: could not extract: unexpected end of JSON input\nNo package sources found', ['web/package-lock.json']);
+  check('osv-scanner exit 128 with an extraction error: could not look, osv\'s error the reason, the root cut off',
+    extract.looked === false && extract.reason === 'exit 128: Error during extraction: extracting as javascript/packagelockjson web/package-lock.json: could not extract: unexpected end of JSON input', JSON.stringify(extract));
+  const unread = at('No package sources found', ['bun.lockb']);
+  check('osv-scanner exit 128 having read none of the tracked lockfiles (a bun.lockb): could not look, the lockfile named',
+    unread.looked === false && unread.reason === "exit 128: it read none of the tree's lockfiles: bun.lockb", JSON.stringify(unread));
+  const EXTRACT = 'Error during extraction: (extracting as javascript/packagelockjson) home/runner/work/x/x/web/package-lock.json: could not extract: unexpected end of JSON input';
+  check('osv-scanner exit 128 with an extraction error and no lockfile listed (a failed git listing): still could not look', at(EXTRACT, []).looked === false);
+  check('…and beside a lockfile it read and found empty: still could not look',
+    at(`Scanned /home/runner/work/x/x/package-lock.json file and found 0 packages\n${EXTRACT}`, ['package-lock.json', 'web/package-lock.json']).looked === false);
+  check('…a long lockfile list is cut to three', at('No package sources found', ['a', 'b', 'c', 'd', 'e']).reason === "exit 128: it read none of the tree's lockfiles: a, b, c and 2 more");
+  check('…without a root, the path in the reason stays whole', String(osvOutcome(R({ status: 128, stdout: '', stderr: EXTRACT }), {}).reason || '').includes('home/runner/work/x/x/web/package-lock.json'));
+  check('osv-scanner exit 128 with every tracked lockfile read and empty: looked, nothing to audit',
+    at('Scanned /home/runner/work/x/x/package-lock.json file and found 0 packages\nNo package sources found', ['package-lock.json']).looked === true
+      && at('Scanned /w/composer.lock file and found 1 package', ['composer.lock']).looked === true);
   check('osv-scanner exit 127 (a general error): could not look, reason names it', osv(127, '', 'failed to query osv.dev').reason === 'exit 127: failed to query osv.dev');
   check('osv-scanner exit 0 with unparseable output: could not look', osv(0, 'garbage').looked === false);
   check('osv-scanner exit 1 with no results: could not look', osv(1, '{"results":[]}').looked === false);
@@ -824,6 +842,37 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
       && l3.stdout.includes('- ⚠️ osv-scanner dependency audit — osv-scanner exit 127: failed to query osv.dev: 503 (its checks only warn'), verdict(l3));
     const l4 = broken({ OSV_BIN: osvDead }, { CRITICAL_CHECKS: 'sca-critical' });
     check('(L) osv-scanner exit 127 with sca-critical promoted: FAULT', l4.status === 1 && l4.stdout.includes('could not look (osv-scanner dependency audit).'), verdict(l4));
+
+    // (L) Exit 128 in a tree that tracks a lockfile (v1.19.5). v2.4.0 exits 128 for a lockfile it could
+    // not parse (`Error during extraction`), for one it does not read at all (a bun.lockb, nothing on
+    // stderr), and for one it read and found no package in: only the last looked. The list leaves
+    // out node_modules, which osv-scanner skips too — force-added here so the rule is exercised.
+    const locked = path.join(tmp, 'repo-locked');
+    fs.mkdirSync(path.join(locked, 'web'), { recursive: true });
+    fs.mkdirSync(path.join(locked, 'node_modules', 'dep'), { recursive: true });
+    const gitL = (...a) => spawnSync('git', ['-c', 'user.name=selftest', '-c', 'user.email=selftest@example.invalid', '-c', 'commit.gpgsign=false', ...a], { cwd: locked, env: base, encoding: 'utf8' });
+    gitL('init', '-q');
+    fs.writeFileSync(path.join(locked, 'README.md'), 'base\n');
+    gitL('add', '.'); gitL('commit', '-q', '-m', 'base');
+    fs.writeFileSync(path.join(locked, 'web', 'package-lock.json'), '{"name":"x","lockfileVersion":3,"packages":{"node_modules/lodash":{"version":"4.17');
+    fs.writeFileSync(path.join(locked, 'node_modules', 'dep', 'package-lock.json'), '{}\n');
+    gitL('add', '-f', '.'); gitL('commit', '-q', '-m', 'lockfile');
+    check('(L) the lockfile fixture tracks both lockfiles (else the node_modules exclusion is untested)',
+      (gitL('ls-files').stdout || '').split('\n').filter((f) => f.endsWith('package-lock.json')).length === 2);
+    const realLocked = fs.realpathSync(locked);
+    const osv128 = (name, ...lines) => stub(name, `${lines.map((l) => `echo '${l}' >&2`).join('\n')}\nexit 128`);
+    const NONE = 'No package sources found, --help for usage information.';
+    const osvExtract = osv128('osv-extract-error', 'Scanning dir .', `Error during extraction: (extracting as javascript/packagelockjson) ${realLocked.slice(1)}/web/package-lock.json: could not extract: unexpected end of JSON input`, NONE);
+    const l5 = broken({ OSV_BIN: osvExtract }, {}, locked);
+    check('(L) osv-scanner exit 128 with an extraction error: could not look, osv\'s error named, PASS stands (its checks only warn)', l5.status === 0
+      && l5.stdout.includes('- ⚠️ osv-scanner dependency audit — osv-scanner exit 128: Error during extraction: extracting as javascript/packagelockjson web/package-lock.json: could not extract: unexpected end of JSON input (its checks only warn'), verdict(l5));
+    const l6 = broken({ OSV_BIN: osvExtract }, { CRITICAL_CHECKS: 'sca-critical' }, locked);
+    check('(L) osv-scanner exit 128 with an extraction error, sca-critical promoted: FAULT', l6.status === 1 && l6.stdout.includes('could not look (osv-scanner dependency audit).'), verdict(l6));
+    const l7 = broken({ OSV_BIN: osv128('osv-read-none', 'Scanning dir .', NONE) }, {}, locked);
+    check('(L) osv-scanner exit 128 having read none of the tracked lockfiles: could not look, the lockfile named — node_modules left out',
+      l7.status === 0 && l7.stdout.includes("- ⚠️ osv-scanner dependency audit — osv-scanner exit 128: it read none of the tree's lockfiles: web/package-lock.json (its checks only warn"), verdict(l7));
+    const l8 = broken({ OSV_BIN: osv128('osv-read-empty', 'Scanning dir .', `Scanned ${realLocked}/web/package-lock.json file and found 0 packages`, NONE) }, {}, locked);
+    check('(L) osv-scanner exit 128 having read the lockfile and found no package: nothing to audit, not a fault', l8.status === 0 && !l8.stdout.includes('could not look') && /\nPASS/.test(l8.stdout), verdict(l8));
 
     // (M) semgrep not installed — "not installed" used to be a scanner note under a PASS.
     const m = broken({ SEMGREP_BIN: path.join(tmp, 'no-such-dir', 'semgrep') });

@@ -81,11 +81,16 @@ export function parseOsv(json) {
 // as resolved (VERIFICATION-TRAPS failed-probe-is-not-evidence).
 //
 // osv-scanner v2.4.0 (cmd/osv-scanner/internal/cmd/run.go; measured on the binary): 0 = no
-// vulnerabilities and 1 = vulnerabilities found, both with the JSON report on stdout; 128 = no
-// package source in the tree, so nothing to audit (looked, found nothing; empty stdout). 129 is its
-// API-failure code, 130 an invalid config, 127 any other error: none of them looked, and none
-// prints a report (scan source returns before printing). An unreachable osv.dev exits 127, not
-// 129 — v2.4.0 does not raise its API error yet (`TODO(v2): Actually use this error`).
+// vulnerabilities and 1 = vulnerabilities found, both with the JSON report on stdout. 128 prints
+// "No package sources found" and nothing on stdout, for three different trees (measured
+// 2026-09-25): one with no lockfile; one whose every lockfile it read holds no package (stderr:
+// `Scanned <path> file and found 0 packages`); and one whose lockfiles it could not read, a
+// truncated or junk one (stderr: `Error during extraction: …`) or a bun.lockb, which it does not
+// read at all and says nothing about. Only the first two looked. A readable lockfile beside an
+// unreadable one exits 127. 129 is its API-failure code, 130 an invalid config, 127 any other
+// error: none of them looked, and none prints a report (scan source returns before printing). An
+// unreachable osv.dev exits 127, not 129 — v2.4.0 does not raise its API error yet
+// (`TODO(v2): Actually use this error`).
 //
 // `r` is scan.mjs's run() result: { missing, status, signal, error, ms, stdout, stderr }.
 
@@ -118,10 +123,29 @@ function processFault(r) {
 const exitReason = (r, detail) => `exit ${r.status}${took(r)}${detail ? `: ${scrub(detail)}` : ''}`;
 const parseJSON = (text) => { try { return JSON.parse(text); } catch { return undefined; } };
 
-export function osvOutcome(r) {
+// Exit 128's two stderr tells: an extractor that failed on a lockfile, and a lockfile it did read.
+const EXTRACT_ERROR = /^Error during extraction\b.*$/m;
+const SCANNED = /^Scanned .+ and found \d+ packages?$/m;
+// osv names a file by its absolute path without the leading slash. Under the scanned root that
+// prefix is noise, and at the reason's 160 characters it would push the error itself out.
+const underRoot = (line, root) => {
+  const prefix = String(root || '').replace(/^\/+|\/+$/g, '');
+  return prefix ? line.split(`${prefix}/`).join('') : line;
+};
+const listed = (files) => `${files.slice(0, 3).join(', ')}${files.length > 3 ? ` and ${files.length - 3} more` : ''}`;
+
+// `lockfiles` is scan.mjs's own lockfile walk and `root` the directory osv-scanner scanned: on exit
+// 128 they tell a tree with nothing to audit from one whose lockfiles osv-scanner could not read.
+export function osvOutcome(r, { lockfiles = [], root = '' } = {}) {
   const pf = processFault(r);
   if (pf) return { looked: false, reason: pf, results: [] };
-  if (r.status === 128) return { looked: true, results: [] };
+  if (r.status === 128) {
+    const stderr = String(r.stderr || '');
+    const failed = stderr.match(EXTRACT_ERROR);
+    if (failed) return { looked: false, reason: exitReason(r, underRoot(failed[0], root)), results: [] };
+    if (lockfiles.length && !SCANNED.test(stderr)) return { looked: false, reason: exitReason(r, `it read none of the tree's lockfiles: ${listed(lockfiles)}`), results: [] };
+    return { looked: true, results: [] };
+  }
   const json = parseJSON(r.stdout);
   const report = !!json && typeof json === 'object' && Array.isArray(json.results);
   const results = report ? json.results : [];

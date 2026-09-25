@@ -137,6 +137,27 @@ console.log('\n# osvOutcome — an osv-scanner that could not look never reads a
   check('exit 0 {"results":[]}: looked, found nothing', osv(0, '{"results":[]}').looked === true && osv(0, '{"results":[]}').results.length === 0);
   check('exit 1 with results: looked, every result kept (vulnerabilities found is not a failure)', osv(1, report).looked === true && osv(1, report).results.length === 2);
   check('exit 128, empty stdout (no package source): looked, nothing to audit', osv(128, '', 'No package sources found, --help for usage information.').looked === true && osv(128, '').results.length === 0);
+  // Exit 128 is three trees on v2.4.0 (measured): no lockfile, lockfiles holding no package, and
+  // lockfiles it could not read. scan.mjs passes its own lockfile walk and the root osv scanned.
+  const root = '/home/runner/work/x/x';
+  const at = (stderr, lockfiles) => osvOutcome(R({ status: 128, stderr }), { lockfiles, root });
+  const EXTRACT = 'Error during extraction: (extracting as javascript/packagelockjson) home/runner/work/x/x/sub/package-lock.json: could not extract: unexpected end of JSON input';
+  const NONE = 'No package sources found, --help for usage information.';
+  const junk = at(`Scanning dir .\n${EXTRACT}\n${NONE}`, ['sub/package-lock.json']);
+  check('exit 128, extraction error: could not look; the reason is osv\'s error, root cut off',
+    junk.looked === false && junk.reason === 'exit 128: Error during extraction: extracting as javascript/packagelockjson sub/package-lock.json: could not extract: unexpected end of JSON input', JSON.stringify(junk));
+  check('…even with no lockfile listed', at(EXTRACT, []).looked === false);
+  check('…even beside a lockfile it read empty',
+    at(`Scanned /home/runner/work/x/x/package-lock.json file and found 0 packages\n${EXTRACT}\n${NONE}`, ['package-lock.json', 'sub/package-lock.json']).looked === false);
+  const unread = at(`Scanning dir .\n${NONE}`, ['bun.lockb']);
+  check('exit 128, no lockfile read (a bun.lockb): could not look, lockfile named',
+    unread.looked === false && unread.reason === "exit 128: it read none of the tree's lockfiles: bun.lockb", JSON.stringify(unread));
+  check('…a long list is cut to three', at(NONE, ['a', 'b', 'c', 'd', 'e']).reason === "exit 128: it read none of the tree's lockfiles: a, b, c and 2 more");
+  check('exit 128, every lockfile read and empty: looked',
+    at(`Scanning dir .\nScanned /home/runner/work/x/x/package-lock.json file and found 0 packages\n${NONE}`, ['package-lock.json']).looked === true);
+  check('…`found 1 package` too', at('Scanned /w/composer.lock file and found 1 package', ['composer.lock']).looked === true);
+  check('exit 128, no lockfile: looked', at(NONE, []).looked === true && at('', []).looked === true);
+  check('no root: the path stays whole', String(osvOutcome(R({ status: 128, stderr: EXTRACT }), {}).reason || '').includes('home/runner/work/x/x/sub/package-lock.json'));
   const down = osv(129, '', 'Scanning dir .\nfailed to query the OSV API: 503 Service Unavailable');
   check('exit 129, empty stdout (the API failed): could not look; the reason names the exit and osv\'s error line',
     down.looked === false && down.reason === 'exit 129: failed to query the OSV API: 503 Service Unavailable', JSON.stringify(down));
@@ -680,8 +701,12 @@ exit 0
     // v1.19.2 parsed as `{}`: "PASS — no dependency advisories", and the "clean" sweep CLOSED the open
     // advisories issue as resolved. Now it is no verdict: a scanner note naming osv's exit and error
     // line, never PASS, the issue neither opened nor closed, and the exit a tool fault's —
-    // fail-on-vuln ? 1 : 0. Exit 128 (no package source) is the one non-zero exit that looked.
+    // fail-on-vuln ? 1 : 0. Exit 128 is the one non-zero exit that can have looked: when the tree has no
+    // lockfile, or osv read every one and found no package in it (v1.19.5).
     fs.rmSync(summaryPath, { recursive: true, force: true });   // (F) left a directory there; scan() only removes a file
+    const REAL = fs.realpathSync(tmp);   // osv-scanner prints real paths (macOS: /var → /private/var)
+    const EMPTY_TREE = path.join(tmp, 'empty-tree');
+    fs.mkdirSync(EMPTY_TREE, { recursive: true });
     const NOTE ='osv-scanner could not look — exit 129: failed to query the OSV API: 503 Service Unavailable';
     const blindly = (fov) => (fov === 'true'
       ? '\nFAULT — osv-scanner could not look, so the dependency tree was not audited. No verdict: a tool fault in deps-currency, not a finding about this repository.\n'
@@ -700,17 +725,27 @@ exit 0
       check(`osv exit 129, fail-on-vuln ${fov}: one ::${level} names the fault for the check-run API, nothing else is command-shaped`,
         JSON.stringify(commands(g.stdout)) === JSON.stringify([`::${level} title=deps-currency could not look::${NOTE}`]), JSON.stringify(commands(g.stdout)));
 
-      // 128: osv-scanner found no package source — it looked, and there was nothing to audit. Clean.
-      const n = scanGh({ OSV_STUB_EXIT: '128', OSV_STUB_OUT: '', OSV_STUB_ERR: 'No package sources found, --help for usage information.', FIRST_PARTY_OWNERS: 'oven-sh', GH_STUB_OPEN: '7', FAIL_ON_VULN: fov, GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, MANAGE_ISSUE: 'true' });
-      check(`osv exit 128 (no package source), fail-on-vuln ${fov}: looked, nothing to audit — PASS, exit 0`,
+      // 128 having read the tree's lockfile and found no package in it, as v2.4.0 says of a valid lockfile
+      // with no dependency: it looked, and there was nothing to audit. Clean.
+      const n = scanGh({ OSV_STUB_EXIT: '128', OSV_STUB_OUT: '', OSV_STUB_ERR: `Scanning dir .\nScanned ${REAL}/package-lock.json file and found 0 packages\nNo package sources found, --help for usage information.`, FIRST_PARTY_OWNERS: 'oven-sh', GH_STUB_OPEN: '7', FAIL_ON_VULN: fov, GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, MANAGE_ISSUE: 'true' });
+      check(`osv exit 128, lockfile read empty, fail-on-vuln ${fov}: PASS, exit 0`,
         n.status === 0 && n.stdout.includes('\n- advisories in tree: **0** total · **0** at/above floor\n') && n.stdout.includes('\nPASS — no dependency advisories at or above the severity floor.') && !n.stdout.includes('could not look'), why(n));
       check(`osv exit 128, fail-on-vuln ${fov}: the sweep is clean, so #7 closes — and nothing annotates`,
         n.verbs === 'list comment close' && count(n.stdout, '\n- closed tracking issue #7 — the sweep is clean\n') === 1 && commands(n.stdout).length === 0, n.verbs);
+      // 128 in a tree with no lockfile at all: nothing to audit either.
+      const e = scanGh({ OSV_STUB_EXIT: '128', OSV_STUB_OUT: '', OSV_STUB_ERR: 'Scanning dir .\nNo package sources found, --help for usage information.', WORKING_DIRECTORY: EMPTY_TREE, FIRST_PARTY_OWNERS: 'oven-sh', GH_STUB_OPEN: '7', FAIL_ON_VULN: fov, GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, MANAGE_ISSUE: 'true' });
+      check(`osv exit 128, no lockfile, fail-on-vuln ${fov}: PASS, exit 0, #7 closes`,
+        e.status === 0 && e.stdout.includes('\n- lockfiles scanned: (none found)\n') && e.stdout.includes('\nPASS — no dependency advisories at or above the severity floor.') && !e.stdout.includes('could not look') && e.verbs === 'list comment close', `${why(e)} gh=${e.verbs}`);
     }
     // Every other way osv-scanner can fail to look, end to end: the same no verdict, #7 held.
     const shapes = [   // [case, env, the note's reason]
       ['exit 127, nothing on stdout — an unreachable osv.dev, as measured on v2.4.0', { OSV_STUB_EXIT: '127', OSV_STUB_ERR: 'dial tcp: lookup api.osv.dev: no such host' }, 'exit 127: dial tcp: lookup api.osv.dev: no such host'],
       ['exit 130, an invalid config', { OSV_STUB_EXIT: '130', OSV_STUB_ERR: 'invalid config' }, 'exit 130: invalid config'],
+      ['exit 128, a lockfile it could not parse',
+        { OSV_STUB_EXIT: '128', OSV_STUB_ERR: `Scanning dir .\nError during extraction: (extracting as javascript/packagelockjson) ${REAL.slice(1)}/package-lock.json: could not extract: unexpected end of JSON input\nNo package sources found, --help for usage information.` },
+        'exit 128: Error during extraction: extracting as javascript/packagelockjson package-lock.json: could not extract: unexpected end of JSON input'],
+      ['exit 128, no lockfile read (as with a bun.lockb)', { OSV_STUB_EXIT: '128', OSV_STUB_ERR: 'Scanning dir .\nNo package sources found, --help for usage information.' },
+        "exit 128: it read none of the tree's lockfiles: package-lock.json"],
       ['exit 0 with an EMPTY stdout — what the old code parsed as {}', { OSV_STUB_EXIT: '0' }, 'exit 0: no JSON report'],
       ['exit 0, a report cut short — the old "treated as clean"', { OSV_STUB_EXIT: '0', OSV_STUB_OUT: '{"results":[{"source":' }, 'exit 0: no JSON report'],
       ['exit 1 with no results in its report', { OSV_STUB_EXIT: '1', OSV_STUB_OUT: '{"results":[]}' }, 'exit 1, vulnerabilities found, with no results in its report'],
