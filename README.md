@@ -69,14 +69,15 @@ the lint's 101 fixtures pass unchanged over the moved code. **Caller-visible:** 
 group on a run that finds one — WARN, so it blocks nobody until a caller lists it in
 `critical-checks`. No input and no existing verdict changed. The `v1` move newly-blocks nobody.
 
-**v1.16.1** *(tag not yet cut; lands with the next `v1` move)* — `linkcheck` refuses a sitemap
+**v1.16.1** *(anchor `e840c7e`, cut after the v1.17.0 move that shipped it; `v1` never pointed
+here)* — `linkcheck` refuses a sitemap
 that declares a DOCTYPE, and caps every sitemap body at the protocol's 50 MB. `sitemap-urls.py`
 parsed whatever a sitemap URL returned with `xml.etree.ElementTree`, and that body can come from
 any host a sitemap index or a redirect names. ElementTree resolves no external entity, but it
 leaves internal entity expansion to the libexpat Python links, and only expat ≥ 2.4.1 bounds it.
 macOS's system Python 3.9 links 2.2.8, where a 487-byte document expanded to 30 MB in half a
-second; the billion-laughs payload is ~3 GB. Ubuntu runners link a bounding expat, so the
-exposure was local and self-hosted runs. `parse()` now runs a bare expat pass whose DOCTYPE
+second; the billion-laughs payload is ~3 GB. The ubuntu runner's `python3` links expat 2.6.1
+(logged by the selftest), so the exposure was local and self-hosted runs. `parse()` now runs a bare expat pass whose DOCTYPE
 handler raises, so the declaration is refused inside the parser, in any encoding, before
 ElementTree reads the bytes. An entity can only be declared in a DTD, and no sitemap has one.
 Separately, the gunzip that `.gz` sitemaps go through was unbounded on every platform. The body
