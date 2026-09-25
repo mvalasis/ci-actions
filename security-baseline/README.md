@@ -246,8 +246,9 @@ page — now caught by **`wp-rest-error-detail-laundered`** (see §Honest limits
   both planting values minted at run time. It asserts the job log carries the whole report byte for
   byte, one annotation per CRITICAL (none for a WARN), no 8-character run of a planted value in the
   log, the summary or stderr, `--redact` on every gitleaks call, a local run printing once with no
-  commands, report-mode annotating as `::warning`, and an unwritable summary still reaching the log
-  under the caller's exit setting. 18 targeted mutants each turn it red.
+  commands (stdout a socket, as node's child_process gives it — the case that crashed the old
+  `/dev/stdout` fallback on Linux), report-mode annotating as `::warning`, and an unwritable summary
+  still reaching the log under the caller's exit setting. 19 targeted mutants each turn it red.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
 

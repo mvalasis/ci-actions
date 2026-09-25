@@ -56,12 +56,13 @@ const BIN = {
   hadolint: env.HADOLINT_BIN || 'hadolint',
 };
 
-const summaryFile = env.GITHUB_STEP_SUMMARY || '/dev/stdout';
-// The job LOG gets the same report. The step summary needs a signed-in browser: `gh run view
-// --log-failed` showed only "exit code 1", the check-run API's `output` was empty, and a headless
-// session learned THAT the gate blocked, never why (2026-09-23, luxairportlu 739c623). Off Actions
-// the summary already IS stdout, so a mirror would print it twice.
-const MIRROR = summaryFile !== '/dev/stdout';
+// The report goes to the job LOG always, and to the step summary when there is one. The summary
+// alone needs a signed-in browser: `gh run view --log-failed` showed only "exit code 1", the
+// check-run API's `output` was empty, and a headless session learned THAT the gate blocked, never
+// why (2026-09-23, luxairportlu 739c623). The log is written through fd 1, never by opening
+// /dev/stdout: on Linux that open fails (ENXIO) when stdout is a socket, which is what node's
+// child_process hands a child. `/dev/stdout` as the summary (a documented local idiom) means none.
+const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';
 const ANNOTATE = env.GITHUB_ACTIONS === 'true';   // runner commands are for the runner, not a local run
 const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
 const lines = [];
@@ -263,10 +264,10 @@ function collectHadolint() {
 function hashish(s) { let h = 0; for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; } return h; }
 // Report lines already echoed to the job log, so the crash path's re-flush echoes only the new ones.
 // The log goes first: when the summary write is what throws, the report is already readable.
-let mirrored = 0;
+let echoed = 0;
 function flush() {
-  if (MIRROR) for (; mirrored < lines.length; mirrored++) say(lines[mirrored]);
-  fs.appendFileSync(summaryFile, lines.join('\n') + '\n');
+  for (; echoed < lines.length; echoed++) say(lines[echoed]);
+  if (summaryFile) fs.appendFileSync(summaryFile, lines.join('\n') + '\n');
 }
 
 // ============================ main ============================

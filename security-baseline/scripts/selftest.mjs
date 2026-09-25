@@ -434,12 +434,18 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     const argv = fs.existsSync(argvLog) ? fs.readFileSync(argvLog, 'utf8').trim().split('\n') : [];
     check('gitleaks ran twice (diff + history), both times with --redact', argv.length === 2 && argv.every((l) => /(^| )--redact( |$)/.test(l)), `${argv.length} call(s)`);
 
-    // (B) Off Actions (a local run): the summary IS stdout — the report prints once, with no commands.
-    const b = scan({});
-    check('local run: same verdict (exit 1)', b.status === 1, `exit ${b.status}`);
-    check('local run: the report prints exactly once', b.stdout.split('## 🔒 security-baseline').length === 2 && b.stdout.includes('\nBLOCKED — 3 critical finding(s).'));
-    check('local run: no workflow commands', commands(b.stdout).length === 0);
-    check('local run: NO planted secret value', !leaked(b.stdout) && !leaked(b.stderr));
+    // (B) Off Actions (a local run): stdout is the only output — the report prints once, with no
+    // commands. spawnSync hands the child a SOCKET as stdout, which is the case that caught the old
+    // `appendFileSync('/dev/stdout')` fallback: on Linux that open fails with ENXIO, the scan crashed
+    // with nothing printed, and its exit 1 still matched the verdict. macOS dups the fd and passed.
+    const once = (r) => r.stdout.split('## 🔒 security-baseline').length === 2 && r.stdout.includes('\nBLOCKED — 3 critical finding(s).') && !r.stdout.includes('crashed');
+    const why = (r) => `exit ${r.status}, ${r.stdout.length} B stdout, stderr ${JSON.stringify(r.stderr.split('\n').find((l) => l.trim()) || '')}`;
+    for (const [label, extra] of [['local run', {}], ['GITHUB_STEP_SUMMARY=/dev/stdout (the local idiom)', { GITHUB_STEP_SUMMARY: '/dev/stdout' }]]) {
+      const b = scan(extra);
+      check(`${label}: the report prints exactly once, verdict included, no crash`, b.status === 1 && once(b), why(b));
+      check(`${label}: no workflow commands`, b.stdout.length > 0 && commands(b.stdout).length === 0, why(b));
+      check(`${label}: NO planted secret value`, b.stdout.length > 0 && !leaked(b.stdout) && !leaked(b.stderr), why(b));
+    }
 
     // (C) report-mode: the same criticals annotate as ::warning, and nothing blocks.
     const c = scan({ GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', REPORT_MODE: 'true' });

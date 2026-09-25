@@ -56,7 +56,7 @@ check-run API's `output` was empty, and a private repo's summary needs a signed-
 luxairportlu 739c623 (2026-09-23) a headless session learned that the gate blocked, never why,
 and rebuilt gitleaks' `generic-api-key` rule by hand to find the two lookalikes. Now
 `scan.mjs` echoes the same report lines to stdout through `fs.writeSync`, byte-identical to the
-summary (which is unchanged; off Actions the summary already is stdout, so nothing doubles),
+summary (which is unchanged; off Actions stdout is the only output, so nothing doubles),
 then emits one `::error file=…,line=…,title=security-baseline <check>::<check> <rule> at
 <file>:<line>` per CRITICAL: a T0, or a T1 the caller promoted. It emits `::warning` when the
 run does not enforce (`report-mode`, `fail-on-critical: false`), and at most 10 per step,
@@ -66,14 +66,18 @@ either: the log carries the summary's own lines (gitleaks runs with `--redact`, 
 raw credential is never read), and an annotation names a secret by rule id only. Annotation
 values are escaped (`%`, CR, LF, and `:`/`,` in properties), so a hostile path cannot rewrite
 or stop commands. A crash in the summary write itself now still reaches the log and exits under
-the caller's setting, not as an unhandled throw. `scripts/selftest.mjs` gains an end-to-end leg
-that runs the real `scan.mjs` against stub scanners planting secret values (a gitleaks that
-ignores `--redact`, trufflehog's `Raw`). It asserts the whole report in the log, one annotation
-per CRITICAL and none for a WARN, no planted value in any output, `--redact` on every gitleaks
-call, a local run printing once, and `::warning` under report-mode; each of 18 targeted mutants
-turns it red. **Caller-visible:** more log output, and annotations on a run with CRITICAL
-findings. No input and no verdict changed; the one exit-code change is that crash path, which
-now follows `report-mode` like every other fault. The `v1` move newly-blocks nobody.
+the caller's setting, not as an unhandled throw. A run with no `GITHUB_STEP_SUMMARY` (a local
+run) writes through fd 1 instead of opening `/dev/stdout`: on Linux that open fails with ENXIO
+when stdout is a socket, as under node's `child_process`, so the scan crashed there with nothing
+printed and an exit code that looked like its verdict — the new test caught it on the Linux
+runner. `scripts/selftest.mjs` gains an end-to-end leg that runs the real `scan.mjs` against stub
+scanners planting secret values (a gitleaks that ignores `--redact`, trufflehog's `Raw`). It
+asserts the whole report in the log, one annotation per CRITICAL and none for a WARN, no planted
+value in any output, `--redact` on every gitleaks call, a local run printing once, and
+`::warning` under report-mode; each of 19 targeted mutants turns it red. **Caller-visible:**
+more log output, and annotations on a run with CRITICAL findings. No input and no verdict
+changed; the one exit-code change is that crash path, which now follows `report-mode` like every
+other fault. The `v1` move newly-blocks nobody.
 
 **v1.15.3** — `a11y-audit` strips the sitemap's `<loc>` tags under BSD sed too. `audit.sh`
 extracted each sitemap URL with `sed 's#</\?loc>##g'`, and `\?` is a GNU BRE extension:
@@ -597,7 +601,7 @@ it was deleted in v1.15.0), and why the behavioural self-tests — not this lint
 are the load-bearing layer.
 
 The seven `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
-`console.log(…)` then `process.exit(…)`, but emit 1375–7415 bytes, at least eight
+`console.log(…)` then `process.exit(…)`, but emit 1375–7679 bytes, at least eight
 times under the pipe buffer, so they cannot truncate. Don't "fix" them.
 
 Repo-internal only: no caller consumes this lint, so changing it needs **no
