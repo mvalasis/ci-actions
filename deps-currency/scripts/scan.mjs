@@ -2,9 +2,10 @@
 // (npm/pnpm/composer), runs osv-scanner over each (NOT diff-scoped — that's security-baseline's
 // job), parses + floor-filters the advisories via the pure engine, also flags unpinned third-party
 // GitHub Actions that consume secrets, renders one report, optionally opens/auto-closes a
-// 'dependency advisories' tracking issue (linkcheck's lifecycle), and exits non-zero ONLY when
-// fail-on-vuln=true AND a >=floor advisory exists. The report goes to the job log as well as the
-// step summary, and each >=floor advisory is annotated (`::error file=<lockfile>,title=…::…`).
+// 'dependency advisories' tracking issue (linkcheck's lifecycle), reporting the outcome, and exits
+// non-zero ONLY when fail-on-vuln=true AND a >=floor advisory exists. The report goes to the job
+// log as well as the step summary, and each >=floor advisory is annotated
+// (`::error file=<lockfile>,title=…::…`).
 //
 // EGRESS (honest enumeration — see README §Sovereignty): NO lockfile body leaves the runner.
 //   - osv-scanner: sends package COORDINATES (name@version) to osv.dev — never your lockfile body.
@@ -133,7 +134,11 @@ function loadWorkflows() {
 }
 
 // ---------- issue lifecycle (gh CLI; mirrors linkcheck) ----------
+// Every outcome is pushed to `infra` and printed after the report as `### ℹ️ issue lifecycle`.
 function ghJSON(args) { const r = run(GH_BIN, args, { timeout: 60000 }); if (r.status !== 0) return null; try { return JSON.parse(r.stdout || 'null'); } catch { return null; } }
+// Why a gh call failed: its stderr, flattened and capped, or its exit status when it printed none. A
+// workflow without `issues: write` gets GitHub's 403, "Resource not accessible by integration".
+const ghFailure = (r) => safe(r.stderr.trim(), 120) || `exit ${r.status}`;
 function findOpenIssue(repo) {
   const list = ghJSON(['issue', 'list', '-R', repo, '--state', 'open', '--search', `${ISSUE_TITLE} in:title`, '--json', 'number,title']);
   if (!Array.isArray(list)) return null;
@@ -149,13 +154,13 @@ function manageIssue(decision, body) {
   const stamp = new Date().toISOString().slice(0, 10);
   if (decision.action === 'open') {
     const issueBody = `Scheduled dependency-currency sweep found advisories on **${repo}** (${stamp}).\n\nRun: ${runUrl}\n\nThis issue auto-closes when the next scheduled run is clean.\n\n${body}`;
-    if (num) { run(GH_BIN, ['issue', 'comment', String(num), '-R', repo, '--body', issueBody], { timeout: 60000 }); infra.push(`updated tracking issue #${num}`); }
-    else { const r = run(GH_BIN, ['issue', 'create', '-R', repo, '--title', ISSUE_TITLE, '--body', issueBody], { timeout: 60000 }); infra.push(r.status === 0 ? 'opened tracking issue' : `failed to open tracking issue: ${safe(r.stderr, 120)}`); }
+    if (num) { const r = run(GH_BIN, ['issue', 'comment', String(num), '-R', repo, '--body', issueBody], { timeout: 60000 }); infra.push(r.status === 0 ? `updated tracking issue #${num}` : `failed to update tracking issue #${num}: ${ghFailure(r)}`); }
+    else { const r = run(GH_BIN, ['issue', 'create', '-R', repo, '--title', ISSUE_TITLE, '--body', issueBody], { timeout: 60000 }); infra.push(r.status === 0 ? 'opened tracking issue' : `failed to open tracking issue: ${ghFailure(r)}`); }
   } else { // close
     if (num) {
       run(GH_BIN, ['issue', 'comment', String(num), '-R', repo, '--body', `Resolved — the scheduled deps-currency sweep is clean (0 advisories at/above floor **${FLOOR}**) as of ${stamp}.`], { timeout: 60000 });
       const r = run(GH_BIN, ['issue', 'close', String(num), '-R', repo], { timeout: 60000 });
-      infra.push(r.status === 0 ? `closed tracking issue #${num} (clean)` : `failed to close issue #${num}`);
+      infra.push(r.status === 0 ? `closed tracking issue #${num} — the sweep is clean` : `failed to close issue #${num}: ${ghFailure(r)}`);
     }
   }
 }
@@ -219,7 +224,13 @@ process.on('uncaughtException', (e) => {
   emit(lines.join('\n'));
 
   if (MANAGE_ISSUE) {
+    const mark = infra.length;
     try { manageIssue(decision, report); } catch (e) { /* issue mgmt must never fail the run by itself */ emit(`\n- ℹ️ issue management error (non-fatal): ${safe(String((e && e.message) || e), 160)}`); }
+    // manageIssue reports into `infra`, but the scanner notes above were rendered before it ran. Until
+    // v1.18.1 its outcome reached neither the log nor the summary, so a caller without `issues: write`
+    // got a green run, no tracking issue, and nothing saying the open failed.
+    const lifecycle = infra.slice(mark);
+    if (lifecycle.length) emit(['', '### ℹ️ issue lifecycle', ...lifecycle.map((m) => `- ${safe(m, 240)}`)].join('\n'));
   }
 
   // Last in the log: one annotation per at/above-floor advisory — `::error` when this run blocks,

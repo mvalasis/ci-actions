@@ -49,6 +49,28 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.18.1** *(tag not yet cut; lands with the next `v1` move)* — `deps-currency` prints what
+happened to its tracking issue. `scan.mjs` emitted the report, `### ℹ️ scanner notes` included,
+before it called `manageIssue`, which then pushed its outcome into the same notes list (`opened
+tracking issue`, `failed to open tracking issue: <gh stderr>`, `gh CLI not available — issue
+management skipped`, …) where nothing printed it. A caller whose workflow lacks `permissions:
+issues: write` got a green run, no tracking issue, and no line in the log or the summary saying the
+open had failed. Those notes now follow the report as a `### ℹ️ issue lifecycle` block, through the
+report's own `emit()` (job log first, then the step summary) and before the annotations; every line
+starts with the action's own text, and gh's stderr goes through `safe()`. The report itself is
+byte-identical: the old and new `scan.mjs`, run over 504 env combinations, match byte for byte under
+`manage-issue: false`, and with it on differ only by that block, with the same exit codes. Two notes
+the block would have printed wrong are fixed: an update of an already-open issue said `updated
+tracking issue #N` without checking that the comment went through (a refused comment now reads
+`failed to update tracking issue #N: <reason>`), and a failed close now names gh's reason.
+`scripts/selftest.mjs`'s end-to-end leg gains a stub `gh` that opens, updates and closes the issue
+and refuses each with a 403 whose second line plants a workflow command. Every note must reach the
+log and the summary exactly once, with the report unchanged, the same exit code and no new
+command-shaped line; 16 targeted mutants turn it red. **Caller-visible:** with `manage-issue` on
+(the default), a short `ℹ️ issue lifecycle` block after the report in the log and the summary. No
+input, verdict or exit code changed; a failed issue call still never fails the run. The `v1` move
+newly-blocks nobody.
+
 **v1.18.0** — `seo-aeo`, `contract-check`, `form-protection` and `deps-currency` print their report
 to the **job log** as well as the step summary, and annotate every CRITICAL: v1.16.0's
 `security-baseline` change, ported to the four siblings whose report still reached only
