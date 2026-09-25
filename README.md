@@ -56,7 +56,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.19.4** *(tag not yet cut; lands with the next `v1` move)* — `deps-currency` no longer reads
+**v1.19.4** — `deps-currency` no longer reads
 an osv-scanner that could not look as one that found nothing. `runOsv()` never read osv-scanner's
 exit status: it parsed an empty stdout as `{}` and noted an unparseable one as "treated as clean".
 osv-scanner v2.4.0 prints its JSON report only on exit 0 (no vulnerabilities) and 1 (found some).
@@ -115,7 +115,7 @@ workflow files already expect: poihtikesfones says an OSV API outage "reddens ma
 ilektrologika-astro documents that it did not. No input changed. On the measured state the `v1`
 move newly-blocks nobody.
 
-**v1.19.3** *(tag not yet cut; lands with the next `v1` move)* — `test-suite` prints its job log
+**v1.19.3** *(anchor `03d933b`, shipped with the v1.19.4 move; `v1` never pointed here)* — `test-suite` prints its job log
 once on a local run, and no longer crashes there on Linux. `run.mjs` appended the step summary to
 `$GITHUB_STEP_SUMMARY`, or to `/dev/stdout` when it was unset, unguarded. On Linux, opening
 `/dev/stdout` re-opens fd 1 and fails with ENXIO when stdout is a socket, which is what node's
