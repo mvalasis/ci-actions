@@ -56,7 +56,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.19.6** *(tag not yet cut; lands with the next `v1` move)* — `security-baseline`'s verified
+**v1.19.6** — `security-baseline`'s verified
 probe looks on a `pull_request` run again, and walks the PR's own commits. Since the v1.19.1 move
 every PR run FAULTed (`trufflehog verified-live secrets — trufflehog exit 1`) while every push
 passed. v1.19.0 did not break the leg, it exposed it. trufflehog clones `file://.` and resolves
