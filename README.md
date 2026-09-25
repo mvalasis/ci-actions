@@ -80,7 +80,7 @@ A local run prints the job log once. No input or verdict changed; the one exit-c
 unwritable summary, which now exits under `fail-on-fail` like every other fault. The `v1` move
 newly-blocks nobody.
 
-**v1.19.2** *(tag not yet cut; lands with the next `v1` move)* — `deps-currency` tells a failed
+**v1.19.2** — `deps-currency` tells a failed
 issue lookup apart from "no issue open". `findOpenIssue` read the open tracking issue through a
 helper that returned `null` on any gh failure (a non-zero exit, or output that was not JSON), which
 is also what it returned when no issue was open. A clean sweep whose lookup failed therefore left
