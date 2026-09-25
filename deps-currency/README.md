@@ -10,7 +10,7 @@ not a diff. Because advisories land **after** code does (a CVE is published agai
 already shipped), a diff gate alone can never catch them; this sweep does.
 
 **Report-mode-first:** `fail-on-vuln` defaults **false**, so wiring a caller never newly-blocks a
-green repo. It surfaces findings in the job summary and a tracking issue; a caller flips to
+green repo. It surfaces findings in the job log, the job summary and a tracking issue; a caller flips to
 blocking only after it has cleared its backlog.
 
 ## What it does
@@ -28,12 +28,15 @@ blocking only after it has cleared its backlog.
   supply-chain risk that belongs in a currency sweep. **WARN-only — never blocks.** *Third-party*
   means "outside the **first-party owner set**" — see below; our own `@v1`-pinned shared actions are
   first-party by policy and are not flagged.
-- Renders one report to the job summary, and (if `manage-issue`) opens/updates a single
+- Renders one report to the job log and the job summary (see
+  [Where to read the result](#where-to-read-the-result--job-log-annotations-step-summary)), and (if
+  `manage-issue`) opens/updates a single
   **`deps-currency: dependency advisories`** tracking issue, auto-closing it when the next run is
-  clean — the same issue lifecycle as `linkcheck`.
+  clean — the same issue lifecycle as `linkcheck`. What happened to the issue (opened, updated,
+  closed, or the error that stopped it) follows the report in both places.
 - Exits non-zero **only** when `fail-on-vuln: true` **and** an advisory at/above the floor exists.
 - **A scanner fault is not a finding.** If the scan itself crashes, the report says so
-  (`❌ deps-currency crashed: …` in the job summary) and the exit code follows the same
+  (`❌ deps-currency crashed: …` in the job log and the job summary) and the exit code follows the same
   report-mode-first rule: **0** under the default, **1** only under `fail-on-vuln: true`. A broken
   scanner therefore never newly-blocks a report-mode caller — matching every sibling action. (This
   guard was dead code from the action's first commit until 2026-08-05: it was registered *below* the
@@ -82,7 +85,7 @@ jobs:
 | `working-directory` | `.` | Directory scanned recursively (skips `node_modules`/`vendor`/`dist`/`.git`). |
 | `ecosystems` | `auto` | `auto` (enable npm/composer by lockfile presence) or an explicit `npm`/`composer`/`"npm composer"`. Unknown values are reported + ignored. |
 | `severity-floor` | `HIGH` | Minimum advisory severity that counts toward the issue / optional block (`CRITICAL`/`HIGH`/`MODERATE`/`LOW`; CVSS-bucketed, no-CVSS → HIGH). |
-| `manage-issue` | `true` | Open/auto-close the `deps-currency: dependency advisories` issue (needs `issues: write`). |
+| `manage-issue` | `true` | Open/auto-close the `deps-currency: dependency advisories` issue (needs `issues: write`). A failed issue call never fails the run; the `ℹ️ issue lifecycle` block after the report says what happened. |
 | `fail-on-vuln` | `false` | `true` = BLOCK when a ≥floor advisory exists. Default `false` (report-only). Unpinned-action advisories never block regardless. |
 | `issue-title` | `deps-currency: dependency advisories` | Stable title so the same issue is reused / closed. |
 | `osv-version` | `v2.4.0` | Pinned osv-scanner release (mirrors `security-baseline`). |
@@ -137,6 +140,40 @@ with:
 `fail-on-vuln` is per-caller, so one repo can enforce while the shared default stays conservative —
 the same ratchet pattern as `security-baseline`'s `critical-checks`.
 
+## Where to read the result — job log, annotations, step summary
+
+Since **v1.18.0** the report is in three places, so a scheduled run's findings never need a browser:
+
+- **Job log** — the whole report, the same lines as the step summary, byte for byte:
+  `gh run view <run-id> --log-failed` (or `--log`). Before v1.18.0 the log carried none of it.
+- **Annotations** — one per advisory at/above the floor (exactly what `fail-on-vuln` blocks on), at
+  the end of the log: `::error file=<lockfile>,title=deps-currency <SEVERITY>::<SEVERITY>
+  <package>@<version> <advisory ids> at <lockfile>`. `<lockfile>` is relative to the workspace (the
+  repository root) — osv-scanner reports absolute runner paths, and `file=` means a file of your
+  repo — and a lockfile outside the workspace gets no `file=`. No `line=`: osv-scanner reports none.
+  `gh run view <run-id>` lists them under ANNOTATIONS; the API has them at
+  `gh api repos/<owner>/<repo>/check-runs/<job-id>/annotations`. Report-mode (the default,
+  `fail-on-vuln: false`) annotates at `::warning`; `fail-on-vuln: true` at `::error`. GitHub keeps
+  10 per step; past that, one log line counts the rest (the report lists every advisory either way).
+  Below-floor advisories and unpinned-action advisories are never annotated.
+- **Step summary** — unchanged: the same report, rendered.
+- **Issue lifecycle** — with `manage-issue` on, a `### ℹ️ issue lifecycle` block follows the report
+  in the job log and the step summary, before the annotations: `opened tracking issue`,
+  `updated tracking issue #N`, `closed tracking issue #N — the sweep is clean`, or what stopped it,
+  with gh's own error — `failed to open tracking issue: …` carrying GitHub's 403 *Resource not
+  accessible by integration* when the workflow lacks `permissions: issues: write`. A failed issue
+  call never changes the exit code. Before v1.18.1 these lines were computed but never printed: a
+  workflow without `issues: write` got a green run, no issue, and no word why.
+
+Tool output never reaches the start of a log line, where the runner would read it as a workflow
+command: every osv-scanner string (a package name, a version, an advisory id, a path) and gh's
+error text goes through `safe()`, which strips CR/LF and the markdown and bracket characters, and
+every report line starts with the action's own text. The one bracket `safe()` writes back, in its
+`[:]//` URL defang, can spell `##[:]`, which the runner's legacy `##[…]` parser reads as a command
+named `:` — none exists.
+Annotation values are escaped (`%`, CR, LF, and `:`/`,` in properties), so a hostile path cannot
+rewrite one. Off Actions (a local run) the report prints once to stdout, with no annotations.
+
 ## Sovereignty — honest egress enumeration
 
 The selling point is air-gapped, EU-runner-safe operation. To be precise rather than overclaim
@@ -181,7 +218,23 @@ action ∪ declared extras, empty-`action_repository` fallback, case-insensitivi
 report-spoofing/disclosure guard. It also runs `scan.mjs` **end-to-end** with a synthetic env and
 stub `osv-scanner`/`gh` paths — still offline — because the owner-set unit tests cannot see a name
 drift between `action.yml`'s `env:` block and the keys `scan.mjs` reads, and that drift alone would
-restore the 2026-08 defect with every other assertion green. Runs in CI on `deps-currency/**`.
+restore the 2026-08 defect with every other assertion green. A second **end-to-end** leg runs
+`scan.mjs` against a stub `osv-scanner` that answers, as v2 does, with absolute paths — one advisory
+planting a workflow command in its package name, one outside the workspace, one below the floor —
+and asserts the job log carries the whole report byte for byte, one annotation per at/above-floor
+advisory with a workspace-relative `file=` (none for the LOW or the unpinned action, none outside
+the workspace), no planted command at the start of a line, a local run printing once with no
+commands (stdout a socket, as node's child_process gives it — the case that crashed the old
+`appendFileSync('/dev/stdout')` fallback on Linux), report-mode annotating as `::warning`, and an
+unwritable summary still reaching the log under the caller's exit setting. 23 targeted mutants each
+turn it red. The same leg then drives the tracking issue through a stub `gh`: opened, updated and
+closed, each also refused with a 403 whose second line plants a workflow command, plus no `gh`, no
+`GITHUB_REPOSITORY`, and a clean run with nothing to close. Each note must reach the log and the
+summary exactly once, after the report and before the annotations, with the report byte-identical
+to a `manage-issue: false` run, the same exit code and no new command-shaped line; a summary made
+unwritable while the issue opens must still leave the block in the log. 16 targeted mutants turn
+that part red; dropping one of the two `safe()` passes a note goes through is equivalent (the other
+still flattens it). Runs in CI on `deps-currency/**`.
 
 > The owner-set fixtures deliberately use **different** literals for the caller's owner and the
 > action's owner (`creme-ypsilon` vs `mvalasis`). The original fixture used the same literal for
@@ -195,6 +248,8 @@ restore the 2026-08 defect with every other assertion green. Runs in CI on `deps
 decisions, first-party owner-set resolution, unpinned-action text scan, spoof-safe report rendering;
 unit-tested by `selftest.mjs`).
 `scripts/scan.mjs` — CLI: discovers lockfiles, runs osv-scanner over the full tree, normalizes its
-output into findings, filters + decides via the engine, renders to `GITHUB_STEP_SUMMARY`, manages
-the tracking issue, exits non-zero only on a ≥floor advisory under `fail-on-vuln`. **Zero npm
+output into findings, filters + decides via the engine, renders to `GITHUB_STEP_SUMMARY` and the
+job log, manages the tracking issue and reports the outcome to both, annotates each ≥floor advisory
+(`annotations()` in `engine.mjs`),
+exits non-zero only on a ≥floor advisory under `fail-on-vuln`. **Zero npm
 dependencies** (pure Node 22). osv-scanner is a pinned binary installed in `action.yml`.

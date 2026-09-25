@@ -1,9 +1,16 @@
 // Offline self-test for the seo-aeo check engine. No network — feeds fixture HTML /
-// robots.txt / llms.txt to the pure analyzers and asserts the findings. Run locally or
-// in CI (`node scripts/selftest.mjs`); exits non-zero on any regression.
+// robots.txt / llms.txt to the pure analyzers and asserts the findings; then runs the real
+// check.mjs against a LOCAL node:http server (127.0.0.1 only) to assert what reaches the job
+// log. Run locally or in CI (`node scripts/selftest.mjs`); exits non-zero on any regression.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   SEV, T0_CHECKS, T1_CHECKS, analyzePage, analyzeRobots, analyzeLlms, analyzeSitemap, analyzeRedirects,
-  collectLdNodes, typesOf,
+  collectLdNodes, typesOf, safe, escapeData, escapeProperty, annotation, annotations,
 } from './checks.mjs';
 
 let failed = 0;
@@ -179,6 +186,135 @@ console.log('\n# severity-tier contract');
 check('T0 core is exactly {http-200,title-present,h1-present}', [...T0_CHECKS].sort().join(',') === 'h1-present,http-200,title-present');
 check('promotable T1 set excludes T0 ids', ![...T0_CHECKS].some((c) => T1_CHECKS.has(c)));
 check('noindex is promotable (T1), title-length is not', T1_CHECKS.has('noindex') && !T1_CHECKS.has('title-length'));
+
+console.log('\n# report + annotation encoding (pure)');
+{
+  check('safe() strips CR/LF and markdown-structural chars, caps length', safe('a\r\n`|<b>[c]', 5) === 'a bc' && safe('x'.repeat(300)).length === 220, JSON.stringify(safe('a\r\n`|<b>[c]', 5)));
+  check('escapeData encodes % CR LF', escapeData('a%b\r\nc') === 'a%25b%0D%0Ac');
+  check('escapeProperty also encodes : and ,', escapeProperty('a:b,c%') === 'a%3Ab%2Cc%25');
+  const x = { id: 'h1-present', sev: SEV.CRIT, msg: 'no <h1> on the page', where: 'https://example.com/a/' };
+  check('annotation = title + `<check> at <url>`, no file=/line= (a URL is not a repo file)', annotation(x) === '::error title=seo-aeo h1-present::h1-present at https://example.com/a/', annotation(x));
+  check('annotation never carries msg (page text stays in the report)', !annotation(x).includes('no <h1>'));
+  check("annotation level is the caller's", annotation(x, 'warning').startsWith('::warning title=seo-aeo h1-present::'));
+  check('no location → just the check id', annotation({ id: 'no-urls-resolved', sev: SEV.CRIT, where: '' }) === '::error title=seo-aeo no-urls-resolved::no-urls-resolved');
+  // A hostile location stays ONE command: a line break would start a second one (stop-commands),
+  // a raw % would be unescaped by the runner, and [ ] would let the legacy `##[cmd]` form in.
+  const evil = annotation({ ...x, where: 'https://e.test/p%0A\n::stop-commands::tok\r##[error]x' });
+  check('a hostile location stays ONE line', !/[\r\n]/.test(evil), JSON.stringify(evil));
+  check('a hostile location cannot add a property (title is the only one)', /^::error title=seo-aeo h1-present::/.test(evil) && evil.split('::').length === 5, JSON.stringify(evil));
+  check('…its % is escaped and its brackets are gone', evil.includes('p%250A') && !evil.includes('##['), JSON.stringify(evil));
+  const many = Array.from({ length: 12 }, (_, i) => ({ ...x, where: `https://example.com/${i}/` }));
+  const warnOnly = { id: 'noindex', sev: SEV.WARN, msg: 'm', where: 'https://example.com/w/' };
+  const out = annotations([...many, warnOnly]);
+  check("annotations: 10 CRITICALs (GitHub's per-step cap) + one overflow line", out.length === 11 && out.slice(0, 10).every((l) => l.startsWith('::error ')) && /^seo-aeo: 2 more critical/.test(out[10]), `got ${out.length}`);
+  check('annotations: a WARN finding is never annotated', !out.some((l) => l.includes('noindex')) && annotations([warnOnly]).length === 0);
+}
+
+console.log('\n# check.mjs end to end — the job log carries the report; CRITICALs annotate');
+{
+  // check.mjs runs a top-level IIFE, so it is exercised as a PROCESS against a local server. The
+  // hostile page plants workflow commands where only check.mjs's safe() stands between them and the
+  // start of a log line: html-lang and canonical-valid messages carry the raw attribute value.
+  const HOSTILE = '<!doctype html><html lang="en&#10;::error title=forged::pwned-lang"><head><meta charset="utf-8">'
+    + '<title>Hostile fixture page</title><link rel="canonical" href="rel&#10;::warning::pwned-canon"></head>'
+    + '<body><main><p>no heading here</p></main></body></html>';
+  const OK = (self) => '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+    + `<title>A clean fixture page</title><link rel="canonical" href="${self}">`
+    + '<meta name="description" content="A perfectly reasonable meta description, long enough for a snippet and short enough to fit.">'
+    + '</head><body><main><h1>Clean heading</h1></main></body></html>';
+  const server = createServer((req, res) => {
+    const base = `http://${req.headers.host}`;
+    if (req.url === '/ok/') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(OK(`${base}/ok/`)); return; }
+    if (req.url === '/hostile/') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(HOSTILE); return; }
+    if (req.url === '/empty-sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); res.end('<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>'); return; }
+    res.writeHead(404, { 'content-type': 'text/html' }); res.end('<html><head><title>404</title></head><body><h1>Not found</h1></body></html>');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const BASE = `http://127.0.0.1:${server.address().port}`;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'seo-e2e-'));
+  const summaryPath = path.join(tmp, 'summary.md');
+  // MUST be async (spawn, not spawnSync): the fixture server lives in THIS process. The env is built
+  // from scratch so a CI runner's own GITHUB_ACTIONS / GITHUB_STEP_SUMMARY never leak into a case.
+  const run = (extra) => new Promise((resolve) => {
+    try { fs.rmSync(summaryPath, { force: true }); } catch { /* fresh file per run */ }
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./check.mjs', import.meta.url))], {
+      env: { PATH: process.env.PATH, HOME: tmp, TMPDIR: tmp, ...extra }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    const killer = setTimeout(() => child.kill('SIGKILL'), 120000);
+    child.on('close', (status) => {
+      clearTimeout(killer);
+      const summary = fs.existsSync(summaryPath) && fs.statSync(summaryPath).isFile() ? fs.readFileSync(summaryPath, 'utf8') : '';
+      resolve({ status, stdout, stderr, summary });
+    });
+  });
+  // A line the runner would read as a command: `::` after leading whitespace, or `##[` anywhere.
+  const commands = (text) => text.split('\n').filter((l) => /^\s*::/.test(l) || l.includes('##['));
+  const why = (r) => `exit ${r.status}, ${r.stdout.length} B stdout, stderr ${JSON.stringify(r.stderr.split('\n').find((l) => l.trim()) || '')}`;
+  const HEADER = '## 🔎 seo-aeo';
+  const once = (r) => r.stdout.split(HEADER).length === 2 && !r.stdout.includes('crashed');
+  const URLS = `${BASE}/gone/ ${BASE}/hostile/ ${BASE}/ok/`;
+  const expected = (level, promoted) => [
+    `::${level} title=seo-aeo http-200::http-200 at ${BASE}/gone/`,
+    `::${level} title=seo-aeo h1-present::h1-present at ${BASE}/hostile/`,
+    ...(promoted ? [`::${level} title=seo-aeo html-lang::html-lang at ${BASE}/hostile/`] : []),
+  ];
+  try {
+    // (A) On Actions, enforcing, one T1 promoted: summary + job log + one ::error per CRITICAL.
+    const a = await run({ URLS, GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: 'html-lang' });
+    check('Actions run: two T0 + one promoted T1 BLOCK (exit 1)', a.status === 1, why(a));
+    check('the step summary is the report, verdict included', a.summary.startsWith(HEADER) && a.summary.includes('\nBLOCKED — 3 critical check(s) failed.'), JSON.stringify(a.summary.slice(-120)));
+    check('the job log carries the WHOLE report, byte for byte', a.summary.length > 0 && a.stdout.includes(a.summary));
+    check('the report reaches the log once, not twice', once(a), why(a));
+    check('the fixtures reached the report (the hostile page, both planted values, defused)',
+      a.stdout.includes(`${BASE}/hostile/`) && a.stdout.includes('pwned-lang') && a.stdout.includes('pwned-canon'));
+    check('one ::error per CRITICAL (the promoted T1 included), none for a WARN, nothing else command-shaped',
+      JSON.stringify(commands(a.stdout)) === JSON.stringify(expected('error', true)), JSON.stringify(commands(a.stdout)));
+    check('annotations stay out of the step summary', commands(a.summary).length === 0);
+
+    // (B) Off Actions: stdout is the only output — the report prints once, with no commands. spawn
+    // hands the child a SOCKET as stdout: the case that crashes an `appendFileSync('/dev/stdout')`
+    // fallback on Linux (ENXIO) with nothing printed and an exit code that still looks like a verdict.
+    for (const [label, extra] of [['local run', {}], ['GITHUB_STEP_SUMMARY=/dev/stdout (the local idiom)', { GITHUB_STEP_SUMMARY: '/dev/stdout' }]]) {
+      const b = await run({ URLS, FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: 'html-lang', ...extra });
+      check(`${label}: the report prints exactly once, verdict included, no crash`, b.status === 1 && once(b) && b.stdout.includes('\nBLOCKED — 3 critical check(s) failed.'), why(b));
+      check(`${label}: no workflow commands`, b.stdout.length > 0 && commands(b.stdout).length === 0, why(b));
+    }
+
+    // (C) report-only: the T0s annotate as ::warning, the (unpromoted) WARN not at all, exit 0.
+    const c = await run({ URLS, GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'false' });
+    check('report-only: exit 0', c.status === 0, why(c));
+    check('report-only: the criticals annotate as ::warning, a WARN never', JSON.stringify(commands(c.stdout)) === JSON.stringify(expected('warning', false)), JSON.stringify(commands(c.stdout)));
+    check('report-only: the log still carries the whole report', c.summary.length > 0 && c.stdout.includes(c.summary) && c.summary.includes('report-only — 2 critical check(s) would BLOCK'));
+
+    // (D) The summary sink itself fails: the report is already in the log (it is echoed first), the
+    // fault is named there, and the exit is the caller's setting — our fault never blocks report-only.
+    const sinkDir = path.join(tmp, 'summary-is-a-dir');
+    fs.mkdirSync(sinkDir);
+    const d = await run({ URLS, GITHUB_STEP_SUMMARY: sinkDir, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'false' });
+    check('unwritable summary: the report still reaches the job log', d.stdout.includes(HEADER) && d.stdout.includes('report-only — 2 critical check(s) would BLOCK'), why(d));
+    check('unwritable summary: the fault is named in the log', /seo-aeo crashed: .*EISDIR/.test(d.stdout), why(d));
+    check('unwritable summary: the crash note is ONE line (no stack frame starts a log line)', !/^\s+at /m.test(d.stdout), why(d));
+    check('unwritable summary: the crash re-flush echoes only the new line, not the report again', d.stdout.split(HEADER).length === 2);
+    check('unwritable summary under report-only: exit 0, not an unhandled throw', d.status === 0, why(d));
+
+    // (E) The early exits — two of them run before check.mjs's first await, i.e. while the module is
+    // still evaluating, so anything they touch must already be initialized (no TDZ crash).
+    const e = await run({});
+    check('no input: skipped, exit 0, printed once, no crash', e.status === 0 && once(e) && e.stdout.includes('nothing to check (skipped)'), why(e));
+    const f = await run({ URLS: ' ', GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'true' });
+    check('input resolving to no URL: BLOCKED (exit 1), printed once, no crash', f.status === 1 && once(f) && f.stdout.includes('BLOCKED — gate checked nothing.'), why(f));
+    check('…annotated as the one CRITICAL it counts', JSON.stringify(commands(f.stdout)) === JSON.stringify(['::error title=seo-aeo no-urls-resolved::no-urls-resolved']), JSON.stringify(commands(f.stdout)));
+    const g = await run({ SITEMAP_URL: `${BASE}/empty-sitemap.xml`, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'false' });
+    check('an empty sitemap: report-only exit 0, annotated at the sitemap as ::warning', g.status === 0
+      && JSON.stringify(commands(g.stdout)) === JSON.stringify([`::warning title=seo-aeo no-urls-resolved::no-urls-resolved at ${BASE}/empty-sitemap.xml`]), JSON.stringify(commands(g.stdout)));
+  } finally {
+    server.close();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
 
 console.log(`\n${failed === 0 ? '✅ all self-tests passed' : `❌ ${failed} self-test(s) FAILED`}`);
 process.exit(failed === 0 ? 0 : 1);

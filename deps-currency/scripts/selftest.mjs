@@ -3,9 +3,11 @@
 // to the pure engine and asserts: severity-floor filtering, issue open/close decision, clean→close,
 // block decision (fail-on-vuln), unpinned-action detection, the first-party OWNER-SET derivation
 // (caller ∪ action ∪ declared extras — the 2026-08 ownership split), and the
-// report-spoofing/disclosure guard. Run: node scripts/selftest.mjs (also runs in CI). Exits
-// non-zero on any regression — the action's own regression guard, mirroring
-// security-baseline/selftest.mjs.
+// report-spoofing/disclosure guard; then runs the real scan.mjs against a stub osv-scanner and a
+// stub gh to assert what reaches the job log (the report, one annotation per at/above-floor
+// advisory, and what happened to the tracking issue).
+// Run: node scripts/selftest.mjs (also runs in CI). Exits non-zero on any regression — the
+// action's own regression guard, mirroring security-baseline/selftest.mjs.
 //
 // FIXTURE RULE learned from that split (see the "ownership split" block below): when a fixture
 // models a RELATIONSHIP between two values, the two must be DIFFERENT literals. The original
@@ -20,7 +22,7 @@ import { spawnSync } from 'node:child_process';
 import {
   SEV, normalizeFloor, bucketFor, atOrAboveFloor, parseOsv, filterByFloor,
   scanUnpinnedActions, normalizeOwners, resolveFirstPartyOwners, issueDecision, blockDecision,
-  renderReport, safe,
+  renderReport, safe, escapeData, escapeProperty, repoRelative, annotation, annotations,
 } from './engine.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -385,7 +387,7 @@ console.log('\n# crash guard (real scan.mjs, injected fault)');
           encoding: 'utf8',
           env: { ...process.env, GITHUB_STEP_SUMMARY: summary, FAIL_ON_VULN: String(failOnVuln), MANAGE_ISSUE: 'false' },
         });
-        return { status: r.status, summary: fs.readFileSync(summary, 'utf8') };
+        return { status: r.status, summary: fs.readFileSync(summary, 'utf8'), stdout: r.stdout || '' };
       };
 
       const report = crash(false);
@@ -402,9 +404,181 @@ console.log('\n# crash guard (real scan.mjs, injected fault)');
         enforce.status === 1, `(exit ${enforce.status})`);
       check('fail-on-vuln crash is reported too',
         enforce.summary.includes('deps-currency crashed'));
+      check('…and in the job log, not only the step summary',
+        report.stdout.includes('deps-currency crashed') && report.stdout.includes('injected scanner fault'),
+        `(got ${JSON.stringify(report.stdout.slice(0, 120))})`);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  }
+}
+
+console.log('\n# annotation encoding + lockfile location (pure)');
+{
+  check('escapeData encodes % CR LF', escapeData('a%b\r\nc') === 'a%25b%0D%0Ac');
+  check('escapeProperty also encodes : and ,', escapeProperty('a:b,c%') === 'a%3Ab%2Cc%25');
+  const ws = '/home/runner/work/r/r';
+  check('repoRelative: an absolute osv path under the workspace → repo-relative', repoRelative(`${ws}/bun.lock`, { workdir: ws, workspace: ws }) === 'bun.lock');
+  check('repoRelative: a path relative to a sub-directory workdir → repo-relative', repoRelative('pnpm-lock.yaml', { workdir: `${ws}/apps/web`, workspace: ws }) === 'apps/web/pnpm-lock.yaml');
+  check('repoRelative: outside the workspace, the workspace itself, or none → "" (no file=)',
+    repoRelative('/opt/elsewhere/composer.lock', { workdir: ws, workspace: ws }) === '' && repoRelative(ws, { workdir: ws, workspace: ws }) === '' && repoRelative('', { workdir: ws, workspace: ws }) === '');
+  const crit = parsed.find((f) => f.name === 'lodash');
+  const want = '::error file=package-lock.json,title=deps-currency CRITICAL::CRITICAL lodash@4.17.4 GHSA-jf85-cpcp-j695, CVE-2019-10744 at package-lock.json';
+  check('annotation = file + title + `<SEVERITY> <pkg>@<version> <ids> at <lockfile>`', annotation({ ...crit, file: 'package-lock.json' }) === want, annotation({ ...crit, file: 'package-lock.json' }));
+  check("annotation level is the caller's", annotation({ ...crit, file: 'package-lock.json' }, 'warning').startsWith('::warning file='));
+  check('no workspace-relative file → no file=, the raw source names the location',
+    annotation({ ...crit, source: '/opt/elsewhere/package-lock.json', file: '' }) === '::error title=deps-currency CRITICAL::CRITICAL lodash@4.17.4 GHSA-jf85-cpcp-j695, CVE-2019-10744 at /opt/elsewhere/package-lock.json');
+  // A HOSTILE lockfile path must stay one command with exactly the two properties we set, and a
+  // hostile package name must stay in the data. Unescaped, the `,` would add `line=1` and the
+  // newline would start a second command that stops command processing.
+  const evil = annotation({ ...crit, name: 'x%0A\n::stop-commands::tok', file: 'x.lock,line=1::forged\n::stop-commands::tok' });
+  const props = (evil.match(/^::error (.*?)::/) || [])[1] || '';
+  check('a hostile path or package name stays ONE line', !/[\r\n]/.test(evil), JSON.stringify(evil));
+  check("a % in the data is escaped (the runner would decode a raw %0A into a line break)", evil.includes('x%250A') && !evil.includes('x%0A'), JSON.stringify(evil));
+  check('a hostile path cannot add or rewrite a property', props.split(',').map((kv) => kv.split('=')[0]).join(',') === 'file,title', JSON.stringify(props));
+  check('a hostile path is carried escaped, not dropped', props.startsWith('file=x.lock%2Cline=1%3A%3Aforged%0A%3A%3Astop-commands%3A%3Atok,title='), JSON.stringify(props));
+  const many = Array.from({ length: 12 }, (_, i) => ({ ...crit, name: `pkg-${i}`, file: 'package-lock.json' }));
+  const out = annotations(many);
+  check("annotations: 10 (GitHub's per-step cap) + one overflow line", out.length === 11 && out.slice(0, 10).every((l) => l.startsWith('::error ')) && /^deps-currency: 2 more advisory/.test(out[10]), `got ${out.length}`);
+  check('annotations: none for an empty floor set', annotations([]).length === 0);
+}
+
+console.log('\n# scan.mjs end to end — the job log carries the report; at/above-floor advisories annotate');
+{
+  // A workspace with a lockfile and a workflow; a stub osv-scanner answering as osv-scanner v2 does,
+  // with ABSOLUTE runner paths. One advisory is planted with a workflow command in its package name,
+  // one lives outside the workspace, one sits below the floor. Offline: no gh (manage-issue off).
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'deps-currency-e2e-'));
+  try {
+    fs.writeFileSync(path.join(tmp, 'package-lock.json'), '{}\n');
+    fs.mkdirSync(path.join(tmp, '.github', 'workflows'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.github', 'workflows', 'deploy.yml'), 'jobs:\n  a:\n    steps:\n      - uses: oven-sh/setup-bun@v2.2.0\n        env:\n          T: ${{ secrets.CF_API_TOKEN }}\n');
+    const osv = { results: [
+      { source: { path: path.join(tmp, 'package-lock.json'), type: 'lockfile' }, packages: [
+        { package: { name: 'lodash', version: '4.17.4', ecosystem: 'npm' }, groups: [{ ids: ['GHSA-jf85-cpcp-j695', 'CVE-2019-10744'], max_severity: '9.8' }] },
+        { package: { name: 'evil\n::error title=forged::pwned-name', version: '1.0.0', ecosystem: 'npm' }, groups: [{ ids: ['GHSA-xxxx-yyyy-zzzz'], max_severity: '7.5' }] },
+        { package: { name: 'tough-cookie', version: '2.3.2', ecosystem: 'npm' }, groups: [{ ids: ['GHSA-72xf-g2v4-qvf3'], max_severity: '3.1' }] },
+      ] },
+      { source: { path: '/opt/outside-the-workspace/composer.lock', type: 'lockfile' }, packages: [
+        { package: { name: 'guzzlehttp/guzzle', version: '6.5.0', ecosystem: 'Packagist' }, groups: [{ ids: ['GHSA-w248-ffj2-4v5q'], max_severity: '8.1' }] },
+      ] },
+    ] };
+    const stub = path.join(tmp, 'osv-scanner-stub');
+    // OSV_STUB_CLEAN answers with no advisories — a clean sweep, for the issue-close cases below.
+    fs.writeFileSync(stub, `#!/bin/sh\n[ "$1" = "--version" ] && { echo 0.0.0-stub; exit 0; }\n[ -n "$OSV_STUB_CLEAN" ] && { echo '{"results":[]}'; exit 0; }\ncat <<'JSON'\n${JSON.stringify(osv)}\nJSON\n`);
+    fs.chmodSync(stub, 0o755);
+    const summaryPath = path.join(tmp, 'summary.md');
+    // The env is built from scratch so a CI runner's own GITHUB_ACTIONS / GITHUB_STEP_SUMMARY never
+    // leak into a case.
+    const scan = (extra) => {
+      try { fs.rmSync(summaryPath, { force: true }); } catch { /* fresh file per run */ }
+      const r = spawnSync(process.execPath, [path.join(HERE, 'scan.mjs')], {
+        encoding: 'utf8', timeout: 60000,
+        env: {
+          PATH: process.env.PATH, HOME: tmp, TMPDIR: tmp, WORKING_DIRECTORY: tmp, GITHUB_WORKSPACE: tmp,
+          OSV_BIN: stub, GH_BIN: path.join(tmp, 'no-such-gh'), MANAGE_ISSUE: 'false',
+          GITHUB_REPOSITORY: 'creme-ypsilon/lampakia-astro', ACTION_REPOSITORY: 'mvalasis/ci-actions', ...extra,
+        },
+      });
+      const summary = fs.existsSync(summaryPath) && fs.statSync(summaryPath).isFile() ? fs.readFileSync(summaryPath, 'utf8') : '';
+      return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', summary };
+    };
+    // A line the runner would read as a command: `::` after leading whitespace, or `##[` anywhere.
+    const commands = (text) => text.split('\n').filter((l) => /^\s*::/.test(l) || l.includes('##['));
+    const why = (r) => `exit ${r.status}, ${r.stdout.length} B stdout, stderr ${JSON.stringify(r.stderr.split('\n').find((l) => l.trim()) || '')}`;
+    const HEADER = '## 📦 deps-currency';
+    const once = (r) => r.stdout.split(HEADER).length === 2 && !r.stdout.includes('crashed');
+    const expected = (level) => [
+      `::${level} file=package-lock.json,title=deps-currency CRITICAL::CRITICAL lodash@4.17.4 GHSA-jf85-cpcp-j695, CVE-2019-10744 at package-lock.json`,
+      `::${level} file=package-lock.json,title=deps-currency HIGH::HIGH evil ::error title=forged::pwned-name@1.0.0 GHSA-xxxx-yyyy-zzzz at package-lock.json`,
+      `::${level} title=deps-currency HIGH::HIGH guzzlehttp/guzzle@6.5.0 GHSA-w248-ffj2-4v5q at /opt/outside-the-workspace/composer.lock`,
+    ];
+
+    // (A) On Actions, fail-on-vuln: summary + job log + one ::error per at/above-floor advisory.
+    const a = scan({ GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', FAIL_ON_VULN: 'true' });
+    check('Actions run: three at/above-floor advisories BLOCK (exit 1)', a.status === 1, why(a));
+    check('the step summary is the report, verdict included', a.summary.startsWith(HEADER) && a.summary.includes('\nBLOCKED — 3 dependency advisory(ies) at/above floor **HIGH**'), JSON.stringify(a.summary.slice(-200)));
+    check('the job log carries the WHOLE report, byte for byte', a.summary.length > 0 && a.stdout.includes(a.summary));
+    check('the report reaches the log once, not twice', once(a), why(a));
+    check('the fixtures reached the report (the planted name flattened; the unpinned action; the LOW counted)',
+      a.stdout.includes('evil ::error title=forged::pwned-name') && a.stdout.includes('oven-sh/setup-bun@v2.2.0') && a.stdout.includes('advisories in tree: **4** total'), why(a));
+    check('one ::error per at/above-floor advisory — none for the LOW or the unpinned action, nothing else command-shaped',
+      JSON.stringify(commands(a.stdout)) === JSON.stringify(expected('error')), JSON.stringify(commands(a.stdout)));
+    check('annotations stay out of the step summary', commands(a.summary).length === 0);
+
+    // (B) Off Actions: stdout is the only output — the report prints once, with no commands.
+    // spawnSync hands the child a SOCKET as stdout: the case that crashes an
+    // `appendFileSync('/dev/stdout')` fallback on Linux (ENXIO) with nothing printed.
+    for (const [label, extra] of [['local run', {}], ['GITHUB_STEP_SUMMARY=/dev/stdout (the local idiom)', { GITHUB_STEP_SUMMARY: '/dev/stdout' }]]) {
+      const b = scan({ FAIL_ON_VULN: 'true', ...extra });
+      check(`${label}: the report prints exactly once, verdict included, no crash`, b.status === 1 && once(b) && b.stdout.includes('\nBLOCKED — 3 dependency advisory(ies)'), why(b));
+      check(`${label}: no workflow commands`, b.stdout.length > 0 && commands(b.stdout).length === 0, why(b));
+    }
+
+    // (C) report-mode (the default): the same advisories annotate as ::warning, and nothing blocks.
+    const c = scan({ GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true' });
+    check('report-mode: exit 0', c.status === 0, why(c));
+    check('report-mode: the advisories annotate as ::warning, never ::error', JSON.stringify(commands(c.stdout)) === JSON.stringify(expected('warning')), JSON.stringify(commands(c.stdout)));
+    check('report-mode: the log still carries the whole report', c.summary.length > 0 && c.stdout.includes(c.summary) && c.summary.includes('report-only — 3 advisory(ies) at/above floor would BLOCK'));
+
+    // (D) The summary sink itself fails: the report is already in the log (it is echoed first), the
+    // fault is named there, and the exit is the caller's setting — our fault never blocks report-mode.
+    const sinkDir = path.join(tmp, 'summary-is-a-dir');
+    fs.mkdirSync(sinkDir);
+    const d = scan({ GITHUB_STEP_SUMMARY: sinkDir, GITHUB_ACTIONS: 'true' });
+    check('unwritable summary: the report still reaches the job log', d.stdout.includes(HEADER) && d.stdout.includes('report-only — 3 advisory(ies) at/above floor would BLOCK'), why(d));
+    check('unwritable summary: the fault is named in the log', /deps-currency crashed: .*EISDIR/.test(d.stdout), why(d));
+    check('unwritable summary: the crash note is ONE line (no stack frame starts a log line)', !/^\s+at /m.test(d.stdout), why(d));
+    check('unwritable summary: the report reaches the log once', d.stdout.split(HEADER).length === 2);
+    check('unwritable summary under report-mode: exit 0, not an unhandled throw', d.status === 0, why(d));
+
+    // (E) What happened to the tracking issue reaches the log and the summary, once each, after the
+    // report and before the annotations. manageIssue pushes it into `infra` only once the report,
+    // scanner notes included, is out, so until v1.18.1 none of it printed: a workflow without
+    // `issues: write` got a green run, no issue, and no word why. The stub gh lists GH_STUB_OPEN's
+    // issue (or none) and refuses the verbs in GH_STUB_DENY with a 403 whose second line is a planted
+    // workflow command. ECOSYSTEMS adds a scanner note, which must stay in the report and only there.
+    const gh = path.join(tmp, 'gh-stub');
+    fs.writeFileSync(gh, String.raw`#!/bin/sh
+[ "$1" = "--version" ] && { echo 'gh version 0.0.0-stub'; exit 0; }
+case " $GH_STUB_DENY " in *" $2 "*) printf 'HTTP 403: Resource not accessible by integration\n::error title=forged::planted-by-gh\n' >&2; exit 1 ;; esac
+[ "$2" = list ] && { [ -n "$GH_STUB_OPEN" ] && printf '[{"number":%s,"title":"deps-currency: dependency advisories"}]\n' "$GH_STUB_OPEN" || echo '[]'; }
+[ "$2" = create ] && [ -n "$GH_STUB_BREAK_SUMMARY" ] && { rm -f "$GITHUB_STEP_SUMMARY"; mkdir "$GITHUB_STEP_SUMMARY"; }
+exit 0
+`);
+    fs.chmodSync(gh, 0o755);
+    const count = (text, s) => text.split(s).length - 1;
+    const DENIED = 'HTTP 403: Resource not accessible by integration ::error title=forged::planted-by-gh';
+    const CLEAN = { OSV_STUB_CLEAN: '1', FIRST_PARTY_OWNERS: 'oven-sh' };   // no advisory, no unpinned action → close
+    const lifecycle = [   // [case, env, the one note it prints (null: none)]
+      ['no issue open, create succeeds', {}, 'opened tracking issue'],
+      ['no issue open, create refused (403)', { GH_STUB_DENY: 'create' }, `failed to open tracking issue: ${DENIED}`],
+      ['#7 open, comment succeeds', { GH_STUB_OPEN: '7' }, 'updated tracking issue #7'],
+      ['#7 open, comment refused (403)', { GH_STUB_OPEN: '7', GH_STUB_DENY: 'comment' }, `failed to update tracking issue #7: ${DENIED}`],
+      ['clean, #7 open, close succeeds', { ...CLEAN, GH_STUB_OPEN: '7' }, 'closed tracking issue #7 — the sweep is clean'],
+      ['clean, #7 open, close refused (403)', { ...CLEAN, GH_STUB_OPEN: '7', GH_STUB_DENY: 'comment close' }, `failed to close issue #7: ${DENIED}`],
+      ['clean, no issue open', CLEAN, null],
+      ['no gh', { GH_BIN: path.join(tmp, 'no-such-gh') }, 'gh CLI not available — issue management skipped'],
+      ['no GITHUB_REPOSITORY', { GITHUB_REPOSITORY: '' }, 'GITHUB_REPOSITORY unset — issue management skipped'],
+    ];
+    for (const [label, extra, note] of lifecycle) {
+      const env = { GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, ECOSYSTEMS: 'npm cobol', ...extra };
+      const off = scan({ ...env, MANAGE_ISSUE: 'false' });
+      const on = scan({ ...env, MANAGE_ISSUE: 'true' });
+      const block = note ? `\n### ℹ️ issue lifecycle\n- ${note}\n` : '';
+      if (note) check(`issue lifecycle, ${label}: note in the log once, the summary once`, count(on.stdout, `\n- ${note}\n`) === 1 && count(on.summary, `\n- ${note}\n`) === 1, why(on));
+      check(`issue lifecycle, ${label}: report byte-identical, ${note ? 'block before the annotations' : 'no block'}, same exit, no new command`,
+        off.summary.includes('unknown ecosystem') && on.summary === off.summary + block && on.stdout === on.summary + off.stdout.slice(off.summary.length)
+          && on.status === off.status && JSON.stringify(commands(on.stdout)) === JSON.stringify(commands(off.stdout)), JSON.stringify(on.stdout.slice(off.summary.length - 60)));
+    }
+
+    // (F) The summary turns unwritable while the issue opens: the block is in the log anyway, because
+    // emit() writes the log first; the fault is named, and report-mode still exits 0.
+    const f = scan({ GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, MANAGE_ISSUE: 'true', GH_STUB_BREAK_SUMMARY: '1' });
+    check('issue lifecycle, summary gone unwritable: the block still reaches the log, once', count(f.stdout, '\n### ℹ️ issue lifecycle\n- opened tracking issue\n') === 1, why(f));
+    check('…the fault is named in the log, and report-mode exits 0', /deps-currency crashed: .*EISDIR/.test(f.stdout) && f.status === 0, why(f));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 }
 

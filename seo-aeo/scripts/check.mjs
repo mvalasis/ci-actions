@@ -1,10 +1,12 @@
 // seo-aeo CLI — fetches live URLs JS-disabled (the crawler's-eye view), runs the
-// check engine (checks.mjs), renders a per-page report to GITHUB_STEP_SUMMARY, and
-// exits non-zero only when a CRITICAL check fails AND fail-on-critical is set.
+// check engine (checks.mjs), renders a per-page report to GITHUB_STEP_SUMMARY and the
+// same report to the job log, annotates each CRITICAL (`::error title=…::<check> at <url>`),
+// and exits non-zero only when a CRITICAL check fails AND fail-on-critical is set.
 // Air-gapped: only touches the target site (no SaaS, no telemetry).
 import fs from 'node:fs';
 import {
   SEV, T1_CHECKS, analyzePage, analyzeRobots, analyzeSitemap, analyzeLlms, analyzeRedirects,
+  safe, annotations,
 } from './checks.mjs';
 
 const env = process.env;
@@ -13,15 +15,22 @@ const MAX_URLS = Math.max(1, parseInt(env.MAX_URLS || '15', 10) || 15);
 const VERIFY_TOKEN = env.VERIFY_TOKEN || '';
 const CRITICAL_CHECKS = (env.CRITICAL_CHECKS || '').split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 
-const summaryFile = env.GITHUB_STEP_SUMMARY || '/dev/stdout';
+// The report goes to the job LOG always, and to the step summary when there is one. The summary
+// alone needs a signed-in browser: `gh run view --log-failed` showed only "exit code 1" and the
+// check-run API's `output` was empty, so a headless reader learned THAT the gate blocked, never why
+// (security-baseline, 2026-09-23 — ported here in v1.18.0). The log is written through fd 1, never
+// by opening /dev/stdout: on Linux that open fails (ENXIO) when stdout is a socket, which is what
+// node's child_process hands a child. `/dev/stdout` as the summary (a local idiom) means none.
+const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';
+const ANNOTATE = env.GITHUB_ACTIONS === 'true';   // runner commands are for the runner, not a local run
+const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
 const lines = [];
 const note = (s = '') => lines.push(s);
 const ICON = { critical: '❌', warn: '⚠️', info: 'ℹ️', ok: '✅' };
-
-// Neutralize page-controlled strings before they reach the markdown summary: strip CR/LF and
-// markdown-structural chars + cap length so a hostile <title>/<loc>/canonical can't forge
-// verdict lines or inject an image beacon into the job summary (report-spoofing guard).
-const safe = (s, max = 220) => String(s == null ? '' : s).replace(/[\r\n]+/g, ' ').replace(/[`|<>[\]]/g, '').slice(0, max);
+// Every tallied finding with its location (the page URL, or the origin for a site-file check);
+// annotations() picks the CRITICALs out of it. safe() is imported from checks.mjs: every
+// page-controlled string in a report line goes through it, and every line starts with our text.
+const graded = [];
 const norm2 = (u) => { try { const x = new URL(u); return (x.origin + x.pathname).replace(/\/+$/, '') || x.origin; } catch { return null; } };
 const extractLocs = (xml) => [...String(xml).matchAll(/<loc>\s*(?:<!\[CDATA\[)?\s*([^<\s\]]+)\s*(?:\]\]>)?\s*<\/loc>/gi)].map((m) => m[1]);
 
@@ -102,6 +111,21 @@ async function expandSitemap(sm) {
   return [];
 }
 
+// Report lines already echoed to the job log, so the crash path's re-flush echoes only the new ones.
+// The log goes first: when the summary write is what throws, the report is already readable.
+let echoed = 0;
+function flush() {
+  for (; echoed < lines.length; echoed++) say(lines[echoed]);
+  if (summaryFile) fs.appendFileSync(summaryFile, lines.join('\n') + '\n');
+}
+// Every verdict leaves through here: the report, then one annotation per CRITICAL — `::error` when
+// this run blocks, `::warning` when it only reports. A verdict exits 1 exactly when it blocks.
+function finish(code) {
+  flush();
+  if (ANNOTATE) for (const a of annotations(graded, code === 1 ? 'error' : 'warning')) say(a);
+  process.exit(code);
+}
+
 (async () => {
   let urls = [];
   let sitemapTotal = 0;
@@ -115,13 +139,14 @@ async function expandSitemap(sm) {
   note('## 🔎 seo-aeo — SEO + AEO/GEO gate (JS-disabled crawler view)');
   note('');
 
-  if (!inputGiven) { note('- no `urls`/`sitemap-url` configured — nothing to check (skipped)'); flush(); process.exit(0); }
+  if (!inputGiven) { note('- no `urls`/`sitemap-url` configured — nothing to check (skipped)'); finish(0); }
   if (urls.length === 0) {
     note('- ❌ **no URLs resolved** — `sitemap-url`/`urls` was set but expanded to nothing (the gate checked zero pages).');
     note('');
     note('**critical: 1 · warnings: 0**');
     note(FAIL_ON_CRITICAL ? 'BLOCKED — gate checked nothing.' : 'report-only — would BLOCK under fail-on-critical.');
-    flush(); process.exit(FAIL_ON_CRITICAL ? 1 : 0);
+    graded.push({ id: 'no-urls-resolved', sev: SEV.CRIT, where: env.SITEMAP_URL || '' });
+    finish(FAIL_ON_CRITICAL ? 1 : 0);
   }
 
   note(`- mode: ${FAIL_ON_CRITICAL ? '**BLOCK on critical**' : 'report-only (never blocks)'}`);
@@ -138,7 +163,10 @@ async function expandSitemap(sm) {
   const elevate = (finding) => (finding.sev === SEV.WARN && promote.has(finding.id)) ? { ...finding, sev: SEV.CRIT } : finding;
 
   let crit = 0, warn = 0, info = 0;
-  const tally = (findings) => findings.forEach((x) => { if (x.sev === SEV.CRIT) crit++; else if (x.sev === SEV.WARN) warn++; else if (x.sev === SEV.INFO) info++; });
+  const tally = (findings, where) => findings.forEach((x) => {
+    graded.push({ ...x, where });
+    if (x.sev === SEV.CRIT) crit++; else if (x.sev === SEV.WARN) warn++; else if (x.sev === SEV.INFO) info++;
+  });
   const renderFindings = (findings, indent = '  ') => {
     for (const x of findings.filter((y) => y.sev !== SEV.OK).sort((a, b) => sevRank(a.sev) - sevRank(b.sev))) {
       note(`${indent}- ${ICON[x.sev]} \`${x.id}\` — ${safe(x.msg, 300)}`);
@@ -162,7 +190,7 @@ async function expandSitemap(sm) {
     const res = analyzePage({ requestUrl: url, finalUrl: r.finalUrl, status: r.status, headers: r.headers, html: r.body });
     res.findings = res.findings.map(elevate);
     pages.push(res);
-    tally(res.findings);
+    tally(res.findings, res.url);
     const fails = res.findings.filter((x) => x.sev !== SEV.OK);
     const head = `${pageIcon(res.findings)} [${safe(res.url)}](${safe(res.url)})  \`HTTP ${res.status}\`${res.pageType ? ` · ${res.pageType}` : ''}${r.redirected ? ` · ↪ ${safe(res.finalUrl)}` : ''}`;
     note(`- ${head}`);
@@ -215,7 +243,7 @@ async function expandSitemap(sm) {
     }
 
     const elevated = hostFindings.map(elevate);
-    tally(elevated);
+    tally(elevated, origin);
     const nonOk = elevated.filter((x) => x.sev !== SEV.OK);
     if (nonOk.length) renderFindings(elevated);
     else note('  - ✅ robots.txt · sitemap · llms.txt · redirects — all clean');
@@ -262,11 +290,17 @@ async function expandSitemap(sm) {
   // ---- verdict ----
   note('');
   note(`**critical: ${crit} · warnings: ${warn} · info: ${info}**`);
-  if (crit > 0 && FAIL_ON_CRITICAL) { note(`BLOCKED — ${crit} critical check(s) failed. Fix the ❌ items above.`); flush(); process.exit(1); }
+  if (crit > 0 && FAIL_ON_CRITICAL) { note(`BLOCKED — ${crit} critical check(s) failed. Fix the ❌ items above.`); finish(1); }
   if (crit > 0) note(`report-only — ${crit} critical check(s) would BLOCK under \`fail-on-critical: true\`.`);
   else note('PASS — no critical issues.');
-  flush(); process.exit(0);
-})().catch((e) => { note(`- ❌ seo-aeo crashed: ${e.stack || e.message}`); flush(); process.exit(FAIL_ON_CRITICAL ? 1 : 0); });
+  finish(0);
+})().catch((e) => {
+  note(`- ❌ seo-aeo crashed: ${safe(String(e && e.stack || e), 400)}`);
+  // flush() echoes to the log before it touches the summary, so when the summary sink is what failed,
+  // this line still reaches the log — and the exit stays the caller's setting, not an unhandled throw.
+  try { flush(); } catch { /* summary sink unwritable; the job log already has the report */ }
+  process.exit(FAIL_ON_CRITICAL ? 1 : 0);
+});
 
 function sevRank(s) { return { critical: 0, warn: 1, info: 2, ok: 3 }[s] ?? 9; }
 function pageIcon(findings) {
@@ -274,4 +308,3 @@ function pageIcon(findings) {
   if (findings.some((x) => x.sev === SEV.WARN)) return ICON.warn;
   return ICON.ok;
 }
-function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }

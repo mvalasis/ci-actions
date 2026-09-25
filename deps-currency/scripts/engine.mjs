@@ -10,6 +10,7 @@
 // and filter against a caller-set severity FLOOR. No CVSS → conservative HIGH (never silently
 // dropped). The action is report-mode-first: a finding never blocks unless fail-on-vuln=true AND
 // the finding is at/above the floor.
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 export const SEV = { CRITICAL: 'CRITICAL', HIGH: 'HIGH', MODERATE: 'MODERATE', LOW: 'LOW' };
 
@@ -247,6 +248,49 @@ export function renderReport(floorFindings, unpinned, meta = {}) {
     p('');
   }
   return L.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Job-log annotations. Workflow-command encoding — @actions/core's escaping, restated (as in
+// security-baseline's tiers.mjs) so the action stays dependency-free. Data may not carry a line
+// break (a new line is a new command); a property value may not carry `:` or `,` either. Without
+// it a hostile lockfile path like `x.lock,line=1::forged` would rewrite the annotation.
+export const escapeData = (s) => String(s == null ? '' : s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+export const escapeProperty = (s) => escapeData(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
+
+// osv-scanner names a lockfile by its absolute runner path (`/home/runner/work/<r>/<r>/bun.lock`).
+// An annotation names it relative to the workspace — the repository root, which is what `file=`
+// means to the runner. A lockfile outside the workspace names no file of this repo: '' (no `file=`).
+export function repoRelative(source, { workdir = '.', workspace = '.' } = {}) {
+  if (!source) return '';
+  const rel = relative(resolve(workspace), resolve(workdir, String(source)));
+  if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return '';
+  return rel.split(sep).join('/');
+}
+
+// One annotation per at/above-floor advisory — exactly the findings `fail-on-vuln` blocks on — so
+// the check-run API and `gh run view` name the package, the advisory and the lockfile without the
+// step summary (which the API does not serve): `<SEVERITY> <package>@<version> <ids> at <lockfile>`.
+// `file` is the workspace-relative lockfile (repoRelative); no `line=`, osv-scanner reports none.
+// Unpinned-action advisories never block, so they are never annotated.
+export function annotation(f, level = 'error') {
+  const file = String(f.file || '');
+  const props = [];
+  if (file) props.push(`file=${escapeProperty(file)}`);
+  props.push(`title=${escapeProperty(`deps-currency ${f.severity}`)}`);
+  const where = file || f.source ? ` at ${file || f.source}` : '';
+  const what = `${f.severity} ${f.name}@${f.version} ${asArray(f.ids).join(', ')}`;
+  return `::${level} ${props.join(',')}::${escapeData(safe(`${what}${where}`, 300))}`;
+}
+
+// The annotation lines for a run's floor findings. `level` is 'error' when the run blocks
+// (`fail-on-vuln: true`), 'warning' when it only reports — the default. GitHub keeps 10 annotations
+// per level per step, so past `cap` one line says how many were left out; the report lists them all.
+export function annotations(floorFindings, level = 'error', cap = 10) {
+  const all = asArray(floorFindings);
+  const out = all.slice(0, cap).map((f) => annotation(f, level));
+  if (all.length > cap) out.push(`deps-currency: ${all.length - cap} more advisory(ies) not annotated (GitHub keeps ${cap} per step) — the report above lists them all.`);
+  return out;
 }
 
 function asArray(x) { return Array.isArray(x) ? x : []; }

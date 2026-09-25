@@ -1,10 +1,11 @@
 // contract-check CLI — fetches each consumed WP/WC REST endpoint as raw JSON (the
 // consumer's-eye view), runs the contract engine (checks.mjs), renders a per-endpoint
-// report to GITHUB_STEP_SUMMARY, and exits non-zero only when a CRITICAL check fails AND
-// fail-on-critical is set. Air-gapped: only touches the configured endpoints.
+// report to GITHUB_STEP_SUMMARY and the same report to the job log, annotates each CRITICAL
+// (`::error title=…::<check> at <endpoint>`), and exits non-zero only when a CRITICAL check
+// fails AND fail-on-critical is set. Air-gapped: only touches the configured endpoints.
 import fs from 'node:fs';
 import path from 'node:path';
-import { SEV, T1_CHECKS, analyzePayload } from './checks.mjs';
+import { SEV, T1_CHECKS, analyzePayload, safe, annotations } from './checks.mjs';
 
 const env = process.env;
 const FAIL_ON_CRITICAL = env.FAIL_ON_CRITICAL === 'true';
@@ -12,16 +13,22 @@ const MAX_ENDPOINTS = Math.max(1, parseInt(env.MAX_ENDPOINTS || '25', 10) || 25)
 const VERIFY_TOKEN = env.VERIFY_TOKEN || '';
 const CRITICAL_CHECKS = (env.CRITICAL_CHECKS || '').split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 
-const summaryFile = env.GITHUB_STEP_SUMMARY || '/dev/stdout';
+// The report goes to the job LOG always, and to the step summary when there is one. The summary
+// alone needs a signed-in browser: `gh run view --log-failed` showed only "exit code 1" and the
+// check-run API's `output` was empty, so a headless reader learned THAT the gate blocked, never why
+// (security-baseline, 2026-09-23 — ported here in v1.18.0). The log is written through fd 1, never
+// by opening /dev/stdout: on Linux that open fails (ENXIO) when stdout is a socket, which is what
+// node's child_process hands a child. `/dev/stdout` as the summary (a local idiom) means none.
+const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';
+const ANNOTATE = env.GITHUB_ACTIONS === 'true';   // runner commands are for the runner, not a local run
+const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
 const lines = [];
 const note = (s = '') => lines.push(s);
 const ICON = { critical: '❌', warn: '⚠️', info: 'ℹ️', ok: '✅' };
-
-// Neutralize page/payload-controlled strings before they reach the markdown summary: strip
-// CR/LF + markdown-structural chars + cap length so a hostile field value (a product name, a
-// slug, an error string) can't forge verdict lines or inject an image beacon into the job
-// summary (report-spoofing guard) — same posture as seo-aeo's safe().
-const safe = (s, max = 220) => String(s == null ? '' : s).replace(/[\r\n]+/g, ' ').replace(/[`|<>[\]]/g, '').slice(0, max);
+// Every tallied finding with its location (the endpoint's name and URL); annotations() picks the
+// CRITICALs out of it. safe() is imported from checks.mjs: every payload-controlled string in a
+// report line goes through it, and every line starts with our text.
+const graded = [];
 
 const baseHeaders = {
   accept: 'application/json',
@@ -72,14 +79,14 @@ function loadEndpoints() {
   // 1) inline endpoints map (name -> url) — contract is then minimal (encoding/transport floors only)
   if (env.ENDPOINTS) {
     let map;
-    try { map = JSON.parse(env.ENDPOINTS); } catch (e) { return { items, error: `endpoints input is not valid JSON: ${e.message}` }; }
+    try { map = JSON.parse(env.ENDPOINTS); } catch (e) { return { items, error: `endpoints input is not valid JSON: ${e.message}`, source: 'the endpoints input' }; }
     for (const [name, url] of Object.entries(map || {})) items.push({ name, url, contract: {} });
   }
   // 2) committed manifest file (the rich contract source)
   if (env.MANIFEST) {
     const p = path.isAbsolute(env.MANIFEST) ? env.MANIFEST : path.join(env.GITHUB_WORKSPACE || process.cwd(), env.MANIFEST);
     let doc;
-    try { doc = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return { items, error: `manifest ${env.MANIFEST}: ${e.message}` }; }
+    try { doc = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return { items, error: `manifest ${env.MANIFEST}: ${e.message}`, source: `manifest ${env.MANIFEST}` }; }
     const eps = Array.isArray(doc) ? doc : (Array.isArray(doc.endpoints) ? doc.endpoints : []);
     for (const e of eps) {
       if (!e || !e.url) continue;
@@ -96,10 +103,23 @@ function rowIcon(findings) {
   if (findings.some((x) => x.sev === SEV.WARN)) return ICON.warn;
   return ICON.ok;
 }
-function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }
+// Report lines already echoed to the job log, so the crash path's re-flush echoes only the new ones.
+// The log goes first: when the summary write is what throws, the report is already readable.
+let echoed = 0;
+function flush() {
+  for (; echoed < lines.length; echoed++) say(lines[echoed]);
+  if (summaryFile) fs.appendFileSync(summaryFile, lines.join('\n') + '\n');
+}
+// Every verdict leaves through here: the report, then one annotation per CRITICAL — `::error` when
+// this run blocks, `::warning` when it only reports. A verdict exits 1 exactly when it blocks.
+function finish(code) {
+  flush();
+  if (ANNOTATE) for (const a of annotations(graded, code === 1 ? 'error' : 'warning')) say(a);
+  process.exit(code);
+}
 
 (async () => {
-  const { items, error } = loadEndpoints();
+  const { items, error, source } = loadEndpoints();
   const inputGiven = !!(env.ENDPOINTS || env.MANIFEST);
 
   note('## 🔌 contract-check — WP/WC REST consumer-contract gate');
@@ -110,9 +130,10 @@ function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }
     note('');
     note('**critical: 1 · warnings: 0**');
     note(FAIL_ON_CRITICAL ? 'BLOCKED — bad config.' : 'report-only — would BLOCK under fail-on-critical.');
-    flush(); process.exit(FAIL_ON_CRITICAL ? 1 : 0);
+    graded.push({ id: 'config-error', sev: SEV.CRIT, where: source });
+    finish(FAIL_ON_CRITICAL ? 1 : 0);
   }
-  if (!inputGiven) { note('- no `endpoints`/`manifest` configured — nothing to check (skipped)'); flush(); process.exit(0); }
+  if (!inputGiven) { note('- no `endpoints`/`manifest` configured — nothing to check (skipped)'); finish(0); }
 
   // de-dupe by url, cap, register allowed hosts for the token
   const seen = new Set();
@@ -126,7 +147,8 @@ function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }
     note('');
     note('**critical: 1 · warnings: 0**');
     note(FAIL_ON_CRITICAL ? 'BLOCKED — gate checked nothing.' : 'report-only — would BLOCK under fail-on-critical.');
-    flush(); process.exit(FAIL_ON_CRITICAL ? 1 : 0);
+    graded.push({ id: 'no-endpoints-resolved', sev: SEV.CRIT, where: '' });
+    finish(FAIL_ON_CRITICAL ? 1 : 0);
   }
 
   note(`- mode: ${FAIL_ON_CRITICAL ? '**BLOCK on critical**' : 'report-only (never blocks)'}`);
@@ -143,7 +165,10 @@ function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }
   const elevate = (finding) => (finding.sev === SEV.WARN && promote.has(finding.id)) ? { ...finding, sev: SEV.CRIT } : finding;
 
   let crit = 0, warn = 0, info = 0;
-  const tally = (findings) => findings.forEach((x) => { if (x.sev === SEV.CRIT) crit++; else if (x.sev === SEV.WARN) warn++; else if (x.sev === SEV.INFO) info++; });
+  const tally = (findings, where) => findings.forEach((x) => {
+    graded.push({ ...x, where });
+    if (x.sev === SEV.CRIT) crit++; else if (x.sev === SEV.WARN) warn++; else if (x.sev === SEV.INFO) info++;
+  });
 
   note('### Endpoints');
   for (const ep of list) {
@@ -161,7 +186,7 @@ function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }
     }
     const res = analyzePayload({ name: ep.name, url: ep.url, status: r.status, json: r.json, parseError: r.parseError, contract: ep.contract });
     res.findings = res.findings.map(elevate);
-    tally(res.findings);
+    tally(res.findings, ep.name && ep.name !== ep.url ? `${ep.name} (${ep.url})` : ep.url);
     const fails = res.findings.filter((x) => x.sev !== SEV.OK);
     const head = `${rowIcon(res.findings)} **${safe(ep.name)}** — [${safe(ep.url)}](${safe(ep.url)})  \`HTTP ${r.status}\`${r.redirected ? ` · ↪ ${safe(r.finalUrl)}` : ''}`;
     note(`- ${head}`);
@@ -179,8 +204,14 @@ function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }
   // ---- verdict ----
   note('');
   note(`**critical: ${crit} · warnings: ${warn} · info: ${info}**`);
-  if (crit > 0 && FAIL_ON_CRITICAL) { note(`BLOCKED — ${crit} critical contract break(s). A consumed payload changed shape/price/encoding. Fix the ❌ items above.`); flush(); process.exit(1); }
+  if (crit > 0 && FAIL_ON_CRITICAL) { note(`BLOCKED — ${crit} critical contract break(s). A consumed payload changed shape/price/encoding. Fix the ❌ items above.`); finish(1); }
   if (crit > 0) note(`report-only — ${crit} critical contract break(s) would BLOCK under \`fail-on-critical: true\`.`);
   else note('PASS — every consumed payload still satisfies its contract.');
-  flush(); process.exit(0);
-})().catch((e) => { note(`- ❌ contract-check crashed: ${e.stack || e.message}`); flush(); process.exit(FAIL_ON_CRITICAL ? 1 : 0); });
+  finish(0);
+})().catch((e) => {
+  note(`- ❌ contract-check crashed: ${safe(String(e && e.stack || e), 400)}`);
+  // flush() echoes to the log before it touches the summary, so when the summary sink is what failed,
+  // this line still reaches the log — and the exit stays the caller's setting, not an unhandled throw.
+  try { flush(); } catch { /* summary sink unwritable; the job log already has the report */ }
+  process.exit(FAIL_ON_CRITICAL ? 1 : 0);
+});

@@ -172,6 +172,33 @@ with:
 Only the T1 IDs above are promotable. The CRITICAL core (transport + required-present/type + the
 money/encoding invariants) is always on and cannot be disabled.
 
+## Where to read the result — job log, annotations, step summary
+
+Since **v1.18.0** the report is in three places, so "why did it block?" never needs a browser:
+
+- **Job log** — the whole report, the same lines as the step summary, byte for byte:
+  `gh run view <run-id> --log-failed` (or `--log`). Before v1.18.0 the log said only
+  `Process completed with exit code 1`.
+- **Annotations** — one per CRITICAL (a T0, or a T1 you promoted), at the end of the log:
+  `::error title=contract-check <check>::<check> at <name> (<url>)` — the endpoint as your manifest
+  names it (just `<url>` when it has no `name`). There is no `file=`: this gate grades live endpoints,
+  not files of your repo, so the location is in the message. `gh run view <run-id>` lists them under
+  ANNOTATIONS; the API has them at `gh api repos/<owner>/<repo>/check-runs/<job-id>/annotations`. A
+  report-only run (`fail-on-critical: false`) annotates at `::warning` instead. GitHub keeps 10 per
+  step; past that, one log line counts the rest (the report lists every finding either way). A WARN
+  or INFO finding is never annotated. The two CRITICALs that are not about an endpoint annotate as
+  `config-error` (at the manifest, or the endpoints input, that failed to load) and
+  `no-endpoints-resolved`.
+- **Step summary** — unchanged: the same report, rendered.
+
+Payload text never reaches the start of a log line, where the runner would read it as a workflow
+command: every payload-controlled string (a field value, a key, a JSON parse error quoting the body)
+goes through `safe()`, which strips CR/LF and the markdown and bracket characters (so neither `::…`
+nor the legacy `##[…]` form can be spelled), and every report line starts with the gate's own text.
+An annotation carries the check id and the endpoint, never a payload value, and its values are
+escaped (`%`, CR, LF, and `:`/`,` in properties). Off Actions (a local run) the report prints once
+to stdout, with no annotations.
+
 ## Self-test
 
 `node scripts/selftest.mjs` runs the engine against **offline JSON fixtures** (no network) and
@@ -182,10 +209,21 @@ name each trip the right CRITICAL. The `requiredNullable` block additionally pin
 manifest which doesn't use the key is graded **identically** to before it existed. It's the
 regression guard, and it runs in CI (`.github/workflows/contract-check-selftest.yml`).
 
+Its **end-to-end** leg runs the real `check.mjs` as a process against a local `node:http` server
+(127.0.0.1 only) and a manifest: one endpoint breaks the contract while planting workflow commands
+in a double-encoded value and a field name, one answers HTML whose JSON parse error quotes the body.
+It asserts the job log carries the whole report byte for byte, one annotation per CRITICAL (the
+promoted T1 included, none for a WARN or the clean endpoint), no planted command at the start of a
+line, a local run printing once with no commands (stdout a socket, as node's child_process gives
+it — the case that crashes an `appendFileSync('/dev/stdout')` fallback on Linux), report-only
+annotating as `::warning`, an unwritable summary still reaching the log under the caller's exit
+setting, and the config-error / empty-map / no-input exits. 24 targeted mutants each turn it red.
+
 ## Implementation
 
-`scripts/checks.mjs` — pure, network-free validation engine (unit-tested by `selftest.mjs`).
+`scripts/checks.mjs` — pure, network-free validation engine, plus the report's `safe()` and the
+annotation encoding (all unit-tested by `selftest.mjs`).
 `scripts/check.mjs` — CLI: builds the endpoint list (inline map + manifest file), fetches each as
 raw JSON with one transient-retry + manual redirect re-scoping of the token, runs the engine, renders
-a per-endpoint report to `GITHUB_STEP_SUMMARY`, and exits non-zero only on a CRITICAL under
-`fail-on-critical`. No runtime dependencies.
+a per-endpoint report to `GITHUB_STEP_SUMMARY` and the job log, annotates each CRITICAL, and exits
+non-zero only on a CRITICAL under `fail-on-critical`. No runtime dependencies.

@@ -1,15 +1,16 @@
 // form-protection CLI — fetches live URLs JS-disabled, finds bot-widget forms
 // (checks.mjs), then live-probes each resolved submit endpoint with a tokenless
 // and a junk-token POST. Renders a per-page + per-endpoint report to
-// GITHUB_STEP_SUMMARY and exits non-zero only when a CRITICAL check fails AND
-// fail-on-critical is set. Air-gapped: only touches the target site.
+// GITHUB_STEP_SUMMARY and the same report to the job log, annotates each CRITICAL
+// (`::error title=…::<check> at <url>`), and exits non-zero only when a CRITICAL
+// check fails AND fail-on-critical is set. Air-gapped: only touches the target site.
 //
 // Read-safe by design: probes send a MINIMAL body (no real-looking fields), so
 // even a skip-verifying endpoint falls through to its own field validation
 // instead of creating a record — see buildProbeBody in checks.mjs.
 import fs from 'node:fs';
 import {
-  SEV, analyzeForms, parseEndpointMap, buildProbeBody, judgeProbe,
+  SEV, analyzeForms, parseEndpointMap, buildProbeBody, judgeProbe, safe, annotations,
 } from './checks.mjs';
 
 const env = process.env;
@@ -20,14 +21,23 @@ const SUBMIT_PROBE = env.SUBMIT_PROBE !== 'false';
 const ENDPOINT_MAP = parseEndpointMap(env.FORM_ENDPOINTS || '');
 const EXTRA_TEST_KEYS = (env.TEST_SITEKEYS || '').split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 
-const summaryFile = env.GITHUB_STEP_SUMMARY || '/dev/stdout';
+// The report goes to the job LOG always, and to the step summary when there is one.
+// The summary alone needs a signed-in browser: `gh run view --log-failed` showed only
+// "exit code 1" and the check-run API's `output` was empty, so a headless reader learned
+// THAT the gate blocked, never why (security-baseline, 2026-09-23 — ported here in
+// v1.18.0). The log is written through fd 1, never by opening /dev/stdout: on Linux that
+// open fails (ENXIO) when stdout is a socket, which is what node's child_process hands a
+// child. `/dev/stdout` as the summary (a local idiom) means none.
+const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';
+const ANNOTATE = env.GITHUB_ACTIONS === 'true';   // runner commands are for the runner, not a local run
+const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
 const lines = [];
 const note = (s = '') => lines.push(s);
 const ICON = { critical: '❌', warn: '⚠️', info: 'ℹ️', ok: '✅' };
-
-// Neutralize page-controlled strings before they reach the markdown summary
-// (report-spoofing guard — same contract as seo-aeo).
-const safe = (s, max = 300) => String(s == null ? '' : s).replace(/[\r\n]+/g, ' ').replace(/[`|<>[\]]/g, '').slice(0, max);
+// Every tallied finding with its location (the page, or the probed endpoint + probe kind);
+// annotations() picks the CRITICALs out of it. safe() is imported from checks.mjs: every
+// page-controlled string in a report line goes through it, and every line starts with our text.
+const graded = [];
 
 const baseHeaders = { 'user-agent': 'Mozilla/5.0 (compatible; ci-actions-form-protection/1.0; +https://github.com/mvalasis/ci-actions)' };
 // WAF-bypass token + LiteSpeed cookie go ONLY to the configured host(s) and
@@ -99,6 +109,21 @@ async function expandSitemap(sm) {
   return [];
 }
 
+// Report lines already echoed to the job log, so the crash path's re-flush echoes only the new ones.
+// The log goes first: when the summary write is what throws, the report is already readable.
+let echoed = 0;
+function flush() {
+  for (; echoed < lines.length; echoed++) say(lines[echoed]);
+  if (summaryFile) fs.appendFileSync(summaryFile, lines.join('\n') + '\n');
+}
+// Every verdict leaves through here: the report, then one annotation per CRITICAL — `::error` when
+// this run blocks, `::warning` when it only reports. A verdict exits 1 exactly when it blocks.
+function finish(code) {
+  flush();
+  if (ANNOTATE) for (const a of annotations(graded, code === 1 ? 'error' : 'warning')) say(a);
+  process.exit(code);
+}
+
 (async () => {
   let urls = [];
   let sitemapTotal = 0;
@@ -112,13 +137,14 @@ async function expandSitemap(sm) {
   note('## 🛡️ form-protection — bot-gate enforced end-to-end');
   note('');
 
-  if (!inputGiven) { note('- no `urls`/`sitemap-url` configured — nothing to check (skipped)'); flush(); process.exit(0); }
+  if (!inputGiven) { note('- no `urls`/`sitemap-url` configured — nothing to check (skipped)'); finish(0); }
   if (urls.length === 0) {
     note('- ❌ **no URLs resolved** — `sitemap-url`/`urls` was set but expanded to nothing (the gate checked zero pages).');
     note('');
     note('**critical: 1 · warnings: 0**');
     note(FAIL_ON_CRITICAL ? 'BLOCKED — gate checked nothing.' : 'report-only — would BLOCK under fail-on-critical.');
-    flush(); process.exit(FAIL_ON_CRITICAL ? 1 : 0);
+    graded.push({ id: 'no-urls-resolved', sev: SEV.CRIT, where: env.SITEMAP_URL || '' });
+    finish(FAIL_ON_CRITICAL ? 1 : 0);
   }
 
   note(`- mode: ${FAIL_ON_CRITICAL ? '**BLOCK on critical**' : 'report-only (never blocks)'}`);
@@ -129,7 +155,10 @@ async function expandSitemap(sm) {
   note('');
 
   let crit = 0, warn = 0, info = 0;
-  const tally = (findings) => findings.forEach((x) => { if (x.sev === SEV.CRIT) crit++; else if (x.sev === SEV.WARN) warn++; else if (x.sev === SEV.INFO) info++; });
+  const tally = (findings, where, rule) => findings.forEach((x) => {
+    graded.push({ ...x, where, rule });
+    if (x.sev === SEV.CRIT) crit++; else if (x.sev === SEV.WARN) warn++; else if (x.sev === SEV.INFO) info++;
+  });
   warn += badEntries.length;
   const sevRank = (s) => ({ critical: 0, warn: 1, info: 2, ok: 3 }[s] ?? 9);
   const renderFindings = (findings, indent = '  ') => {
@@ -154,7 +183,7 @@ async function expandSitemap(sm) {
       warn++; continue;
     }
     const { findings, surfaces: pageSurfaces } = analyzeForms({ requestUrl: url, html: r.body, endpointMap: ENDPOINT_MAP, extraTestKeys: EXTRA_TEST_KEYS });
-    tally(findings);
+    tally(findings, url);
     surfaces.push(...pageSurfaces);
     const icon = findings.some((x) => x.sev === SEV.CRIT) ? ICON.critical : findings.some((x) => x.sev === SEV.WARN) ? ICON.warn : ICON.ok;
     note(`- ${icon} [${safe(url)}](${safe(url)})  \`HTTP ${r.status}\` · ${pageSurfaces.length} gated form(s)`);
@@ -181,7 +210,7 @@ async function expandSitemap(sm) {
         const r = await postProbe(surface.endpoint, buildProbeBody(surface, kind));
         if (r.error) { note(`  - ⚠️ ${kind} POST — network error (${safe(r.error, 120)}); probe inconclusive`); warn++; continue; }
         const verdict = judgeProbe({ kind, status: r.status, body: r.body, expect: surface.expect, endpoint: surface.endpoint });
-        tally([verdict]);
+        tally([verdict], surface.endpoint, kind);
         note(`  - ${ICON[verdict.sev]} ${verdict.sev === SEV.OK ? safe(verdict.msg, 300) : `\`${verdict.id}\` — ${safe(verdict.msg, 400)}`}`);
         await sleep(700);
       }
@@ -191,10 +220,14 @@ async function expandSitemap(sm) {
   // ---- verdict ----
   note('');
   note(`**critical: ${crit} · warnings: ${warn} · info: ${info}**`);
-  if (crit > 0 && FAIL_ON_CRITICAL) { note(`BLOCKED — ${crit} critical check(s) failed. Fix the ❌ items above.`); flush(); process.exit(1); }
+  if (crit > 0 && FAIL_ON_CRITICAL) { note(`BLOCKED — ${crit} critical check(s) failed. Fix the ❌ items above.`); finish(1); }
   if (crit > 0) note(`report-only — ${crit} critical check(s) would BLOCK under \`fail-on-critical: true\`.`);
   else note('PASS — no critical issues.');
-  flush(); process.exit(0);
-})().catch((e) => { note(`- ❌ form-protection crashed: ${e.stack || e.message}`); flush(); process.exit(FAIL_ON_CRITICAL ? 1 : 0); });
-
-function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }
+  finish(0);
+})().catch((e) => {
+  note(`- ❌ form-protection crashed: ${safe(String(e && e.stack || e), 400)}`);
+  // flush() echoes to the log before it touches the summary, so when the summary sink is what failed,
+  // this line still reaches the log — and the exit stays the caller's setting, not an unhandled throw.
+  try { flush(); } catch { /* summary sink unwritable; the job log already has the report */ }
+  process.exit(FAIL_ON_CRITICAL ? 1 : 0);
+});

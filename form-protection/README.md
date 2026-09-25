@@ -64,6 +64,33 @@ Mirrors `seo-aeo`: `urls` / `sitemap-url`, `fail-on-critical` (default
 - **lampakia-astro** — `/checkout/` (client-rendered widget, JSON endpoint
   `/api/checkout/create-order`, `token=turnstileToken expect=turnstile_failed`).
 
+## Where to read the result — job log, annotations, step summary
+
+Since **v1.18.0** the report is in three places, so "why did it block?" never needs a browser:
+
+- **Job log** — the whole report, the same lines as the step summary, byte for byte:
+  `gh run view <run-id> --log-failed` (or `--log`). Before v1.18.0 the log said only
+  `Process completed with exit code 1`.
+- **Annotations** — one per CRITICAL, at the end of the log: `::error
+  title=form-protection sitekey-real::sitekey-real at <page url>`, or `::error
+  title=form-protection server-rejects::server-rejects <tokenless|junk-token> at <endpoint url>`.
+  There is no `file=`: this gate grades live pages and endpoints, not files of your repo, so the
+  location is in the message. `gh run view <run-id>` lists them under ANNOTATIONS; the API has them
+  at `gh api repos/<owner>/<repo>/check-runs/<job-id>/annotations`. A report-only run
+  (`fail-on-critical: false`) annotates at `::warning` instead. GitHub keeps 10 per step; past that,
+  one log line counts the rest (the report lists every finding either way). A WARN or INFO finding
+  is never annotated. A sitemap/URL list that resolves to nothing annotates as `no-urls-resolved`.
+- **Step summary** — unchanged: the same report, rendered.
+
+Page text never reaches the start of a log line, where the runner would read it as a workflow
+command: every page-controlled string (a sitekey, a form attribute, a response body) goes through
+`safe()`, which strips CR/LF and the markdown and bracket characters (so neither `::…` nor the
+legacy `##[…]` form can be spelled), and every report line starts with the gate's own text. An
+annotation carries the check id, the probe kind and the URL (a form's `action` may supply it), never
+a finding's message, and its values go through `safe()` and are escaped (`%`, CR, LF, and `:`/`,`
+in properties). Off Actions (a local run) the report prints once
+to stdout, with no annotations.
+
 ## Honest limits
 
 Distinguishes *present-vs-absent* enforcement, not a weak secret from a strong
@@ -80,3 +107,12 @@ server e2e that runs the real CLI subprocess against fixture pages and
 reject/accept/wrong-layer endpoints, asserting summaries AND exit codes.
 No external network. CI: `.github/workflows/form-protection-selftest.yml`
 (+ a live report-mode smoke against epn.one).
+
+The e2e also asserts the **job log**: a page whose test sitekey carries a planted workflow command
+stays on its line; the log carries the whole report byte for byte; one annotation per CRITICAL (the
+page for `sitekey-real`, the probe kind + endpoint for `server-rejects`) and nothing else
+command-shaped; a local run prints once with no commands (stdout a socket, as node's child_process
+gives it — the case that crashes an `appendFileSync('/dev/stdout')` fallback on Linux); report-only
+annotates as `::warning`; an unwritable summary still reaches the log under the caller's exit
+setting; and the early exits that run before the first `await` do not crash. 24 targeted mutants
+each turn it red.

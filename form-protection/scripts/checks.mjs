@@ -317,3 +317,40 @@ export function judgeProbe({ kind, status, body, expect, endpoint }) {
   }
   return f('server-rejects', SEV.OK, `${label} — hard reject (HTTP ${status}${expect ? `, signature "${expect}" present` : ''})`);
 }
+
+// ---------- presentation (pure; the CLI renders with these, selftest.mjs covers them) ----------
+
+// Neutralize page-controlled strings before they reach the report (report-spoofing guard — same
+// contract as seo-aeo): strip CR/LF + markdown-structural chars + cap length, so a hostile sitekey,
+// form attribute or response body can't forge a verdict line in the job summary, and can't reach
+// the start of a job-log line, where the runner would read it as a workflow command. Stripping
+// `[`/`]` also rules out the legacy `##[command]` form anywhere in a line.
+export const safe = (s, max = 300) => String(s == null ? '' : s).replace(/[\r\n]+/g, ' ').replace(/[`|<>[\]]/g, '').slice(0, max);
+
+// Workflow-command encoding — @actions/core's escaping, restated (as in security-baseline's
+// tiers.mjs) so the action keeps cheerio as its only dependency. Data may not carry a line break
+// (a new line is a new command); a property value may not carry `:` or `,` either.
+export const escapeData = (s) => String(s == null ? '' : s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+export const escapeProperty = (s) => escapeData(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
+
+// One annotation per CRITICAL, so the check-run API and `gh run view` name the check and where it
+// failed without the step summary (which the API does not serve). This gate grades live pages and
+// endpoints, not files of the repo, so there is no `file=`/`line=`: the location is in the message,
+// `sitekey-real at <page url>` or `server-rejects <probe> at <endpoint url>`. Never the finding's
+// msg: that quotes page text (a sitekey value, a response body), and the job log already has it.
+export function annotation(x, level = 'error') {
+  const what = `${x.id} ${x.rule || ''}`.trim();
+  const where = x.where ? ` at ${x.where}` : '';
+  return `::${level} title=${escapeProperty(`form-protection ${x.id}`)}::${escapeData(safe(`${what}${where}`, 300))}`;
+}
+
+// The annotation lines for a run: CRITICALs only — exactly what the verdict's `critical:` count
+// counts. `level` is 'error' when the run blocks, 'warning' when it only reports. GitHub keeps 10
+// annotations per level per step, so past `cap` one line says how many were left out; the report
+// lists every finding either way.
+export function annotations(graded, level = 'error', cap = 10) {
+  const crits = graded.filter((x) => x.sev === SEV.CRIT);
+  const out = crits.slice(0, cap).map((x) => annotation(x, level));
+  if (crits.length > cap) out.push(`form-protection: ${crits.length - cap} more critical finding(s) not annotated (GitHub keeps ${cap} per step) — the report above lists them all.`);
+  return out;
+}

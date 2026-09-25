@@ -85,6 +85,65 @@ instead of a PASS. A semgrep registry outage now reads as a red run; re-run it, 
 config through `semgrep-config`. No input changed, and on the measured state the `v1` move
 newly-blocks nobody.
 
+**v1.18.1** *(tag not yet cut; lands with the next `v1` move)* — `deps-currency` prints what
+happened to its tracking issue. `scan.mjs` emitted the report, `### ℹ️ scanner notes` included,
+before it called `manageIssue`, which then pushed its outcome into the same notes list (`opened
+tracking issue`, `failed to open tracking issue: <gh stderr>`, `gh CLI not available — issue
+management skipped`, …) where nothing printed it. A caller whose workflow lacks `permissions:
+issues: write` got a green run, no tracking issue, and no line in the log or the summary saying the
+open had failed. Those notes now follow the report as a `### ℹ️ issue lifecycle` block, through the
+report's own `emit()` (job log first, then the step summary) and before the annotations; every line
+starts with the action's own text, and gh's stderr goes through `safe()`. The report itself is
+byte-identical: the old and new `scan.mjs`, run over 504 env combinations, match byte for byte under
+`manage-issue: false`, and with it on differ only by that block, with the same exit codes. Two notes
+the block would have printed wrong are fixed: an update of an already-open issue said `updated
+tracking issue #N` without checking that the comment went through (a refused comment now reads
+`failed to update tracking issue #N: <reason>`), and a failed close now names gh's reason.
+`scripts/selftest.mjs`'s end-to-end leg gains a stub `gh` that opens, updates and closes the issue
+and refuses each with a 403 whose second line plants a workflow command. Every note must reach the
+log and the summary exactly once, with the report unchanged, the same exit code and no new
+command-shaped line; 16 targeted mutants turn it red. **Caller-visible:** with `manage-issue` on
+(the default), a short `ℹ️ issue lifecycle` block after the report in the log and the summary. No
+input, verdict or exit code changed; a failed issue call still never fails the run. The `v1` move
+newly-blocks nobody.
+
+**v1.18.0** — `seo-aeo`, `contract-check`, `form-protection` and `deps-currency` print their report
+to the **job log** as well as the step summary, and annotate every CRITICAL: v1.16.0's
+`security-baseline` change, ported to the four siblings whose report still reached only
+`$GITHUB_STEP_SUMMARY`, where a blocked run's `gh run view --log-failed` said `Process completed
+with exit code 1` and nothing else. Each entrypoint echoes the report lines to stdout through
+`fs.writeSync(1, …)` first, byte-identical to the summary, which is unchanged outside a crash: the
+old and new entrypoints write byte-identical summaries and the same exit codes on 17 fixture runs.
+Then one annotation per CRITICAL: the three live-URL gates grade pages and endpoints, not files of
+the repo, so they carry no `file=` and put the location in the message, `::error title=<action>
+<check>::<check> at <url>` (`form-protection` adds the probe, `server-rejects tokenless at
+<endpoint>`; `contract-check` names the endpoint as the manifest does). `deps-currency` annotates
+each at/above-floor advisory, the findings `fail-on-vuln` blocks on, as `::error
+file=<lockfile>,title=deps-currency <SEVERITY>::<SEVERITY> <pkg>@<version> <ids> at <lockfile>`,
+with osv-scanner's absolute runner path made workspace-relative. A run that does not enforce (the
+default for all four) annotates at `::warning`, at most 10 per step with one line counting the
+rest; a WARN, a below-floor advisory or an unpinned-action advisory is never annotated. The
+CRITICALs that have no check annotate as `no-urls-resolved`, `no-endpoints-resolved` and
+`config-error`. An annotation never carries a finding's message; what it does carry (a URL, which a
+sitemap may supply; for `deps-currency` the package, version and advisory ids) goes through
+`safe()` and is escaped (`%`, CR, LF, and `:`/`,` in properties). Every page/payload/tool string in
+a report line already went through the action's `safe()`, which strips CR/LF and brackets, so no
+hostile value reaches the start of a log line (`::…`) or spells the runner's legacy `##[…]` form;
+`deps-currency`'s `[:]//` URL defang can write `##[:]`, which names no command. The crash line now
+goes through `safe()` too, where it printed a raw multi-line stack. A local run with no
+`GITHUB_STEP_SUMMARY` writes through fd 1 instead of appending to `/dev/stdout`, which on Linux
+fails with ENXIO when stdout is a socket. The crash path survives an unwritable summary and exits
+under the caller's setting; in the three URL gates it used to throw again inside the crash handler
+and exit 1 even in report-only. Each `scripts/selftest.mjs` gains an end-to-end leg that runs the
+real entrypoint (against a local `node:http` server, or a stub osv-scanner) with workflow commands
+planted in page, payload and tool strings. It asserts the whole report in the log once, one
+annotation per CRITICAL and none for a WARN, nothing else command-shaped, a local run printing
+once, `::warning` under report-only, an unwritable summary still reaching the log, and the early
+exits that run before the first `await`; 21, 24, 24 and 23 targeted mutants turn them red.
+**Caller-visible:** more log output, and annotations on a run with CRITICALs (`::warning` ones on a
+report-only caller). No input and no verdict changed; the one exit-code change is that crash path,
+which now follows `fail-on-critical` like every other fault. The `v1` move newly-blocks nobody.
+
 **v1.17.0** — `security-baseline` gains **`argv-secret`** (T1, promotable WARN): a `-H` /
 `--header` whose value expands a `*TOKEN*` / `*SECRET*` / `*KEY*` / `*PASS*` variable into a child
 process's argv, where `ps` and `/proc` show it to every process on the runner. v1.15.1 and v1.15.2
@@ -105,14 +164,15 @@ the lint's 101 fixtures pass unchanged over the moved code. **Caller-visible:** 
 group on a run that finds one — WARN, so it blocks nobody until a caller lists it in
 `critical-checks`. No input and no existing verdict changed. The `v1` move newly-blocks nobody.
 
-**v1.16.1** *(tag not yet cut; lands with the next `v1` move)* — `linkcheck` refuses a sitemap
+**v1.16.1** *(anchor `e840c7e`, cut after the v1.17.0 move that shipped it; `v1` never pointed
+here)* — `linkcheck` refuses a sitemap
 that declares a DOCTYPE, and caps every sitemap body at the protocol's 50 MB. `sitemap-urls.py`
 parsed whatever a sitemap URL returned with `xml.etree.ElementTree`, and that body can come from
 any host a sitemap index or a redirect names. ElementTree resolves no external entity, but it
 leaves internal entity expansion to the libexpat Python links, and only expat ≥ 2.4.1 bounds it.
 macOS's system Python 3.9 links 2.2.8, where a 487-byte document expanded to 30 MB in half a
-second; the billion-laughs payload is ~3 GB. Ubuntu runners link a bounding expat, so the
-exposure was local and self-hosted runs. `parse()` now runs a bare expat pass whose DOCTYPE
+second; the billion-laughs payload is ~3 GB. The ubuntu runner's `python3` links expat 2.6.1
+(logged by the selftest), so the exposure was local and self-hosted runs. `parse()` now runs a bare expat pass whose DOCTYPE
 handler raises, so the declaration is refused inside the parser, in any encoding, before
 ElementTree reads the bytes. An entity can only be declared in a DTD, and no sitemap has one.
 Separately, the gunzip that `.gz` sitemaps go through was unbounded on every platform. The body
@@ -684,7 +744,7 @@ it was deleted in v1.15.0), and why the behavioural self-tests — not this lint
 are the load-bearing layer.
 
 The seven `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
-`console.log(…)` then `process.exit(…)`, but emit 1375–7679 bytes, at least eight
+`console.log(…)` then `process.exit(…)`, but emit 2184–10017 bytes, at least six
 times under the pipe buffer, so they cannot truncate. Don't "fix" them.
 
 Repo-internal only: no caller consumes this lint, so changing it needs **no
