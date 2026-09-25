@@ -2,16 +2,18 @@
 // ---------------------------------------------------------------------------
 // lint-entrypoint-output — repo-internal hygiene gate (NOT a shipped action).
 //
-// THREE RULES, one theme: defects in action entrypoints that a green run cannot
+// FOUR RULES, one theme: defects in action entrypoints that a green run cannot
 // distinguish from correct code.
 //   1. async stdout writes before process.exit()  — see below.
 //   2. crash guards registered after main runs     — see "rule 2" further down.
 //   3. no crash guard at all, in any language      — see "rule 3" further down.
+//   4. a secret spelled into a child's argv        — see "rule 4" further down.
 //
-// Rules 1 and 2 are JavaScript-shaped and apply to `*.mjs` only. Rule 3 applies
-// to every language an action ships an entrypoint in (.mjs, .py, .sh), and only
-// to the files an `action.yml` actually EXECUTES — the pure library modules
-// beside them cannot set an exit code, so a guard there would be noise.
+// Rules 1 and 2 are JavaScript-shaped and apply to `*.mjs` only. Rules 3 and 4
+// apply to every language an action ships an entrypoint in (.mjs, .py, .sh), and
+// only to the files an `action.yml` actually EXECUTES — the pure library modules
+// beside them cannot set an exit code, so a guard there would be noise, and none
+// of them spawns a process today (rule 4's known limit says what that misses).
 //
 // THE DEFECT CLASS THIS EXISTS TO KILL
 // `process.stdout` / `process.stderr` writes are ASYNC when the fd is a pipe on
@@ -49,8 +51,8 @@
 // of scope. The scan is NON-recursive, which also keeps test fixtures like
 // `test-suite/scripts/selftest/*/vitest-stub.mjs` out.
 //
-// Rule 3 narrows further to the EXECUTED subset (discoverExecuted), read from the
-// `run:` lines of each action.yml. Both discovery passes fail CLOSED on an empty
+// Rules 3 and 4 narrow further to the EXECUTED subset (discoverExecuted), read from
+// the `run:` lines of each action.yml. Both discovery passes fail CLOSED on an empty
 // result: a restructured tree must not silently pass a blocking gate, and a rule
 // that has switched itself off looks exactly like a rule with nothing to report.
 //
@@ -109,10 +111,20 @@ function regexAllowed(prev, word) {
   return true;                                        // ( , = : [ ! & | ? { } ; …
 }
 
-export function blankNonCode(src) {
-  const out = Array.from(src);
+// `literals: false` blanks comments ONLY and keeps string, template and regex
+// literals as written — rule 4's view, since the secret-bearing header lives in a
+// literal. The scan is the same either way; only what gets wiped differs.
+export function blankNonCode(src, { literals = true } = {}) {
+  // UTF-16 code units, the unit `src[i]` indexes by — NOT Array.from(src), which
+  // splits by code point: after an astral character (an emoji; six .mjs
+  // entrypoints carry one) every wipe landed one slot late per astral char, so a
+  // comment's wipe ate the newline after it and, from the second on, the first
+  // characters of the next line's code. That can hide a finding — the permissive
+  // direction. (No live result changed when this was fixed.)
+  const out = src.split('');
   const n = src.length;
   const wipe = (i) => { if (i < n && src[i] !== '\n') out[i] = ' '; };
+  const wipeLit = literals ? wipe : () => {};
   const interp = [];   // brace depths at which a `${` interpolation was opened
   let depth = 0;
   let prev = '';
@@ -122,15 +134,15 @@ export function blankNonCode(src) {
 
   while (i < n) {
     if (mode === 'tmpl') {
-      if (src[i] === '\\') { wipe(i); wipe(i + 1); i += 2; continue; }
-      if (src[i] === '`') { wipe(i); i++; mode = 'code'; prev = 'x'; word = ''; continue; }
+      if (src[i] === '\\') { wipeLit(i); wipeLit(i + 1); i += 2; continue; }
+      if (src[i] === '`') { wipeLit(i); i++; mode = 'code'; prev = 'x'; word = ''; continue; }
       if (src[i] === '$' && src[i + 1] === '{') {
-        wipe(i); wipe(i + 1); i += 2;
+        wipeLit(i); wipeLit(i + 1); i += 2;
         interp.push(depth); depth++;              // the `{` of `${`
         mode = 'code'; prev = '{'; word = '';
         continue;
       }
-      wipe(i); i++; continue;
+      wipeLit(i); i++; continue;
     }
 
     const c = src[i], d = src[i + 1];
@@ -146,36 +158,36 @@ export function blankNonCode(src) {
       continue;
     }
     if (c === "'" || c === '"') {                 // string literal
-      wipe(i); i++;
+      wipeLit(i); i++;
       while (i < n && src[i] !== c && src[i] !== '\n') {
-        if (src[i] === '\\') { wipe(i); wipe(i + 1); i += 2; continue; }
-        wipe(i); i++;
+        if (src[i] === '\\') { wipeLit(i); wipeLit(i + 1); i += 2; continue; }
+        wipeLit(i); i++;
       }
-      if (i < n && src[i] === c) { wipe(i); i++; }
+      if (i < n && src[i] === c) { wipeLit(i); i++; }
       prev = 'x'; word = '';
       continue;
     }
-    if (c === '`') { wipe(i); i++; mode = 'tmpl'; continue; }
+    if (c === '`') { wipeLit(i); i++; mode = 'tmpl'; continue; }
     if (c === '/' && regexAllowed(prev, word)) {  // regex literal
-      wipe(i); i++;
+      wipeLit(i); i++;
       let inClass = false;
       while (i < n && src[i] !== '\n') {
         const r = src[i];
-        if (r === '\\') { wipe(i); wipe(i + 1); i += 2; continue; }
+        if (r === '\\') { wipeLit(i); wipeLit(i + 1); i += 2; continue; }
         if (r === '[') inClass = true;
         else if (r === ']') inClass = false;
         else if (r === '/' && !inClass) break;
-        wipe(i); i++;
+        wipeLit(i); i++;
       }
-      if (i < n && src[i] === '/') { wipe(i); i++; }
-      while (i < n && /[a-z]/.test(src[i])) { wipe(i); i++; }   // flags
+      if (i < n && src[i] === '/') { wipeLit(i); i++; }
+      while (i < n && /[a-z]/.test(src[i])) { wipeLit(i); i++; }   // flags
       prev = 'x'; word = '';
       continue;
     }
     if (c === '{') { depth++; prev = '{'; word = ''; i++; continue; }
     if (c === '}') {
       if (interp.length && depth === interp[interp.length - 1] + 1) {
-        interp.pop(); depth--; wipe(i); i++; mode = 'tmpl';     // close `${…}`
+        interp.pop(); depth--; wipeLit(i); i++; mode = 'tmpl';  // close `${…}`
         continue;
       }
       depth--; prev = '}'; word = ''; i++;
@@ -422,13 +434,95 @@ export function lintCrashGuardPresence(src, file = '<input>', executed = false) 
   }];
 }
 
+// ---------- rule 4: a secret spelled into a child process's argv ----------
+// THE DEFECT CLASS: a secret handed to a child process as an ARGUMENT. argv is
+// world-readable — `ps`, /proc/<pid>/cmdline — to every process on the runner
+// (the caller's other steps, every action they use), and an argv-logging wrapper
+// first on PATH records it. Nothing about a green run shows it. Shipped twice,
+// both times as a curl header:
+//   - a11y-audit/scripts/audit.sh, fixed v1.15.1 (bc89390):
+//       hdr=(-H "X-Verify-Source: $VERIFY_TOKEN")
+//     an array assignment on a line that never names curl — which is why the
+//     match keys on the flag and its value, never on the command name;
+//   - linkcheck/scripts/{linkcheck,sitemap-urls}.py, fixed v1.15.2 (7d3de93):
+//       ["-H", f"X-Verify-Source: {TOKEN}"]
+//     thousands of curl processes per run, each one carrying the token.
+// Both fixes hand curl `-H @file` from a mode-600 file, so the value never enters
+// argv. That shape has no `Name:` after the flag, so it never matches.
+//
+// THE RULE: a `-H` / `--header` whose VALUE expands a variable named like TOKEN,
+// SECRET, KEY or PASS — a substring match, case-insensitive (VERIFY_TOKEN,
+// apiKey, self.token, process.env.X_SECRET). The value is a `Name: …` literal,
+// and the variable enters it as `$VAR` / `${VAR}` (bash, JS template), `{expr}`
+// (Python f-string) or `"Name: " + VAR`. The flag and the value may sit on
+// different lines, as in a Python list exploded one element per line.
+//
+// Comments are not code: whole `#` comment lines in .sh/.py (audit.sh explains
+// its fix in exactly the text this rule matches), and every `//` / `/* */`
+// comment in .mjs via the scrubber above, run with its literals kept.
+//
+// KNOWN LIMITS, stated rather than papered over. Not seen: a header string built
+// on an earlier line and passed as `-H "$hdr"` (that is dataflow), `%` /
+// `.format()` formatting, a trailing `#` comment on a .sh/.py code line (it is
+// scanned, so it can fire), and other argv spellings of a secret (`-u user:$PASS`,
+// `-d token=…`, a query string). A substring match also fires on a non-secret
+// that merely looks like one (`$CACHE_KEY`) — annotate that, don't narrow the
+// regex. Scope is the EXECUTED set, as for rule 3; a library module that builds
+// the argv for an entrypoint is not scanned.
+const ARGV_EXT = ['.mjs', '.py', '.sh'];
+// 1 flag · 2 value's opening quote · 3 header name · 4 rest of the literal ·
+// 5 a `+ VAR` concatenated onto it. Between flag and value: bash whitespace,
+// wget's `=`, or a list's closing quote and comma (newlines included).
+const HEADER_ARG = /(-H|--header)(?:=|["'`]?\s*(?:,\s*)?)[fF]?(["'`])([A-Za-z][\w-]*):([^\n]*?)\2(?:\s*\+\s*([A-Za-z_][\w.]*))?/dg;
+const EXPANSION = /\$\{?\s*([A-Za-z_][\w.]*)|\{\s*([A-Za-z_][\w.]*)/g;
+const SECRET_NAME = /token|secret|key|pass/i;
+
+// `# lint-allow-argv-secret: <reason>` (`//` in .mjs), on the flagged line or
+// the line directly above it. A reason is REQUIRED, as for the other two pragmas:
+// the point is to record why the value is not a secret, not to switch the rule off.
+const ARGV_PRAGMA = /(?:\/\/|#)[ \t]*lint-allow-argv-secret:[ \t]*\S/;
+
+// The source with its comments blanked and everything else intact — offsets and
+// line numbers preserved, so a match maps straight back to the raw line.
+function commentsBlanked(src, ext) {
+  if (ext === '.mjs') return blankNonCode(src, { literals: false });
+  return src.split('\n').map((l) => (/^\s*#/.test(l) ? ' '.repeat(l.length) : l)).join('\n');
+}
+
+export function lintArgvSecret(src, file = '<input>', executed = false) {
+  if (!executed) return [];
+  const ext = path.extname(file);
+  if (!ARGV_EXT.includes(ext)) return [];
+  const code = commentsBlanked(src, ext);
+  const rawLines = src.split('\n');
+  const findings = [];
+  for (const m of code.matchAll(HEADER_ARG)) {
+    const exprs = [...m[4].matchAll(EXPANSION)].map((e) => e[1] || e[2]);
+    if (m[5]) exprs.push(m[5]);
+    const secret = exprs.find((e) => SECRET_NAME.test(e));
+    if (!secret) continue;
+    // Report where the secret is spelled: the value, not the flag.
+    const before = code.slice(0, m.indices[2][0]).split('\n');
+    const line = before.length, col = before[before.length - 1].length + 1;
+    if (ARGV_PRAGMA.test(rawLines[line - 1] || '') || ARGV_PRAGMA.test(rawLines[line - 2] || '')) continue;
+    findings.push({
+      file, line, col, kind: 'argv-secret',
+      what: `${m[1]} ${m[3]} ← ${secret}`,
+      text: (rawLines[line - 1] || '').trim(),
+      detail: secret,
+    });
+  }
+  return findings;
+}
+
 // Dispatch the whole rule set for one entrypoint. The JS rules (raw output,
 // guard ordering) are JS-only — running the JS scrubber over Python or bash
-// would produce noise, not findings — while rule 3 applies to every language,
-// but only to files that action.yml actually executes.
+// would produce noise, not findings — while rules 3 and 4 apply to every
+// language, but only to files that action.yml actually executes.
 export function lintEntrypoint(src, file = '<input>', executed = false) {
   const findings = path.extname(file) === '.mjs' ? lintSource(src, file) : [];
   findings.push(...lintCrashGuardPresence(src, file, executed));
+  findings.push(...lintArgvSecret(src, file, executed));
   return findings.sort((a, b) => a.line - b.line || a.col - b.col);
 }
 
@@ -530,6 +624,26 @@ const REMEDY_MISSING = [
   '  nothing to align (see sitemap-urls.py).',
 ];
 
+const REMEDY_ARGV = [
+  '',
+  'Why this is a finding:',
+  '  argv is world-readable: `ps` and /proc/<pid>/cmdline show every argument of',
+  '  every process to every other process on the runner (the caller\'s other steps,',
+  '  every action they use), and an argv-logging wrapper first on PATH records it.',
+  '  Shipped twice as a curl header: a11y-audit audit.sh (v1.15.1) and linkcheck',
+  '  linkcheck.py + sitemap-urls.py (v1.15.2).',
+  '',
+  'Fix — hand curl the header from a mode-600 file, so the value never enters argv:',
+  '  bash    ( umask 077; printf \'X-Verify-Source: %s\\n\' "$VERIFY_TOKEN" > "$dir/token-header" )',
+  '          curl -H "@$dir/token-header" …     # $dir from mktemp -d, removed on EXIT',
+  '  Python  write it once with os.open(p, O_WRONLY|O_CREAT|O_EXCL, 0o600) in a',
+  '          tempfile.mkdtemp() dir, then ["-H", "@" + p]',
+  '  …and drop the variable from the child\'s environment (export -n / env=).',
+  '',
+  'The value is not a secret (only its name looks like one)? Annotate it (a reason is required):',
+  '  # lint-allow-argv-secret: <why this value is not a secret>',
+];
+
 const REMEDY = [
   '',
   'Why this is a finding:',
@@ -568,7 +682,7 @@ function main() {
   // empty set means the action.yml parse broke and rule 3 has silently switched
   // itself off — indistinguishable, in a green run, from "every guard is present".
   if (executed.size === 0) {
-    say(`::error::lint-entrypoint-output: no executed scripts found in any action.yml under ${root} — rule 3 would pass vacuously, refusing to pass`);
+    say(`::error::lint-entrypoint-output: no executed scripts found in any action.yml under ${root} — rules 3 and 4 would pass vacuously, refusing to pass`);
     return 2;
   }
 
@@ -580,7 +694,7 @@ function main() {
   if (findings.length === 0) {
     // Name every file scanned: a green run has to be auditable, or "0 findings"
     // is indistinguishable from "scanned nothing".
-    say(`lint-entrypoint-output: ✅ clean — ${files.length} action entrypoint(s), no raw stdout/stderr writes, no dead crash guards, no missing crash guards`);
+    say(`lint-entrypoint-output: ✅ clean — ${files.length} action entrypoint(s), no raw stdout/stderr writes, no dead crash guards, no missing crash guards, no secrets in argv`);
     for (const f of files) say(`  · ${f}`);
     return 0;
   }
@@ -589,7 +703,8 @@ function main() {
   say('');
   const guards = findings.filter((f) => f.kind === 'dead-crash-guard');
   const missing = findings.filter((f) => f.kind === 'missing-crash-guard');
-  const raws = findings.filter((f) => f.kind !== 'dead-crash-guard' && f.kind !== 'missing-crash-guard');
+  const argv = findings.filter((f) => f.kind === 'argv-secret');
+  const raws = findings.filter((f) => f.kind === 'raw-output');
   for (const f of findings) {
     // Annotation content is derived from our own repo tree, never from input.
     let msg;
@@ -597,6 +712,8 @@ function main() {
       msg = `${f.what} is registered AFTER the entrypoint's main invocation — ${f.detail}, so the guard is dead code and has never run. Hoist it above the invocation. See .github/scripts/lint-entrypoint-output.mjs`;
     } else if (f.kind === 'missing-crash-guard') {
       msg = `${f.detail}. Add one, or annotate the file with \`lint-allow-no-crash-guard: <why failing loud is correct here>\`. See .github/scripts/lint-entrypoint-output.mjs`;
+    } else if (f.kind === 'argv-secret') {
+      msg = `a header value expands ${f.detail} into a child process's argv, which ps and /proc show to every process on the runner. Pass it as -H @file from a mode-600 file, or annotate with \`lint-allow-argv-secret: <why this is not a secret>\`. See .github/scripts/lint-entrypoint-output.mjs`;
     } else {
       msg = `${f.what} in an action entrypoint — output must go through a synchronous write (fs.writeSync), not an async stdout/stderr write. See .github/scripts/lint-entrypoint-output.mjs`;
     }
@@ -607,6 +724,7 @@ function main() {
   if (raws.length) for (const l of REMEDY) say(l);
   if (guards.length) for (const l of REMEDY_GUARD) say(l);
   if (missing.length) for (const l of REMEDY_MISSING) say(l);
+  if (argv.length) for (const l of REMEDY_ARGV) say(l);
 
   const summary = process.env.GITHUB_STEP_SUMMARY;
   if (summary) {
@@ -616,17 +734,19 @@ function main() {
       raws.length ? `${raws.length} raw stdout/stderr write(s) in action entrypoints. \`process.exit()\` does not drain an async write, so the output truncates at 64 KiB on macOS pipes.` : '',
       guards.length ? `${guards.length} crash guard(s) registered after the main invocation — dead code that has never run.` : '',
       missing.length ? `${missing.length} executed entrypoint(s) with no crash guard — a fault in the tool blocks a report-mode caller and arrives looking like a finding about their site.` : '',
+      argv.length ? `${argv.length} secret(s) spelled into a child process's argv — \`ps\` and /proc show argv to every process on the runner.` : '',
       '',
       '| file | line | finding |',
       '| --- | --- | --- |',
       ...findings.map((f) => {
-        const label = { 'dead-crash-guard': ' — dead crash guard', 'missing-crash-guard': ' — missing crash guard' }[f.kind] || '';
+        const label = { 'dead-crash-guard': ' — dead crash guard', 'missing-crash-guard': ' — missing crash guard', 'argv-secret': ' — secret in argv' }[f.kind] || '';
         return `| \`${f.file}\` | ${f.line} | \`${f.what}\`${label} |`;
       }),
       '',
       raws.length ? 'Fix: emit through `say`/`sayErr` (`fs.writeSync`) or `fs.appendFileSync(summaryFile, …)`.' : '',
       guards.length ? 'Fix: hoist the `process.on(...)` registration above the main IIFE invocation.' : '',
       missing.length ? 'Fix: add a guard that reports the fault and exits `FAIL_ON_X ? 1 : 0`, or annotate with `lint-allow-no-crash-guard: <reason>`.' : '',
+      argv.length ? 'Fix: pass the header as `-H @file` from a mode-600 file, or annotate with `lint-allow-argv-secret: <reason>`.' : '',
       '',
     ].join('\n');
     try { fs.appendFileSync(summary, md + '\n'); } catch { /* summary is best-effort */ }

@@ -3,9 +3,10 @@ name: lint
 # Repo-internal hygiene gate — NOT consumed by any caller, so a change here
 # needs no version bump and no `v1` tag move.
 #
-# Guards two defect classes in action entrypoints. Both are INVISIBLE on a green
-# CI run, which is why they survived review and why this job blocks rather than
-# reports.
+# Guards four defect classes in action entrypoints (every rule, its rationale and
+# its pragma: .github/scripts/lint-entrypoint-output.mjs). All four are INVISIBLE
+# on a green CI run, which is why they survived review and why this job blocks
+# rather than reports.
 #
 # 1. ASYNC STDOUT (fixed by hand twice: test-suite v1.7.0, verify-homepage
 #    v1.7.1) — an entrypoint that emits its report with
@@ -22,6 +23,13 @@ name: lint
 #    fail-on-vuln, and nothing was written to the step summary. Nothing about a
 #    passing run distinguishes a working guard from a dead one — only a crash
 #    does, and by then the diagnostic is already lost.
+#
+# 3. MISSING CRASH GUARD (v1.12.0) — an executed .mjs/.py/.sh entrypoint with no
+#    guard at all, so a fault in the tool blocks a caller who asked for report mode.
+#
+# 4. SECRET IN ARGV (a11y-audit v1.15.1, linkcheck v1.15.2) — a `-H` header whose
+#    value expands a TOKEN/SECRET/KEY/PASS variable. `ps` shows argv to every
+#    process on the runner; the run itself stays green.
 #
 # No `paths:` filter, deliberately: the gate must also re-run when a NEW action
 # directory lands (entrypoints are discovered from `action.yml`, not a list) and
@@ -52,5 +60,5 @@ jobs:
       - name: Lint self-test (scrubber + matcher fixtures)
         run: node .github/scripts/lint-entrypoint-output.selftest.mjs
 
-      - name: No async stdout writes, no dead crash guards, in action entrypoints
+      - name: No async stdout, dead or missing crash guards, or secrets in argv, in action entrypoints
         run: node .github/scripts/lint-entrypoint-output.mjs

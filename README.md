@@ -543,7 +543,7 @@ one adjacent to a `process.exit()` — in the v1.7.1 case the two sat lines apar
 Two allowances: the `catch` fallback of an `fs.writeSync` on the same line, and
 `// lint-allow-raw-output: <reason>` (a reason is required).
 
-It carries **three** rules, all of the same shape — defects a green run cannot
+It carries **four** rules, all of the same shape — defects a green run cannot
 distinguish from correct code:
 
 1. **raw async stdout writes** (above) — `.mjs` only.
@@ -554,6 +554,15 @@ distinguish from correct code:
    pure library module cannot set an exit code. Both discovery passes fail
    **closed** on an empty result: a rule that has silently switched itself off
    looks exactly like a rule with nothing to report.
+4. **a secret spelled into a child process's argv** — `.mjs` / `.py` / `.sh`, the
+   same executed set as rule 3. Fires on a `-H` / `--header` whose value expands a
+   variable named like `TOKEN` / `SECRET` / `KEY` / `PASS` (case-insensitive):
+   `hdr=(-H "X-Verify-Source: $VERIFY_TOKEN")` and `["-H", f"X-Verify-Source: {TOKEN}"]`
+   are the shapes v1.15.1 and v1.15.2 fixed. `ps` shows argv to every process on
+   the runner. The fix, `-H @file` from a mode-600 file, never matches. Comments are
+   skipped. A name that only looks secret takes
+   `# lint-allow-argv-secret: <reason>` (`//` in `.mjs`) on the line or the line
+   above it, and the reason is required.
 
 Known limit, stated rather than papered over: for bash, rule 3 matches any
 `trap … EXIT`, so a pure **cleanup** trap reads as a guard. That is why

@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  lintSource, lintEntrypoint, lintCrashGuardPresence,
+  lintSource, lintEntrypoint, lintCrashGuardPresence, lintArgvSecret,
   discoverEntrypoints, discoverExecuted, blankNonCode,
 } from './lint-entrypoint-output.mjs';
 
@@ -126,6 +126,27 @@ check('blankNonCode preserves length and line count',
     const b = blankNonCode(s);
     return b.length === s.length && b.split('\n').length === s.split('\n').length;
   })());
+// An astral character (an emoji — six .mjs entrypoints carry one) is TWO code
+// units. A code-point output array put every later wipe one slot late per astral
+// char: with two of them, this comment's wipe ate the newline and the `c` of
+// `console`, and the finding on the next line vanished.
+check('astral characters do not desync the scrubber',
+  (() => {
+    const s = "const a = '🔒🔒'; // two astral chars\nconsole.log(a);\n";
+    const b = blankNonCode(s);
+    return b.length === s.length && b.split('\n')[1] === 'console.log(a);' && count(s) === 1;
+  })(),
+  JSON.stringify(blankNonCode("const a = '🔒🔒'; // two astral chars\nconsole.log(a);\n")));
+// Rule 4's view: comments go, every literal stays exactly as written — including
+// a `//` inside a string or a template, which is not a comment.
+check('literals:false blanks comments only',
+  (() => {
+    const s = "const u = 'https://x/a'; // c\nconst t = `k ${v} // t`; /* b */ const r = /['\"]/;";
+    const k = blankNonCode(s, { literals: false });
+    return k.length === s.length && k.includes("'https://x/a'") && k.includes('`k ${v} // t`')
+      && k.includes("/['\"]/") && !k.includes('// c') && !k.includes('/* b */');
+  })(),
+  JSON.stringify(blankNonCode("const u = 'https://x/a'; // c\nconst t = `k ${v} // t`; /* b */ const r = /['\"]/;", { literals: false })));
 
 // ---------------------------------------------------------------------------
 say('\n# the pragma escape hatch');
@@ -297,6 +318,95 @@ check('pure library modules are NOT in the executed set',
   !['deps-currency/scripts/engine.mjs', 'seo-aeo/scripts/checks.mjs', 'test-suite/scripts/detect.mjs',
     'security-baseline/scripts/tiers.mjs'].some((f) => executedSet.has(f)),
   JSON.stringify([...executedSet].sort()));
+
+// ---------------------------------------------------------------------------
+// RULE 4 — a secret spelled into a child process's argv.
+//
+// The positives are the shipped defects verbatim and the load-bearing negatives
+// are the shipped FIXES verbatim, so the rule is pinned from both sides on the
+// exact text it exists for: a matcher that stops seeing the defect, or starts
+// firing on the fix, goes red here before it ever reads the live tree.
+say('\n# rule 4: a secret spelled into a child process\'s argv (.sh / .py / .mjs)');
+
+const argv = (file, ...lines) => lintArgvSecret(src(...lines), file, true);
+const leaks = (file, ...lines) => argv(file, ...lines).length;
+
+// --- the shipped defects, verbatim.
+check('shell: array assignment on a line that never names curl (audit.sh @ da689db:87)',
+  leaks('a/scripts/x.sh', '[ -n "${VERIFY_TOKEN:-}" ] && hdr=(-H "X-Verify-Source: $VERIFY_TOKEN")') === 1);
+check('shell: inline on the curl line',
+  leaks('a/scripts/x.sh', 'curl -sS -H "X-Verify-Source: ${VERIFY_TOKEN}" "$sitemap_url"') === 1);
+check('Python: list with an f-string (linkcheck.py @ 25e83a6:146)',
+  leaks('a/scripts/x.py', '    return ["-H", f"X-Verify-Source: {TOKEN}"] if (TOKEN and is_internal(url)) else []') === 1);
+check('Python: the same, appended (sitemap-urls.py @ 25e83a6:78)',
+  leaks('a/scripts/x.py', '                cmd += ["-H", f"X-Verify-Source: {TOKEN}"]') === 1);
+
+// --- other spellings of the same leak.
+check('Python: list exploded one element per line (flag and value on different lines)',
+  leaks('a/scripts/x.py', 'cmd = [', '    "curl",', '    "-H",', '    f"X-Verify-Source: {TOKEN}",', '    url,', ']') === 1);
+check('a scheme before the variable (Authorization: Bearer $GITHUB_TOKEN)',
+  leaks('a/scripts/x.sh', 'curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" "$api"') === 1);
+check('--header, and wget\'s --header=',
+  leaks('a/scripts/x.sh', 'curl --header "X-Api-Key: $API_KEY" "$u"', 'wget --header="X-Api-Key: $API_KEY" "$u"') === 2);
+check('Python: concatenation ("Name: " + VAR)',
+  leaks('a/scripts/x.py', 'cmd += ["-H", "X-Verify-Source: " + TOKEN]') === 1);
+check('.mjs: template literal in a spawn argv',
+  leaks('a/scripts/x.mjs', "spawnSync('curl', ['-H', `X-Verify-Source: ${process.env.VERIFY_TOKEN}`, url]);") === 1);
+check('case-insensitive on the variable (self.token, $db_password)',
+  leaks('a/scripts/x.py', 'cmd += ["-H", f"X-Verify-Source: {self.token}"]') === 1
+  && leaks('a/scripts/x.sh', 'curl -H "X-Db-Auth: $db_password" "$u"') === 1);
+
+// --- the shipped fixes, verbatim: `-H @file` keeps the value out of argv.
+check('NOT the fix: -H "@$file" from a mode-600 file (audit.sh, v1.15.1)',
+  leaks('a/scripts/x.sh', '  hdr=(-H "@$workdir/token-header")') === 0);
+// The load-bearing negative: a TOKEN-named call right after the flag. The value
+// is "@", not a `Name:` literal, so it must not match — or the fix itself blocks.
+check('NOT the fix: ["-H", "@" + _token_header()] (linkcheck.py, v1.15.2)',
+  leaks('a/scripts/x.py', '    return ["-H", "@" + _token_header()] if (TOKEN and is_internal(url)) else []') === 0);
+check('NOT the header written into that file (no flag: the value never reaches argv)',
+  leaks('a/scripts/x.sh', "  ( umask 077; printf 'X-Verify-Source: %s\\n' \"$VERIFY_TOKEN\" > \"$workdir/token-header\" ) ||") === 0
+  && leaks('a/scripts/x.py', '                f.write(f"X-Verify-Source: {TOKEN}\\n")') === 0);
+check('NOT a header whose variable is not secret-named',
+  leaks('a/scripts/x.sh', 'curl -H "X-Request-Id: $REQUEST_ID" -H "Accept: application/json" "$u"') === 0);
+
+// --- comments are not code.
+check('NOT a comment line (audit.sh v1.15.1 explains its fix in exactly this text)',
+  leaks('a/scripts/x.sh', '# `-H "X-Verify-Source: $VERIFY_TOKEN"`: argv is world-readable (`ps`, /proc) to') === 0
+  && leaks('a/scripts/x.py', '    # never as `-H "X-Verify-Source: {TOKEN}"`') === 0);
+check('NOT a .mjs comment — line, trailing or block (the scrubber, literals kept)',
+  leaks('a/scripts/x.mjs',
+    "// never ['-H', `X-Verify-Source: ${token}`]",
+    "run(); // nor ['-H', `X-Verify-Source: ${token}`]",
+    '/*',
+    " * ['-H', `X-Verify-Source: ${token}`]",
+    ' */') === 0);
+
+// --- the pragma: a reason is required, and it reaches one line up, no further.
+check('pragma with a reason, same line',
+  leaks('a/scripts/x.sh', 'curl -H "X-Cache-Key: $CACHE_KEY" "$u"  # lint-allow-argv-secret: a cache key, not a credential') === 0);
+check('pragma with a reason, line above (// in .mjs)',
+  leaks('a/scripts/x.mjs', '// lint-allow-argv-secret: a cache key, not a credential', "run(['-H', `X-Cache-Key: ${cacheKey}`]);") === 0);
+check('a BARE pragma does NOT exempt',
+  leaks('a/scripts/x.sh', '# lint-allow-argv-secret:', 'curl -H "X-Cache-Key: $CACHE_KEY" "$u"') === 1);
+check('a pragma two lines above does NOT exempt',
+  leaks('a/scripts/x.py', '# lint-allow-argv-secret: stale', '', 'cmd += ["-H", f"X-Cache-Key: {CACHE_KEY}"]') === 1);
+
+// --- scope, dispatch and reporting.
+check('a file action.yml never executes is out of scope',
+  lintArgvSecret(src('cmd += ["-H", f"X-Verify-Source: {TOKEN}"]'), 'a/scripts/lib.py', false).length === 0);
+// lintEntrypoint is what main() and the live-tree check below call — pin that
+// rule 4 is wired into it for a non-JS file, not merely callable on its own.
+check('lintEntrypoint runs rule 4 on a .sh entrypoint',
+  lintEntrypoint(src('trap on_exit EXIT', 'hdr=(-H "X-Verify-Source: $VERIFY_TOKEN")'), 'a/scripts/x.sh', true)
+    .filter((f) => f.kind === 'argv-secret').length === 1);
+const EXPLODED = ['cmd = [', '    "-H",', '    f"X-Verify-Source: {TOKEN}",', ']'];
+check('reports the VALUE\'s line and column, and names the variable',
+  (() => {
+    const f = argv('a/scripts/x.py', ...EXPLODED)[0];
+    return f && f.kind === 'argv-secret' && f.line === 3 && f.col === 6
+      && f.detail === 'TOKEN' && f.what === '-H X-Verify-Source ← TOKEN';
+  })(),
+  JSON.stringify(argv('a/scripts/x.py', ...EXPLODED)));
 
 // ---------------------------------------------------------------------------
 say('\n# the live tree is clean (the lint is wired as blocking)');
