@@ -49,6 +49,37 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.19.3** *(tag not yet cut; lands with the next `v1` move)* — `test-suite` prints its job log
+once on a local run, and no longer crashes there on Linux. `run.mjs` appended the step summary to
+`$GITHUB_STEP_SUMMARY`, or to `/dev/stdout` when it was unset, unguarded. On Linux, opening
+`/dev/stdout` re-opens fd 1 and fails with ENXIO when stdout is a socket, which is what node's
+`child_process` hands a child: `finish()` threw after printing the verdict line, the crash handler
+printed a second one (`status=error — test-suite crashed: ENXIO`), threw again, and node exited 1
+with a bare stack whatever `fail-on-fail` said, report-only included. Wherever that open works
+(macOS, where it dups fd 1; a Linux file, pipe or terminal), a local run printed the whole summary
+after the job log, a FAIL's output tail and verdict a second time. `run.mjs` now follows the
+v1.16.0/v1.18.0/v1.19.1 rule: `/dev/stdout` as the summary means none, and a local run prints
+exactly what the Actions job log carries. An unwritable summary is a fault in the action like any
+other: the verdict line is already in the log, the crash line names the fault, and the exit is
+`fail-on-fail ? 1 : 0` instead of an unhandled throw. On Actions nothing changes. Over 480 env combinations of the
+fixtures (working directory, stack, test-command, fail-on-fail) and 9 injected crashes, each with
+a real summary file, the old and new `run.mjs` write byte-identical summaries, logs and stderr with
+the same exit codes. `scripts/selftest.mjs` gains local-run legs, with no summary and with
+`/dev/stdout`, each with stdout both a socket and an `O_APPEND` file, asserting one verdict line,
+the verdict's exit code, no crash, and a log byte-identical to the Actions run's; and legs for an
+unwritable summary. A count of verdict lines alone passes against the old code on a file stdout:
+the duplicate is the summary's markdown, a different shape; the byte comparison catches it. Each
+of 10 targeted mutants turns the self-test red, on macOS and under an emulation of Linux's ENXIO;
+under the emulation, the mutant that keeps the fallback and swallows the failed append is caught
+only by the file-stdout legs. The selftest byte counts are re-measured. `a11y-audit` and
+`latin-urls` keep their `/dev/stdout` fallback: the append is guarded, so on a socket stdout a local
+run loses only the markdown notes, while the results reach the log (pa11y-ci's per-URL output,
+latin-urls' stderr mirror) and the exit code is unchanged; dropping the fallback without echoing
+the notes to the log would lose them on every local run. **Caller-visible:** nothing on Actions.
+A local run prints the job log once. No input or verdict changed; the one exit-code change is an
+unwritable summary, which now exits under `fail-on-fail` like every other fault. The `v1` move
+newly-blocks nobody.
+
 **v1.19.2** *(tag not yet cut; lands with the next `v1` move)* — `deps-currency` tells a failed
 issue lookup apart from "no issue open". `findOpenIssue` read the open tracking issue through a
 helper that returned `null` on any gh failure (a non-zero exit, or output that was not JSON), which
@@ -796,7 +827,7 @@ it was deleted in v1.15.0), and why the behavioural self-tests — not this lint
 are the load-bearing layer.
 
 The seven `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
-`console.log(…)` then `process.exit(…)`, but emit 4117–17124 bytes, at least three
+`console.log(…)` then `process.exit(…)`, but emit 4296–17124 bytes, at least three
 times under the pipe buffer, so they cannot truncate. Don't "fix" them.
 
 Repo-internal only: no caller consumes this lint, so changing it needs **no

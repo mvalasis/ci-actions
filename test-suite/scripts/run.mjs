@@ -15,14 +15,20 @@ const STACK = (env.STACK || 'auto').trim();
 const TEST_COMMAND = (env.TEST_COMMAND || '').trim();
 const FAIL_ON_FAIL = (env.FAIL_ON_FAIL || 'false').trim() === 'true';
 
-const summaryFile = env.GITHUB_STEP_SUMMARY || '/dev/stdout';
+// The step summary is written only when there is one; a local run prints the job-log mirror (say(),
+// below) and nothing else. `/dev/stdout` as the summary (the old fallback, and a local idiom) means
+// none. Appending the summary there printed it after the log lines, a FAIL's output tail and verdict
+// a second time; and on Linux, where opening /dev/stdout re-opens fd 1, the open fails ENXIO when
+// stdout is a socket (what node's child_process hands a child), so the run crashed. Same rule as
+// v1.16.0/v1.18.0/v1.19.1.
+const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';
 const lines = [];
 const note = (s = '') => lines.push(s);
 // Job-log verdict icons. no-stack / no-tests are ⚠️ rather than ✅ ON PURPOSE: both exit 0 (the
 // "a repo without tests is never blocked" floor stands), but nothing was verified — rendering
 // them as a green tick is the false-green this mirror exists to expose.
 const ICON = { pass: '✅', fail: '❌', 'no-tests': '⚠️', 'no-stack': '⚠️', error: '❌' };
-const flush = () => fs.appendFileSync(summaryFile, lines.join('\n') + '\n');
+const flush = () => { if (summaryFile) fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); };
 
 const MODE = FAIL_ON_FAIL ? 'block-on-fail' : 'report-only';
 const WD_REL = safe(path.relative(process.cwd(), WD) || '.', 120);
@@ -55,7 +61,9 @@ function echoTail(tail) {
 }
 
 // Single exit funnel: guarantees the job log carries a verdict line on EVERY path, including the
-// early green ones (no-stack / no-tests) that are the easiest to mistake for "tests ran".
+// early green ones (no-stack / no-tests) that are the easiest to mistake for "tests ran". The line
+// goes out before the summary write, so when that write is what throws, the verdict is already in
+// the log; the throw then takes the crash path at the bottom.
 function finish(status, detail, code) {
   say(`test-suite: ${ICON[status] || ''} status=${status} — ${detail}`);
   flush();
@@ -218,5 +226,9 @@ function runShell(cmd, cwd) {
   note(`- ❌ test-suite crashed: ${safe(String(e && e.stack || e), 400)}`);
   note('');
   note('**status: error**');
-  finish('error', `test-suite crashed: ${safe(String(e && e.message || e), 200)}`, FAIL_ON_FAIL ? 1 : 0);
+  // An unwritable summary lands here too, and finish()'s flush then throws again, inside this
+  // handler: unguarded, node exits 1 with a bare stack whatever fail-on-fail says. By then finish()
+  // has put the crash line in the log, so the exit is all that is left to do.
+  const code = FAIL_ON_FAIL ? 1 : 0;
+  try { finish('error', `test-suite crashed: ${safe(String(e && e.message || e), 200)}`, code); } catch { process.exit(code); }
 });

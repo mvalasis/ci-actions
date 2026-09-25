@@ -153,6 +153,15 @@ test-suite: ✅ status=pass — PASS — suite green · 3 passed, 3 total · exi
 - A custom runner whose output doesn't match a known format reads `counts unparsed` — expected,
   not a fault: the **exit code** decides the verdict, counts only enrich the line (see above).
 
+A **local run** (no `GITHUB_STEP_SUMMARY`, or `GITHUB_STEP_SUMMARY=/dev/stdout`) prints the job log
+and nothing else, byte for byte what an Actions run logs; the table exists only where there is a
+step summary. Before v1.19.3 a local run also appended the summary to `/dev/stdout`, which printed
+a FAIL's output tail and verdict a second time. On Linux with a socket stdout (a run spawned from
+node) that open fails with ENXIO, and the run crashed with exit 1, report-only included. If the
+summary cannot be written, that is a fault in the action, not in your tests: the verdict line is
+already in the log, a `status=error — test-suite crashed: …` line names the fault, and the exit
+is `fail-on-fail ? 1 : 0`.
+
 ## Offline self-test
 
 `scripts/selftest.mjs` is a network-free regression guard with two layers: the **pure core**
@@ -169,6 +178,14 @@ echoes a real output tail, the two nothing-ran paths say `NOTHING RAN` and name 
 and a test command that prints `::error::` / `::stop-commands::` / `::set-output` **cannot** get
 those to line-start in the log (they stay visible behind the gutter) while the action's own
 `::group::` markers survive.
+
+It also runs `run.mjs` the way a local run does, with no step summary and with
+`GITHUB_STEP_SUMMARY=/dev/stdout`, and asserts one verdict line, the verdict's exit code, no crash,
+and a log byte-identical to the Actions run's. Each case runs with stdout as a socket (what
+`spawnSync` hands a child) and as an `O_APPEND` file. The file is the load-bearing one: on Linux a
+socket stdout makes the `/dev/stdout` open fail (ENXIO), so if that failure were swallowed, a
+socket-only leg would pass on the CI runner against a duplicate print. An unwritable summary (a
+directory) is asserted to leave the verdict and the fault in the log and exit under `fail-on-fail`.
 
 ```bash
 node test-suite/scripts/selftest.mjs    # exits non-zero on any regression

@@ -58,11 +58,11 @@
 //
 // The seven `*/scripts/selftest.mjs` files legitimately end in `console.log(...)`
 // then `process.exit(...)`. They are exempt because they CANNOT hit the bug:
-// measured output is 4117–17124 bytes (contract-check 5907, seo-aeo 5387,
+// measured output is 4296–17124 bytes (contract-check 5907, seo-aeo 5387,
 // form-protection 5660, deps-currency 11946 since v1.19.2's issue-lookup cases,
-// security-baseline 17124 since v1.19.0's could-not-look legs, test-suite 4117,
-// verify-homepage 4296 since v1.19.1's report-routing legs) — at least three times
-// under the 65,536-byte pipe buffer.
+// security-baseline 17124 since v1.19.0's could-not-look legs, test-suite 6461
+// since v1.19.3's local-run legs, verify-homepage 4296 since v1.19.1's
+// report-routing legs) — at least three times under the 65,536-byte pipe buffer.
 // Do not "fix" them; the exemption is the finding, not an oversight.
 //
 // ALLOWANCES (both deliberate, both narrow)

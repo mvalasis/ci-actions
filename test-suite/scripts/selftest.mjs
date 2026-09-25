@@ -2,7 +2,9 @@
 // (1) the pure core (detect.mjs: stack detection, command resolution, count parsing, verdict, the
 // never-block "no tests = green" floor) against fixture dirs, and (2) the run.mjs CLI END-TO-END
 // against committed node fixtures whose `test` script is a self-contained Node stub emitting real
-// vitest-shaped output — so we prove the action detects RED and reports GREEN with no network.
+// vitest-shaped output — so we prove the action detects RED and reports GREEN with no network —
+// and where its output goes: a local run prints the job log once, with no step summary, and an
+// unwritable summary exits under fail-on-fail.
 // Run: node scripts/selftest.mjs (also runs in CI). Exits non-zero on any regression. Mirrors
 // seo-aeo/selftest.mjs + security-baseline/selftest.mjs.
 import fs from 'node:fs';
@@ -36,6 +38,35 @@ function runCli(env) {
   try { fs.unlinkSync(summaryPath); } catch { /* ignore */ }
   return { exit: r.status, summary, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
+
+// Run run.mjs the way a LOCAL run does. The runner's own GITHUB_STEP_SUMMARY is dropped (else this
+// is the CI shape again, writing into this self-test's own step summary); a leg that wants one
+// names it. stdout is either what spawnSync hands a child — a socket — or an O_APPEND file; the
+// "local run" block below says why both.
+function spawnLocal(env, stdout) {
+  const inherited = { ...process.env };
+  delete inherited.GITHUB_STEP_SUMMARY;
+  const opts = { encoding: 'utf8', env: { ...inherited, FORCE_COLOR: '0', ...env } };
+  if (stdout === 'socket') {
+    const r = spawnSync(process.execPath, [RUN], opts);
+    return { exit: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-stdout-'));
+  const outPath = path.join(dir, 'stdout.txt');
+  const fd = fs.openSync(outPath, 'a');
+  try {
+    const r = spawnSync(process.execPath, [RUN], { ...opts, stdio: ['ignore', fd, 'pipe'] });
+    return { exit: r.status, stdout: fs.readFileSync(outPath, 'utf8'), stderr: r.stderr || '' };
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// The job log's verdict lines (`test-suite: … status=…`), and a crash's fingerprints: the crash
+// line, or a stack frame that an unhandled throw prints to stderr.
+const verdictLines = (stdout) => stdout.split('\n').filter((l) => /^test-suite: .*status=/.test(l));
+const crashed = (r) => /crashed/.test(r.stdout + r.stderr) || /^\s+at /m.test(r.stderr);
 
 // A job-log line is a GitHub workflow command only when the line STARTS with `::`. Our own
 // ::group::/::endgroup:: markers are code-controlled and allowed; anything else that reaches
@@ -234,6 +265,53 @@ console.log('\n# job-log mirror — workflow-command injection is defanged');
 
   // Green runs echo the tail too — that is the whole point of the mirror.
   check('SUCCESS echoes the output tail (not just failures)', /::group::test output/.test(inj.stdout) && /status=pass/.test(inj.stdout), inj.stdout);
+}
+
+console.log('\n# local run — the job log exactly once, the step summary only when there is one');
+{
+  // Before v1.19.3 a run with no GITHUB_STEP_SUMMARY (a local run), or with
+  // GITHUB_STEP_SUMMARY=/dev/stdout, appended the step summary to /dev/stdout. Where that open
+  // works (macOS, where it dups fd 1; a Linux file, pipe or tty) the summary followed the log lines,
+  // a FAIL's output tail and verdict a second time. On Linux with a SOCKET stdout, which is what
+  // spawnSync hands a child, it fails ENXIO: finish() threw after the verdict line, the crash path
+  // printed a second one, threw again, and node exited 1 with a bare stack even in report-only.
+  // So every case runs with a socket AND an O_APPEND file as stdout: on the ubuntu runner the socket
+  // leg sees only the crash, and the file leg only the duplicate. RED under fail-on-fail exits 1
+  // like that crash, so the output is the oracle there, not the exit code. The RED stub runs as a
+  // test-command override: its output is fixed, so two runs' job logs compare byte for byte with
+  // no package manager's chatter in the tail.
+  const RED = { WORKING_DIRECTORY: path.join(FIX, 'node-redgreen'), TEST_COMMAND: `"${process.execPath}" vitest-stub.mjs` };
+  for (const [mode, FAIL_ON_FAIL, exit] of [['report-only', 'false', 0], ['fail-on-fail', 'true', 1]]) {
+    const ci = runCli({ ...RED, FAIL_ON_FAIL });
+    for (const [label, sink] of [['no GITHUB_STEP_SUMMARY', undefined], ['GITHUB_STEP_SUMMARY=/dev/stdout', '/dev/stdout']]) {
+      for (const stdout of ['socket', 'file']) {
+        const r = spawnLocal({ ...RED, FAIL_ON_FAIL, GITHUB_STEP_SUMMARY: sink }, stdout);
+        const v = verdictLines(r.stdout);
+        check(`RED ${mode}, ${label}, stdout a ${stdout}: one verdict line, exit ${exit}, no crash`,
+          r.exit === exit && v.length === 1 && /status=fail/.test(v[0]) && !crashed(r),
+          `exit=${r.exit} verdicts=${JSON.stringify(v)} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`);
+        check(`RED ${mode}, ${label}, stdout a ${stdout}: prints the Actions job log, byte for byte, and nothing else`,
+          ci.stdout.length > 0 && r.stdout === ci.stdout, `extra: ${JSON.stringify(r.stdout.replace(ci.stdout, '').slice(0, 200))}`);
+      }
+    }
+  }
+}
+
+console.log('\n# unwritable step summary — the verdict and the fault in the log, fail-on-fail decides the exit');
+{
+  // The summary write throws (EISDIR) after finish() has printed the verdict line, and the crash path
+  // runs. Its own finish() flushed again, unguarded, before v1.19.3: that throw escaped the crash
+  // handler and node exited 1 with a bare stack whatever fail-on-fail said. A tool fault exits
+  // `fail-on-fail ? 1 : 0` like every other one — so a GREEN suite under fail-on-fail exits 1 here.
+  const sinkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-summary-dir-'));
+  for (const [mode, FAIL_ON_FAIL, fixture, first, exit] of [['RED report-only', 'false', 'node-redgreen', 'fail', 0], ['GREEN fail-on-fail', 'true', 'node-green', 'pass', 1]]) {
+    const r = runCli({ WORKING_DIRECTORY: path.join(FIX, fixture), FAIL_ON_FAIL, GITHUB_STEP_SUMMARY: sinkDir });
+    const v = verdictLines(r.stdout);
+    check(`${mode}: the log has the verdict (status=${first}), then the fault (status=error, EISDIR)`,
+      v.length === 2 && v[0].includes(`status=${first} — `) && /status=error — test-suite crashed: EISDIR/.test(v[1]), JSON.stringify(v));
+    check(`${mode}: exit ${exit}, not an unhandled throw`, r.exit === exit && !/^\s+at /m.test(r.stderr), `exit=${r.exit} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`);
+  }
+  fs.rmSync(sinkDir, { recursive: true, force: true });
 }
 
 console.log(failed === 0 ? '\n✅ all test-suite self-tests passed\n' : `\n❌ ${failed} self-test(s) failed\n`);
