@@ -234,6 +234,12 @@ check "…read from a mode-600 file" "$(grep -qx -- '-rw-------' "$WORK/curl-hdr
 check "…and follows no redirect (no -L / --location)" "$(grep -qE '\[(-[A-Za-z]*L[A-Za-z]*|--location|--location-trusted)\]' "$WORK/curl-argv.log" 2>/dev/null && echo 1 || echo 0)"
 check "pa11y-ci does NOT inherit the token (nor do Chromium and its deps)" "$(in_file "$TOKEN" "$WORK/pa11y-env.txt" && echo 1 || echo 0)"
 check "…but its config still sends X-Verify-Source to the audited page" "$(in_file "\"X-Verify-Source\": \"$TOKEN\"" "$WORK/pa11y-cfg-seen.json" && echo 0 || echo 1)"
+# `\?` is a GNU BRE extension that BSD sed reads as a literal `?`. Until v1.15.3
+# the <loc> strip was `sed 's#</\?loc>##g'`, so on macOS both tags survived and
+# the config handed pa11y-ci "<loc>https://…</loc>" to load. GNU sed stripped
+# them, so only the macOS leg can go red here.
+check "the sitemap's URL reaches the config bare (\"https://example.com/\")" "$(in_file '"https://example.com/"' "$WORK/pa11y-cfg-seen.json" && echo 0 || echo 1)"
+check "…with no <loc> or </loc> left in it" "$([ -s "$WORK/pa11y-cfg-seen.json" ] && ! grep -qF 'loc>' "$WORK/pa11y-cfg-seen.json" && echo 0 || echo 1)"
 check "the config is not the shared, fixed /tmp/pa11y-ci.json" "$([ -s "$WORK/pa11y-cfg-path.txt" ] && ! grep -qx '/tmp/pa11y-ci.json' "$WORK/pa11y-cfg-path.txt" && echo 0 || echo 1)"
 check "…it is mode 600 while the script runs" "$(grep -qx -- '-rw-------' "$WORK/pa11y-cfg-mode.txt" 2>/dev/null && echo 0 || echo 1)"
 check "…inside a 0700 dir" "$(grep -qx 'drwx------' "$WORK/pa11y-cfgdir-mode.txt" 2>/dev/null && echo 0 || echo 1)"

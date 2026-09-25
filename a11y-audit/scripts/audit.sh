@@ -119,7 +119,7 @@ fi
 # sitemap then yielded no URLs and the run reported a clean skip.
 urls=""
 if [ -n "${SITEMAP_URL:-}" ]; then
-  urls=$(curl -fsS --max-time 30 ${hdr[@]+"${hdr[@]}"} "$SITEMAP_URL" 2>/dev/null | grep -oE '<loc>[^<]+</loc>' | sed 's#</\?loc>##g')
+  urls=$(curl -fsS --max-time 30 ${hdr[@]+"${hdr[@]}"} "$SITEMAP_URL" 2>/dev/null | grep -oE '<loc>[^<]+</loc>' | sed -e 's#<loc>##g' -e 's#</loc>##g')
 fi
 if [ -n "${URLS:-}" ]; then
   urls=$(printf '%s\n%s\n' "$urls" "$URLS")

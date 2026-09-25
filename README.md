@@ -49,6 +49,20 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.15.3** — `a11y-audit` strips the sitemap's `<loc>` tags under BSD sed too. `audit.sh`
+extracted each sitemap URL with `sed 's#</\?loc>##g'`, and `\?` is a GNU BRE extension:
+BSD sed (macOS) reads it as a literal `?`, so neither tag matched and the pa11y-ci config
+listed `"<loc>https://…</loc>"` strings, not URLs, for pa11y to load. The strip is now two
+literal substitutions, `sed -e 's#<loc>##g' -e 's#</loc>##g'`; nothing else in the script
+changed. GNU sed honours `\?`, so the Linux runners were never affected. A
+local run on macOS was, and the self-test's macOS leg ran the broken path green because
+nothing asserted the URL list (found measuring v1.15.1 on macOS). `scripts/selftest.sh`
+case H now asserts that the config pa11y-ci receives lists the sitemap's URL bare, with no
+`<loc>` or `</loc>` left. Both checks go red on bash 3.2 with BSD sed under the old line and
+under three other mutants (opening tag only, closing tag only, no strip). **Caller-visible:**
+nothing. All seven callers run on `ubuntu-latest` (GNU sed) and pass `urls`, not
+`sitemap-url`.
+
 **v1.15.2** — `linkcheck` keeps `verify-token` out of curl's argv and environment, the
 same class v1.15.1 closed in `a11y-audit`. `linkcheck.py` and `sitemap-urls.py` handed
 every internal fetch `-H "X-Verify-Source: <token>"` (thousands of curl processes per
