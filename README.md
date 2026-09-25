@@ -56,6 +56,65 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.19.4** *(tag not yet cut; lands with the next `v1` move)* — `deps-currency` no longer reads
+an osv-scanner that could not look as one that found nothing. `runOsv()` never read osv-scanner's
+exit status: it parsed an empty stdout as `{}` and noted an unparseable one as "treated as clean".
+osv-scanner v2.4.0 prints its JSON report only on exit 0 (no vulnerabilities) and 1 (found some).
+It exits 128 with nothing on stdout when the tree has no package source, 129 when the osv.dev API
+fails, 130 on an invalid config and 127 on anything else, including an unreachable osv.dev. So an
+osv.dev outage reported `PASS — no dependency advisories`, and because the sweep was then "clean",
+it closed an open advisories issue with `Resolved — the scheduled deps-currency sweep is clean`.
+The fault became a verdict, and the verdict was about the caller's dependencies, when linkcheck's
+v1.12.0 rule says a fault opens and closes nothing. A missing osv-scanner did the same.
+`osvOutcome()` in `engine.mjs` now classifies each run, as security-baseline's `outcome.mjs` does.
+It looked on 0 or 1 with a JSON `results` array, and on 128, which stays a clean sweep. Anything
+else could not look: another exit, no report, exit 1 with no results, a timeout, the 64 MB cap, a
+kill, a spawn error, not installed, or a `working-directory` that is not there. A run that could
+not look prints `osv-scanner could not look — exit 129: <osv's error line>` in the scanner notes,
+`advisories in tree: **unknown**` and `⚠️ no verdict` instead of ✅, and never `PASS`. Its exit is a
+tool fault's: 0 with `report-only — … no verdict`, or 1 with `FAULT — … not a finding about this
+repository` under `fail-on-vuln: true`. One `::warning`/`::error title=deps-currency could not
+look::` annotation comes first, within GitHub's 10. The tracking issue is held: never opened, never
+closed. An open one gets a comment saying why it did not move and that it stays open until a sweep
+that looked is clean. osv's error text goes through `safe()`, loses URL userinfo and has long
+letters-and-digits runs cut to first4…last4. `run()` now reports a signal and a spawn error, so a
+killed or timed-out osv-scanner no longer reads as `status 1`, its findings exit. A failed issue
+lookup during a held sweep notes `… — nothing commented` (v1.19.2's lookup rule). Where osv-scanner
+looked nothing changed: over 2,688 env combinations (stub osv exits 0, 1 and 128; both modes;
+issue management on and off, with every gh state; annotations on and off; three floors), v1.19.2's
+and this `scan.mjs` match byte for byte, stdout, summary, exit and gh verbs, in all 1,344 that
+looked, and differ in all 1,344 that could not. The self-test
+feeds `osvOutcome()` canned processes for every shape. End to end it runs `scan.mjs` against a stub
+osv-scanner exiting 129 and 128 with nothing on stdout, in both modes, and asserts the note, the gh
+verbs (`list comment`, never `close`), the comment, the annotation and the exit; 128 stays `PASS`
+and closes the issue. Seven more could-not-look shapes and five held lifecycle rows are covered too.
+The old `scan.mjs` reads the 129 run as clean and closes the issue. Each of the 79 new assertions
+turns red under at least one of 52 targeted mutants: 50 turn the self-test red, one is equivalent,
+and one changes only a reason's wording. A new job in the self-test workflow, `real-osv-scanner`,
+asks the pinned binary the same three questions: it looks on this repository, passes an empty
+directory, and faults with osv.dev unreachable. Before release the real v2.4.0 binary (darwin_arm64,
+its sha256 checked against the release asset's) answered the same questions locally, and ran on
+shallow clones of the eight callers' `main`: every caller looked (exit 0 or 1, each lockfile
+parsed), and v1.19.2's and this `scan.mjs` printed byte-identical output on each. With osv.dev
+unreachable it exits 127 after its retries with nothing on stdout: the old code says `PASS`, the new
+one `FAULT`s. A lockfile it can read beside a truncated one exits 127 with a 124-byte empty report,
+which is no verdict. **Known limit:** when every lockfile fails to parse (a truncated
+`package-lock.json`; junk `bun.lock`, `composer.lock`, `pnpm-lock.yaml`), v2.4.0 exits 128 with
+nothing on stdout, as for a tree with none. Only its stderr (`Error during extraction`) differs, so
+that run still reads as a clean sweep, as it did before. **Measured before release:** eight
+repositories wire `deps-currency`. luxairportlu, lux-pm, epn-astro, lampakia-astro, prevedourougr
+and luxairport-frontend are report mode. ilektrologika-astro and poihtikesfones enforce. Four have a tracking issue open: lux-pm#4,
+epn-astro#9, lampakia-astro#56 and prevedourougr#35. Each one's last sweep, on 2026-09-21, reported
+advisories (3, 16, 11 and 16 in the tree), which only a run that looked can report, so each still
+closes when a sweep that looked comes back clean. Every caller's lockfile has produced osv-scanner
+findings in some past sweep, so none is unreadable to it. Every auto-close in the fleet's history
+had a dependency change behind it. **Caller-visible:** only on a sweep in which osv-scanner could not
+look. The report says no verdict instead of PASS, and an open tracking issue gets a comment instead
+of being closed. Report-mode callers still exit 0. The two enforcing callers exit 1, which both
+workflow files already expect: poihtikesfones says an OSV API outage "reddens main", and
+ilektrologika-astro documents that it did not. No input changed. On the measured state the `v1`
+move newly-blocks nobody.
+
 **v1.19.3** *(tag not yet cut; lands with the next `v1` move)* — `test-suite` prints its job log
 once on a local run, and no longer crashes there on Linux. `run.mjs` appended the step summary to
 `$GITHUB_STEP_SUMMARY`, or to `/dev/stdout` when it was unset, unguarded. On Linux, opening
@@ -774,6 +833,16 @@ exit code**: `sitemap-urls.py` is exempt because its wrapper step already
 reports its failure for what it is (as `link-crawl.sh` was, until v1.15.0), while `linkcheck.py`
 is guarded despite equally having no report-mode input, because its wrapper
 filed a false "broken links found" issue on a crawler crash.
+
+**The same rule one level down: a scanner that could not look.** A crash guard
+covers only the entrypoint dying. An action that shells out to a scanner also has
+to read that scanner's exit status and report shape, because "it printed nothing"
+and "it found nothing" look the same to a JSON parser. Each run is classified
+looked / could not look, and a run that could not look is a fault on the same
+terms: never a PASS, never a reason to open or close a tracking issue, exit
+`FAIL_ON_<X> ? 1 : 0`. `security-baseline` does this per scanner leg since v1.19.0
+(`scripts/outcome.mjs`), `deps-currency` for osv-scanner since v1.19.4
+(`osvOutcome` in `scripts/engine.mjs`).
 
 ## Repo hygiene — action entrypoints never write to stdout asynchronously
 

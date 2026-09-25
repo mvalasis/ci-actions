@@ -23,6 +23,7 @@ import {
   SEV, normalizeFloor, bucketFor, atOrAboveFloor, parseOsv, filterByFloor,
   scanUnpinnedActions, normalizeOwners, resolveFirstPartyOwners, issueDecision, blockDecision,
   renderReport, safe, escapeData, escapeProperty, repoRelative, annotation, annotations,
+  osvOutcome, scrub, errorLine, faultAnnotation,
 } from './engine.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -118,6 +119,60 @@ console.log('\n# issue open/close decision (linkcheck lifecycle)');
   check('no vulns but an unpinned-action advisory → still OPEN', onlyUnpinned.action === 'open' && onlyUnpinned.unpinnedCount === 1);
   const fullyClean = issueDecision([], []);
   check('zero vulns AND zero unpinned → CLOSE', fullyClean.action === 'close' && fullyClean.clean === true);
+  // osv-scanner could not look: no verdict either way — not "clean", and not "found something" on
+  // the strength of the half that did look (the unpinned-action scan, or a partial report).
+  const blind = issueDecision([], [], { looked: false });
+  check('osv could not look, nothing else found → HOLD, not CLOSE (a scan that did not happen is not clean)', blind.action === 'hold' && blind.clean === false && blind.looked === false, JSON.stringify(blind));
+  check('osv could not look, with unpinned + partial findings → still HOLD, never OPEN',
+    issueDecision(filterByFloor(parsed, 'HIGH'), [{ path: 'x.yml', line: 1, uses: 'foo/bar@v1', pin: 'v1' }], { looked: false }).action === 'hold');
+  check('looked: true is the default and changes nothing', issueDecision([], [], { looked: true }).action === 'close' && issueDecision(filterByFloor(parsed, 'HIGH'), [], {}).action === 'open');
+}
+
+console.log('\n# osvOutcome — an osv-scanner that could not look never reads as one that found nothing');
+{
+  // Canned processes in scan.mjs run()'s shape. Exit codes are osv-scanner v2.4.0's (engine.mjs).
+  const R = (o) => ({ missing: false, status: 0, signal: '', error: '', ms: 0, stdout: '', stderr: '', ...o });
+  const osv = (status, stdout, stderr = '') => osvOutcome(R({ status, stdout, stderr }));
+  const report = JSON.stringify(OSV_FIXTURE);
+  check('exit 0 {"results":[]}: looked, found nothing', osv(0, '{"results":[]}').looked === true && osv(0, '{"results":[]}').results.length === 0);
+  check('exit 1 with results: looked, every result kept (vulnerabilities found is not a failure)', osv(1, report).looked === true && osv(1, report).results.length === 2);
+  check('exit 128, empty stdout (no package source): looked, nothing to audit', osv(128, '', 'No package sources found, --help for usage information.').looked === true && osv(128, '').results.length === 0);
+  const down = osv(129, '', 'Scanning dir .\nfailed to query the OSV API: 503 Service Unavailable');
+  check('exit 129, empty stdout (the API failed): could not look; the reason names the exit and osv\'s error line',
+    down.looked === false && down.reason === 'exit 129: failed to query the OSV API: 503 Service Unavailable', JSON.stringify(down));
+  check('exit 127, empty stdout (an unreachable osv.dev, as measured): could not look', osv(127, '', 'dial tcp: lookup api.osv.dev: no such host').reason === 'exit 127: dial tcp: lookup api.osv.dev: no such host');
+  check('exit 130 (an invalid config): could not look', osv(130, '').looked === false && osv(130, '').reason === 'exit 130');
+  check('exit 0 with an EMPTY stdout: could not look — the old code parsed this as {} and called it clean', osv(0, '').looked === false && osv(0, '').reason === 'exit 0: no JSON report', JSON.stringify(osv(0, '')));
+  check('exit 0 with unparseable stdout: could not look — the old code noted "treated as clean"', osv(0, '{"results":[').looked === false);
+  check('exit 0 with JSON but no results array: could not look', osv(0, '{}').looked === false && osv(0, '{"results":null}').looked === false);
+  check('exit 1 with no results: could not look (a findings exit with no findings)', osv(1, '{"results":[]}').looked === false && osv(1, '{"results":[]}').reason === 'exit 1, vulnerabilities found, with no results in its report');
+  check('exit 2 with a valid-looking report: could not look — the status decides — and what it reported is kept', osv(2, report).looked === false && osv(2, report).results.length === 2);
+  check('not installed: could not look', osvOutcome(R({ missing: true, status: 127 })).reason === 'not installed');
+  check('a timeout: could not look, even behind a complete-looking report', osvOutcome(R({ status: 1, stdout: report, error: 'ETIMEDOUT', signal: 'SIGTERM', ms: 420003 })).reason === 'timed out after 420 s');
+  check('the 64 MB output cap: could not look', osvOutcome(R({ status: 1, stdout: report, error: 'ENOBUFS' })).reason === 'output over the 64 MB buffer');
+  check('killed by a signal: could not look', osvOutcome(R({ status: 1, stdout: report, signal: 'SIGKILL' })).reason === 'killed by SIGKILL');
+  check('a spawn that failed: could not look', osvOutcome(R({ status: 1, stdout: report, error: 'EACCES' })).reason === 'could not run: EACCES');
+  check('a run that took 10 s or more says how long', osvOutcome(R({ status: 129, ms: 97400, stderr: 'boom' })).reason === 'exit 129 after 97 s: boom');
+  check('errorLine: the first error:/fatal: line, else the last line', errorLine('Scanning dir .\nError: bad flag\nusage: …') === 'Error: bad flag' && errorLine('a\nb\n\n') === 'b' && errorLine('') === '');
+  // What osv prints about its own failure reaches the log, the summary and a (possibly public) issue.
+  const tok = `tok${'a1'.repeat(15)}`;   // built at run time: this file is itself scanned for secrets
+  check('scrub: a URL\'s userinfo is dropped', !scrub('Post "https://user:hunter2@api.osv.dev/v1/querybatch"').includes('hunter2'));
+  check('scrub: a letters+digits run of 20+ is cut to first4…last4', !scrub(`token ${tok} rejected`).includes(tok) && scrub(`token ${tok} rejected`).includes('toka…a1a1'));
+  check('scrub: one line, markdown-structural characters stripped (safe() underneath)', !/[\n`|<>()]/.test(scrub('a\n`b`|<c>(d)')));
+}
+
+console.log('\n# report + annotation when osv-scanner could not look');
+{
+  const blindReport = renderReport([], [], { floor: 'HIGH', lockfiles: ['bun.lock'], totalFindings: 0, looked: false });
+  check('no ✅ and no "0 total" — the tree was not audited', !blindReport.includes('✅') && !blindReport.includes('**0** total') && blindReport.includes('- advisories in tree: **unknown** — osv-scanner could not look'), blindReport);
+  check('the report says there is no verdict', blindReport.includes('- ⚠️ no verdict — osv-scanner could not look, so nothing here says the dependencies are clean.'));
+  const partial = renderReport(filterByFloor(parsed, 'HIGH'), [], { floor: 'HIGH', totalFindings: 3, looked: false });
+  check('what a failed run did report is listed, marked possibly incomplete', partial.includes('lodash') && partial.includes('_osv-scanner could not finish, so this list may be incomplete._'));
+  check('a report that looked is unchanged (looked: true, or absent)', renderReport([], [], { floor: 'HIGH', totalFindings: 0, looked: true }) === renderReport([], [], { floor: 'HIGH', totalFindings: 0 }));
+  check('faultAnnotation: the level is the caller\'s, the title names the fault',
+    faultAnnotation('exit 129', 'warning') === '::warning title=deps-currency could not look::osv-scanner could not look — exit 129' && faultAnnotation('exit 129').startsWith('::error '));
+  const hostile = faultAnnotation('exit 127: x%0A\n::stop-commands::tok');
+  check('faultAnnotation: a hostile reason stays one line, its % escaped', !/[\r\n]/.test(hostile) && hostile.includes('x%250A'), JSON.stringify(hostile));
 }
 
 console.log('\n# block decision (fail-on-vuln — report-mode-first default)');
@@ -464,8 +519,11 @@ console.log('\n# scan.mjs end to end — the job log carries the report; at/abov
       ] },
     ] };
     const stub = path.join(tmp, 'osv-scanner-stub');
-    // OSV_STUB_CLEAN answers with no advisories — a clean sweep, for the issue-close cases below.
-    fs.writeFileSync(stub, `#!/bin/sh\n[ "$1" = "--version" ] && { echo 0.0.0-stub; exit 0; }\n[ -n "$OSV_STUB_CLEAN" ] && { echo '{"results":[]}'; exit 0; }\ncat <<'JSON'\n${JSON.stringify(osv)}\nJSON\n`);
+    // It answers as osv-scanner v2 does: the advisories, exit 1. OSV_STUB_CLEAN answers with none and
+    // exit 0 — a clean sweep, for the issue-close cases below. OSV_STUB_EXIT answers with that exit
+    // status, OSV_STUB_OUT on stdout and OSV_STUB_ERR on stderr — the could-not-look cases (G).
+    // OSV_STUB_KILL prints the whole report and is then killed, as a timeout would kill it.
+    fs.writeFileSync(stub, `#!/bin/sh\n[ "$1" = "--version" ] && { echo 0.0.0-stub; exit 0; }\n[ -n "$OSV_STUB_EXIT" ] && { printf '%s' "$OSV_STUB_OUT"; [ -n "$OSV_STUB_ERR" ] && printf '%s\\n' "$OSV_STUB_ERR" >&2; exit "$OSV_STUB_EXIT"; }\n[ -n "$OSV_STUB_CLEAN" ] && { echo '{"results":[]}'; exit 0; }\ncat <<'JSON'\n${JSON.stringify(osv)}\nJSON\n[ -n "$OSV_STUB_KILL" ] && kill -9 $$\nexit 1\n`);
     fs.chmodSync(stub, 0o755);
     const summaryPath = path.join(tmp, 'summary.md');
     // The env is built from scratch so a CI runner's own GITHUB_ACTIONS / GITHUB_STEP_SUMMARY never
@@ -542,9 +600,11 @@ console.log('\n# scan.mjs end to end — the job log carries the report; at/abov
     // never go on to `create`, which duplicates an issue that is open. ECOSYSTEMS adds a scanner
     // note, which must stay in the report and only there.
     const gh = path.join(tmp, 'gh-stub');
+    // GH_STUB_BODIES gets every --body it is handed, so a comment's text is asserted too.
     fs.writeFileSync(gh, String.raw`#!/bin/sh
 [ "$1" = "--version" ] && { echo 'gh version 0.0.0-stub'; exit 0; }
 [ -n "$GH_STUB_CALLS" ] && echo "$2" >> "$GH_STUB_CALLS"
+[ -n "$GH_STUB_BODIES" ] && { prev=; for a in "$@"; do [ "$prev" = --body ] && printf '%s\n' "$a" >> "$GH_STUB_BODIES"; prev=$a; done; }
 case " $GH_STUB_DENY " in *" $2 "*) printf 'HTTP 403: Resource not accessible by integration\n::error title=forged::planted-by-gh\n' >&2; exit 1 ;; esac
 [ "$2" = list ] && [ -n "$GH_STUB_LIST" ] && { echo "$GH_STUB_LIST"; exit 0; }
 [ "$2" = list ] && { [ -n "$GH_STUB_OPEN" ] && printf '[{"number":%s,"title":"deps-currency: dependency advisories"}]\n' "$GH_STUB_OPEN" || echo '[]'; }
@@ -556,6 +616,9 @@ exit 0
     const DENIED = 'HTTP 403: Resource not accessible by integration ::error title=forged::planted-by-gh';
     const CLEAN = { OSV_STUB_CLEAN: '1', FIRST_PARTY_OWNERS: 'oven-sh' };   // no advisory, no unpinned action → close
     const LOOKUP = 'failed to look up the tracking issue:';
+    // osv-scanner's API failure: exit 129, nothing on stdout, its error last on stderr.
+    const API_DOWN = { OSV_STUB_EXIT: '129', OSV_STUB_OUT: '', OSV_STUB_ERR: 'Scanning dir .\nfailed to query the OSV API: 503 Service Unavailable' };
+    const HELD = 'osv-scanner could not look, so this sweep has no verdict';
     const lifecycle = [   // [case, env, the one note it prints (null: none), the gh verbs it runs]
       ['no issue open, create succeeds', {}, 'opened tracking issue', 'list create'],
       ['no issue open, create refused (403)', { GH_STUB_DENY: 'create' }, `failed to open tracking issue: ${DENIED}`, 'list create'],
@@ -570,11 +633,28 @@ exit 0
       ['clean, #7 open, lookup refused (403)', { ...CLEAN, GH_STUB_OPEN: '7', GH_STUB_DENY: 'list' }, `${LOOKUP} ${DENIED} — nothing closed`, 'list'],
       ['dirty, #7 open, lookup prints no JSON', { GH_STUB_OPEN: '7', GH_STUB_LIST: 'Resource not accessible by integration' }, `${LOOKUP} gh printed no JSON list — nothing opened or updated`, 'list'],
       ['clean, #7 open, lookup prints JSON but no list', { ...CLEAN, GH_STUB_OPEN: '7', GH_STUB_LIST: '{"number":7}' }, `${LOOKUP} gh printed no JSON list — nothing closed`, 'list'],
-      ['no gh', { GH_BIN: path.join(tmp, 'no-such-gh') }, 'gh CLI not available — issue management skipped', ''],
+      // osv-scanner could not look: no verdict, so the issue is neither opened nor closed, and an open
+      // one gets a comment saying why it did not move. The first row is the defect v1.19.4 fixes:
+      // nothing else found, so the old code read the sweep as clean and CLOSED #7 as resolved.
+      ['osv could not look, nothing else found, #7 open', { ...API_DOWN, FIRST_PARTY_OWNERS: 'oven-sh', GH_STUB_OPEN: '7' }, `tracking issue #7 left open, with a comment — ${HELD}`, 'list comment'],
+      ['osv could not look, an unpinned action found, #7 open', { ...API_DOWN, GH_STUB_OPEN: '7' }, `tracking issue #7 left open, with a comment — ${HELD}`, 'list comment'],
+      ['osv could not look, #7 open, comment refused (403)', { ...API_DOWN, GH_STUB_OPEN: '7', GH_STUB_DENY: 'comment' }, `tracking issue #7 left open — osv-scanner could not look; the comment failed: ${DENIED}`, 'list comment'],
+      ['osv could not look, an unpinned action found, no issue open', API_DOWN, `no tracking issue opened — ${HELD}`, 'list'],
+      ['osv could not look, #7 open, lookup refused (403)', { ...API_DOWN, GH_STUB_OPEN: '7', GH_STUB_DENY: 'list' }, `${LOOKUP} ${DENIED} — nothing commented`, 'list'],
+      // null: with no gh binary nothing runs to record a verb, so a verbs check there cannot fail. The
+      // note check covers the have() guard: without it this row notes a failed lookup instead.
+      ['no gh', { GH_BIN: path.join(tmp, 'no-such-gh') }, 'gh CLI not available — issue management skipped', null],
       ['no GITHUB_REPOSITORY', { GITHUB_REPOSITORY: '' }, 'GITHUB_REPOSITORY unset — issue management skipped', ''],
     ];
     const calls = path.join(tmp, 'gh-calls');
     const ran = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').join(' ') : '');
+    // One run with the stub recording: what it printed, the gh verbs it ran, the bodies it sent.
+    const bodies = path.join(tmp, 'gh-bodies');
+    const scanGh = (extra) => {
+      for (const f of [calls, bodies]) fs.rmSync(f, { force: true });
+      const r = scan({ GH_STUB_CALLS: calls, GH_STUB_BODIES: bodies, ...extra });
+      return { ...r, verbs: ran(), body: fs.existsSync(bodies) ? fs.readFileSync(bodies, 'utf8') : '' };
+    };
     for (const [label, extra, note, verbs] of lifecycle) {
       const env = { GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, GH_STUB_CALLS: calls, ECOSYSTEMS: 'npm cobol', ...extra };
       fs.rmSync(calls, { force: true });
@@ -587,7 +667,7 @@ exit 0
       check(`issue lifecycle, ${label}: report byte-identical, ${note ? 'block before the annotations' : 'no block'}, same exit, no new command`,
         off.summary.includes('unknown ecosystem') && on.summary === off.summary + block && on.stdout === on.summary + off.stdout.slice(off.summary.length)
           && on.status === off.status && JSON.stringify(commands(on.stdout)) === JSON.stringify(commands(off.stdout)), JSON.stringify(on.stdout.slice(off.summary.length - 60)));
-      check(`issue lifecycle, ${label}: gh verbs run — ${verbs || 'none'}`, ranOff === '' && ran() === verbs, JSON.stringify({ off: ranOff, on: ran() }));
+      if (verbs !== null) check(`issue lifecycle, ${label}: gh verbs run — ${verbs || 'none'}`, ranOff === '' && ran() === verbs, JSON.stringify({ off: ranOff, on: ran() }));
     }
 
     // (F) The summary turns unwritable while the issue opens: the block is in the log anyway, because
@@ -595,6 +675,69 @@ exit 0
     const f = scan({ GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, MANAGE_ISSUE: 'true', GH_STUB_BREAK_SUMMARY: '1' });
     check('issue lifecycle, summary gone unwritable: the block still reaches the log, once', count(f.stdout, '\n### ℹ️ issue lifecycle\n- opened tracking issue\n') === 1, why(f));
     check('…the fault is named in the log, and report-mode exits 0', /deps-currency crashed: .*EISDIR/.test(f.stdout) && f.status === 0, why(f));
+
+    // (G) osv-scanner could not look. Its API failure exits 129 with nothing on stdout, which until
+    // v1.19.2 parsed as `{}`: "PASS — no dependency advisories", and the "clean" sweep CLOSED the open
+    // advisories issue as resolved. Now it is no verdict: a scanner note naming osv's exit and error
+    // line, never PASS, the issue neither opened nor closed, and the exit a tool fault's —
+    // fail-on-vuln ? 1 : 0. Exit 128 (no package source) is the one non-zero exit that looked.
+    fs.rmSync(summaryPath, { recursive: true, force: true });   // (F) left a directory there; scan() only removes a file
+    const NOTE ='osv-scanner could not look — exit 129: failed to query the OSV API: 503 Service Unavailable';
+    const blindly = (fov) => (fov === 'true'
+      ? '\nFAULT — osv-scanner could not look, so the dependency tree was not audited. No verdict: a tool fault in deps-currency, not a finding about this repository.\n'
+      : '\nreport-only — osv-scanner could not look, so the dependency tree was not audited: no verdict. Under `fail-on-vuln: true` this run would FAULT.\n');
+    const verdictless = (r) => !r.stdout.includes('PASS —') && !r.stdout.includes('✅') && !r.stdout.includes('BLOCKED —')
+      && r.stdout.includes('\n- advisories in tree: **unknown** — osv-scanner could not look\n') && r.stdout.includes('\n**at/above floor: unknown — osv-scanner could not look · ');
+    for (const fov of ['false', 'true']) {
+      const g = scanGh({ ...API_DOWN, FIRST_PARTY_OWNERS: 'oven-sh', GH_STUB_OPEN: '7', FAIL_ON_VULN: fov, GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, MANAGE_ISSUE: 'true' });
+      const level = fov === 'true' ? 'error' : 'warning';
+      check(`osv exit 129, fail-on-vuln ${fov}: exit ${fov === 'true' ? 1 : 0} — a tool fault, ${fov === 'true' ? 'never a pass for an enforcing caller' : 'never a block for a report-mode caller'}`, g.status === (fov === 'true' ? 1 : 0), why(g));
+      check(`osv exit 129, fail-on-vuln ${fov}: the scanner note names the exit and osv's error line — log once, summary once`, count(g.stdout, `\n- ${NOTE}\n`) === 1 && count(g.summary, `\n- ${NOTE}\n`) === 1, why(g));
+      check(`osv exit 129, fail-on-vuln ${fov}: no verdict — never PASS, never ✅, no count`, verdictless(g) && g.stdout.includes(blindly(fov)), why(g));
+      check(`osv exit 129, fail-on-vuln ${fov}: #7 neither closed nor re-opened — looked up, commented on`, g.verbs === 'list comment', g.verbs);
+      check(`osv exit 129, fail-on-vuln ${fov}: the comment names the fault and says #7 stays open`,
+        /^No verdict as of \d{4}-\d{2}-\d{2}: /.test(g.body) && g.body.includes(`: ${NOTE}. This sweep neither updates nor closes this issue; it stays open until a sweep that looked comes back clean.`) && !g.body.includes('Resolved'), JSON.stringify(g.body));
+      check(`osv exit 129, fail-on-vuln ${fov}: one ::${level} names the fault for the check-run API, nothing else is command-shaped`,
+        JSON.stringify(commands(g.stdout)) === JSON.stringify([`::${level} title=deps-currency could not look::${NOTE}`]), JSON.stringify(commands(g.stdout)));
+
+      // 128: osv-scanner found no package source — it looked, and there was nothing to audit. Clean.
+      const n = scanGh({ OSV_STUB_EXIT: '128', OSV_STUB_OUT: '', OSV_STUB_ERR: 'No package sources found, --help for usage information.', FIRST_PARTY_OWNERS: 'oven-sh', GH_STUB_OPEN: '7', FAIL_ON_VULN: fov, GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, MANAGE_ISSUE: 'true' });
+      check(`osv exit 128 (no package source), fail-on-vuln ${fov}: looked, nothing to audit — PASS, exit 0`,
+        n.status === 0 && n.stdout.includes('\n- advisories in tree: **0** total · **0** at/above floor\n') && n.stdout.includes('\nPASS — no dependency advisories at or above the severity floor.') && !n.stdout.includes('could not look'), why(n));
+      check(`osv exit 128, fail-on-vuln ${fov}: the sweep is clean, so #7 closes — and nothing annotates`,
+        n.verbs === 'list comment close' && count(n.stdout, '\n- closed tracking issue #7 — the sweep is clean\n') === 1 && commands(n.stdout).length === 0, n.verbs);
+    }
+    // Every other way osv-scanner can fail to look, end to end: the same no verdict, #7 held.
+    const shapes = [   // [case, env, the note's reason]
+      ['exit 127, nothing on stdout — an unreachable osv.dev, as measured on v2.4.0', { OSV_STUB_EXIT: '127', OSV_STUB_ERR: 'dial tcp: lookup api.osv.dev: no such host' }, 'exit 127: dial tcp: lookup api.osv.dev: no such host'],
+      ['exit 130, an invalid config', { OSV_STUB_EXIT: '130', OSV_STUB_ERR: 'invalid config' }, 'exit 130: invalid config'],
+      ['exit 0 with an EMPTY stdout — what the old code parsed as {}', { OSV_STUB_EXIT: '0' }, 'exit 0: no JSON report'],
+      ['exit 0, a report cut short — the old "treated as clean"', { OSV_STUB_EXIT: '0', OSV_STUB_OUT: '{"results":[{"source":' }, 'exit 0: no JSON report'],
+      ['exit 1 with no results in its report', { OSV_STUB_EXIT: '1', OSV_STUB_OUT: '{"results":[]}' }, 'exit 1, vulnerabilities found, with no results in its report'],
+      ['osv-scanner not installed — the old code closed the issue then too', { OSV_BIN: path.join(tmp, 'no-such-osv-scanner') }, 'not installed'],
+      ['a working-directory that is not there', { WORKING_DIRECTORY: path.join(tmp, 'no-such-dir') }, 'working-directory '],
+      ['killed after printing its whole report, as a timeout kills it', { OSV_STUB_KILL: '1' }, 'killed by SIGKILL'],
+    ];
+    for (const [label, extra, reason] of shapes) {
+      for (const fov of ['false', 'true']) {
+        const s = scanGh({ FIRST_PARTY_OWNERS: 'oven-sh', GH_STUB_OPEN: '7', FAIL_ON_VULN: fov, GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, MANAGE_ISSUE: 'true', ...extra });
+        check(`could not look, ${label}, fail-on-vuln ${fov}: noted, no verdict, #7 held, exit ${fov === 'true' ? 1 : 0}`,
+          s.stdout.includes(`\n- osv-scanner could not look — ${reason}`) && verdictless(s) && s.stdout.includes(blindly(fov))
+            && s.verbs === 'list comment' && s.status === (fov === 'true' ? 1 : 0), `${why(s)} gh=${s.verbs}`);
+      }
+    }
+    // A failed run that still reported something: its advisories are listed (they are real) and marked
+    // incomplete, the run is still no verdict, and the fault's annotation counts toward GitHub's 10.
+    const many = { results: [{ source: { path: path.join(tmp, 'package-lock.json') }, packages: Array.from({ length: 12 }, (_, i) => (
+      { package: { name: `pkg-${String(i).padStart(2, '0')}`, version: '1.0.0', ecosystem: 'npm' }, groups: [{ ids: [`GHSA-${i}`], max_severity: '9.8' }] })) }] };
+    const p = scanGh({ OSV_STUB_EXIT: '2', OSV_STUB_OUT: JSON.stringify(many), FIRST_PARTY_OWNERS: 'oven-sh', GH_STUB_OPEN: '7', GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GH_BIN: gh, MANAGE_ISSUE: 'true' });
+    check('exit 2 with a report: its 12 advisories listed, marked incomplete — still no verdict, #7 held',
+      p.stdout.includes('### Vulnerable / advisory-flagged dependencies (12)') && p.stdout.includes('_osv-scanner could not finish, so this list may be incomplete._')
+        && p.stdout.includes('\n- osv-scanner could not look — exit 2') && verdictless(p) && p.verbs === 'list comment' && p.status === 0, why(p));
+    const pc = commands(p.stdout);
+    check('…annotations: the fault first, then 9 advisories — GitHub keeps 10 — and one line counting the other 3',
+      pc.length === 10 && pc[0].startsWith('::warning title=deps-currency could not look::') && pc.slice(1).every((l) => l.startsWith('::warning file=package-lock.json,'))
+        && p.stdout.includes('\ndeps-currency: 3 more advisory(ies) not annotated (GitHub keeps 10 per step)'), JSON.stringify(pc.map((l) => l.slice(0, 60))));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

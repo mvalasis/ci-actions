@@ -39,7 +39,8 @@ export const atOrAboveFloor = (sev, floor) => SEV_RANK[sev] <= SEV_RANK[normaliz
 
 // Parse one osv-scanner v2 JSON document into a flat list of vuln findings, one per group
 // (a group is one vuln/alias cluster on one package). Tolerant of partial/empty/garbage input —
-// returns [] rather than throwing, so a tool glitch degrades to "clean" not "crash".
+// returns [] rather than throwing. An empty list is NOT a verdict: whether osv-scanner looked at
+// all is osvOutcome()'s answer, and a run that could not look never reaches "clean" through here.
 //   finding = { ecosystem, source, name, version, ids, score, severity, abandoned }
 export function parseOsv(json) {
   const out = [];
@@ -67,6 +68,67 @@ export function parseOsv(json) {
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Did osv-scanner LOOK? Three answers, never two — security-baseline's outcome.mjs (v1.19.0),
+// restated here so the action stays dependency-free:
+//   { looked: true,  results }          — it audited the tree; `results` may be empty (found nothing)
+//   { looked: false, reason, results }  — it could NOT look; `results` keeps whatever it did report
+// Until v1.19.2 scan.mjs folded the third answer into the second: it never read the exit status,
+// parsed an empty stdout as `{}` and noted an unparseable one as "treated as clean". An osv.dev
+// outage therefore reported PASS — and, the sweep being "clean", CLOSED an open advisories issue
+// as resolved (VERIFICATION-TRAPS failed-probe-is-not-evidence).
+//
+// osv-scanner v2.4.0 (cmd/osv-scanner/internal/cmd/run.go; measured on the binary): 0 = no
+// vulnerabilities and 1 = vulnerabilities found, both with the JSON report on stdout; 128 = no
+// package source in the tree, so nothing to audit (looked, found nothing; empty stdout). 129 is its
+// API-failure code, 130 an invalid config, 127 any other error: none of them looked, and none
+// prints a report (scan source returns before printing). An unreachable osv.dev exits 127, not
+// 129 — v2.4.0 does not raise its API error yet (`TODO(v2): Actually use this error`).
+//
+// `r` is scan.mjs's run() result: { missing, status, signal, error, ms, stdout, stderr }.
+
+// Free text a tool prints about its own failure reaches the report, the job log and an issue
+// comment. Beyond safe(), a URL's userinfo is dropped and every run of 20+ that mixes letters and
+// digits is cut to first4…last4, so a credential echoed in an error (a proxy URL, a token) cannot
+// land whole. Letters-only runs survive, so the error stays readable.
+export const scrub = (s, max = 160) => safe(String(s == null ? '' : s)
+  .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1')
+  .replace(/[A-Za-z0-9_+=-]{20,}/g, (m) => (/\d/.test(m) && /[A-Za-z]/.test(m) ? `${m.slice(0, 4)}…${m.slice(-4)}` : m)), max);
+
+// The stderr line that says what went wrong: the first `fatal:`/`error:` line, else the last line
+// (osv-scanner logs its progress to stderr under --format json and its error last).
+export const errorLine = (text) => {
+  const ls = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  return ls.find((l) => /^(fatal|error)\b/i.test(l)) || ls.pop() || '';
+};
+
+// How long a run that took 10 s or more took: a query that stalls and then fails leaves no other trace.
+const took = (r) => (Number.isFinite(r.ms) && r.ms >= 10000 ? ` after ${Math.round(r.ms / 1000)} s` : '');
+// A process that never finished is could-not-look whatever its output says.
+function processFault(r) {
+  if (r.missing) return 'not installed';
+  if (r.error === 'ETIMEDOUT') return `timed out${took(r)}`;
+  if (r.error === 'ENOBUFS') return 'output over the 64 MB buffer';
+  if (r.signal) return `killed by ${r.signal}`;
+  if (r.error) return `could not run: ${scrub(r.error, 80)}`;
+  return '';
+}
+const exitReason = (r, detail) => `exit ${r.status}${took(r)}${detail ? `: ${scrub(detail)}` : ''}`;
+const parseJSON = (text) => { try { return JSON.parse(text); } catch { return undefined; } };
+
+export function osvOutcome(r) {
+  const pf = processFault(r);
+  if (pf) return { looked: false, reason: pf, results: [] };
+  if (r.status === 128) return { looked: true, results: [] };
+  const json = parseJSON(r.stdout);
+  const report = !!json && typeof json === 'object' && Array.isArray(json.results);
+  const results = report ? json.results : [];
+  if (r.status !== 0 && r.status !== 1) return { looked: false, reason: exitReason(r, errorLine(r.stderr)), results };
+  if (!report) return { looked: false, reason: exitReason(r, 'no JSON report'), results: [] };
+  if (r.status === 1 && results.length === 0) return { looked: false, reason: 'exit 1, vulnerabilities found, with no results in its report', results };
+  return { looked: true, results };
 }
 
 // Apply the severity floor → the set of findings that "count" (drive the issue + the optional
@@ -177,11 +239,15 @@ export function scanUnpinnedActions(workflowFiles, firstPartyOwners = '') {
 // Issue lifecycle decision (mirrors linkcheck's open-on-fail / close-on-clean). Given the
 // floor-filtered vuln findings + the unpinned-action findings, decide whether the tracking issue
 // should be OPEN (problems present) or CLOSED (clean). Pure — the CLI does the actual gh calls.
-export function issueDecision(floorFindings, unpinned = []) {
+// A sweep in which osv-scanner could not look (`looked: false`) is neither: the decision is 'hold',
+// and the issue is neither opened nor closed (linkcheck's exit-2 rule, v1.12.0). A run that audited
+// nothing is not evidence that the tree is clean, and until v1.19.2 it closed the issue as resolved.
+export function issueDecision(floorFindings, unpinned = [], { looked = true } = {}) {
   const vulnCount = floorFindings.length;
   const unpinnedCount = unpinned.length;
+  if (looked === false) return { action: 'hold', clean: false, looked: false, vulnCount, unpinnedCount };
   const clean = vulnCount === 0 && unpinnedCount === 0;
-  return { action: clean ? 'close' : 'open', clean, vulnCount, unpinnedCount };
+  return { action: clean ? 'close' : 'open', clean, looked: true, vulnCount, unpinnedCount };
 }
 
 // Block decision: exits non-zero ONLY when fail-on-vuln AND at least one finding at/above floor.
@@ -218,11 +284,15 @@ export function renderReport(floorFindings, unpinned, meta = {}) {
   // than a mis-derived exemption. Rendered only when the CLI supplies it (older/pure callers of
   // renderReport, incl. the selftest's rendering assertions, are unaffected).
   if (Array.isArray(meta.firstPartyOwners)) p(`- first-party owners (exempt from the unpinned-action scan): ${meta.firstPartyOwners.length ? meta.firstPartyOwners.map((o) => '`' + safe(o, 40) + '`').join(', ') : '(none — every non-`actions`/`github` owner is third-party)'}`);
-  if (Number.isFinite(meta.totalFindings)) p(`- advisories in tree: **${meta.totalFindings}** total · **${floorFindings.length}** at/above floor`);
+  // `looked: false` — osv-scanner could not look (osvOutcome). No count and no ✅: a scan that did
+  // not happen says nothing about the tree. Absent means it looked (older/pure callers, the selftest).
+  const blind = meta.looked === false;
+  if (blind) p('- advisories in tree: **unknown** — osv-scanner could not look');
+  else if (Number.isFinite(meta.totalFindings)) p(`- advisories in tree: **${meta.totalFindings}** total · **${floorFindings.length}** at/above floor`);
   p('');
 
   if (floorFindings.length === 0) {
-    p('- ✅ no dependency advisories at or above the severity floor.');
+    p(blind ? '- ⚠️ no verdict — osv-scanner could not look, so nothing here says the dependencies are clean.' : '- ✅ no dependency advisories at or above the severity floor.');
   } else {
     p(`### Vulnerable / advisory-flagged dependencies (${floorFindings.length})`);
     p('');
@@ -235,6 +305,7 @@ export function renderReport(floorFindings, unpinned, meta = {}) {
     }
     p('');
     p('_Present-in-tree, reachability unknown — osv-scanner is syntactic (no dataflow). Bump or remove the package; if a fix is unavailable, document the exposure._');
+    if (blind) p('_osv-scanner could not finish, so this list may be incomplete._');
   }
   p('');
 
@@ -286,11 +357,18 @@ export function annotation(f, level = 'error') {
 // The annotation lines for a run's floor findings. `level` is 'error' when the run blocks
 // (`fail-on-vuln: true`), 'warning' when it only reports — the default. GitHub keeps 10 annotations
 // per level per step, so past `cap` one line says how many were left out; the report lists them all.
+// `cap` is 9 when the run's fault annotation takes one of the 10 — the line still says 10.
 export function annotations(floorFindings, level = 'error', cap = 10) {
   const all = asArray(floorFindings);
   const out = all.slice(0, cap).map((f) => annotation(f, level));
-  if (all.length > cap) out.push(`deps-currency: ${all.length - cap} more advisory(ies) not annotated (GitHub keeps ${cap} per step) — the report above lists them all.`);
+  if (all.length > cap) out.push(`deps-currency: ${all.length - cap} more advisory(ies) not annotated (GitHub keeps 10 per step) — the report above lists them all.`);
   return out;
+}
+
+// The one annotation for a sweep in which osv-scanner could not look, so the check-run API names the
+// fault too: `::error` when it fails the run (fail-on-vuln), `::warning` in report mode. No `file=`.
+export function faultAnnotation(reason, level = 'error') {
+  return `::${level} title=${escapeProperty('deps-currency could not look')}::${escapeData(safe(`osv-scanner could not look — ${reason}`, 300))}`;
 }
 
 function asArray(x) { return Array.isArray(x) ? x : []; }

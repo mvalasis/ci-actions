@@ -34,7 +34,8 @@ inputs:
     default: 'true'
   fail-on-vuln:
     description: >-
-      true = exit non-zero (BLOCK) when an advisory at/above the floor exists; false = report-only.
+      true = exit non-zero (BLOCK) when an advisory at/above the floor exists, and when osv-scanner
+      could not look (a FAULT — no verdict, never a PASS); false = report-only, exit 0 either way.
       Default FALSE — report-mode-first, so wiring a caller never newly-blocks. Unpinned-action
       advisories are WARN-only and never block regardless.
     required: false

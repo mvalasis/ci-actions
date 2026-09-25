@@ -3,9 +3,10 @@
 // job), parses + floor-filters the advisories via the pure engine, also flags unpinned third-party
 // GitHub Actions that consume secrets, renders one report, optionally opens/auto-closes a
 // 'dependency advisories' tracking issue (linkcheck's lifecycle), reporting the outcome, and exits
-// non-zero ONLY when fail-on-vuln=true AND a >=floor advisory exists. The report goes to the job
-// log as well as the step summary, and each >=floor advisory is annotated
-// (`::error file=<lockfile>,title=…::…`).
+// non-zero ONLY under fail-on-vuln=true: when a >=floor advisory exists, or when osv-scanner could
+// not look (engine.mjs osvOutcome) — a FAULT, never a PASS, and never a reason to open or close the
+// issue. The report goes to the job log as well as the step summary, and each >=floor advisory is
+// annotated (`::error file=<lockfile>,title=…::…`).
 //
 // EGRESS (honest enumeration — see README §Sovereignty): NO lockfile body leaves the runner.
 //   - osv-scanner: sends package COORDINATES (name@version) to osv.dev — never your lockfile body.
@@ -17,8 +18,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
-  parseOsv, filterByFloor, scanUnpinnedActions, resolveFirstPartyOwners, issueDecision,
-  blockDecision, renderReport, normalizeFloor, safe, repoRelative, annotations,
+  parseOsv, osvOutcome, filterByFloor, scanUnpinnedActions, resolveFirstPartyOwners, issueDecision,
+  blockDecision, renderReport, normalizeFloor, safe, repoRelative, annotations, faultAnnotation,
 } from './engine.mjs';
 
 const env = process.env;
@@ -51,12 +52,18 @@ function emit(text) {
 }
 const infra = [];
 
+// `signal` and `error` say a process never finished (a timeout, the output cap): osvOutcome reads
+// them before any output. Without them a timed-out osv-scanner read as `status 1`, its findings exit.
 function run(bin, args, opts = {}) {
+  const t0 = Date.now();
   try {
     const r = spawnSync(bin, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: opts.timeout || 300000, cwd: opts.cwd, ...opts });
-    if (r.error && r.error.code === 'ENOENT') return { missing: true, status: 127, stdout: '', stderr: '' };
-    return { missing: false, status: r.status == null ? 1 : r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
-  } catch (e) { return { missing: false, status: 1, stdout: '', stderr: String((e && e.message) || e) }; }
+    if (r.error && r.error.code === 'ENOENT') return { missing: true, status: 127, signal: '', error: '', ms: 0, stdout: '', stderr: '' };
+    return {
+      missing: false, status: r.status == null ? 1 : r.status, signal: r.signal || '', ms: Date.now() - t0,
+      error: r.error ? String(r.error.code || r.error.message || r.error) : '', stdout: r.stdout || '', stderr: r.stderr || '',
+    };
+  } catch (e) { return { missing: false, status: 1, signal: '', error: String((e && e.message) || e), ms: Date.now() - t0, stdout: '', stderr: '' }; }
 }
 const have = (bin) => !run(bin, ['--version'], { timeout: 15000 }).missing;
 
@@ -109,15 +116,18 @@ function resolveEcosystems() {
 }
 
 // ---------- osv-scanner over the FULL tree (one recursive scan covers every lockfile) ----------
+// Returns { findings, looked, reason }. `looked: false` is a scan that did not happen — not
+// installed, a working directory that is not there, an osv.dev outage, a report that never came —
+// and main() reads it as NO VERDICT: never PASS, never a reason to open or close the issue.
 function runOsv() {
-  if (!have(OSV_BIN)) { infra.push('osv-scanner not installed — dependency advisory scan skipped (install in the action step)'); return { findings: [], ran: false }; }
+  if (!have(OSV_BIN)) return { findings: [], looked: false, reason: 'not installed' };
+  // A missing cwd fails the spawn with ENOENT, which run() reports as the binary missing.
+  if (!fs.existsSync(WORKDIR)) return { findings: [], looked: false, reason: `working-directory ${safe(env.WORKING_DIRECTORY || '.', 80)} does not exist` };
   // `scan source --recursive .` walks the working dir and audits every lockfile it finds — the FULL
   // committed tree, not a diff. We pre-discover lockfiles only for the report + ecosystem gating;
   // osv itself does the authoritative recursive scan.
-  const r = run(OSV_BIN, ['scan', 'source', '--recursive', '--format', 'json', '.'], { cwd: WORKDIR, timeout: 420000 });
-  if (r.missing) return { findings: [], ran: false };
-  let json; try { json = JSON.parse(r.stdout || '{}'); } catch { infra.push('osv-scanner output was not valid JSON — treated as clean'); return { findings: [], ran: true }; }
-  return { findings: parseOsv(json), ran: true };
+  const o = osvOutcome(run(OSV_BIN, ['scan', 'source', '--recursive', '--format', 'json', '.'], { cwd: WORKDIR, timeout: 420000 }));
+  return { findings: parseOsv({ results: o.results }), looked: o.looked, reason: o.reason || '' };
 }
 
 // ---------- unpinned GH actions consuming secrets (over .github/workflows) ----------
@@ -148,7 +158,7 @@ function findOpenIssue(repo) {
   const hit = list.find((i) => i.title === ISSUE_TITLE);
   return { num: hit ? hit.number : null };
 }
-function manageIssue(decision, body) {
+function manageIssue(decision, body, osvReason = '') {
   const repo = env.GITHUB_REPOSITORY;
   if (!repo) { infra.push('GITHUB_REPOSITORY unset — issue management skipped'); return; }
   if (!have(GH_BIN)) { infra.push('gh CLI not available — issue management skipped'); return; }
@@ -161,15 +171,24 @@ function manageIssue(decision, body) {
   // Until v1.19.2 a failed lookup read as "none open": a clean sweep left the issue open without a
   // word, and a dirty one went on to `gh issue create`. linkcheck already stops here: its lookup runs
   // under `bash -eo pipefail`, so a failed `gh issue list` ends the step before it creates or closes.
-  if (found.error) { infra.push(`failed to look up the tracking issue: ${found.error} — ${decision.action === 'open' ? 'nothing opened or updated' : 'nothing closed'}`); return; }
+  // A sweep on hold (osv-scanner could not look) would only have commented on an open issue.
+  const untouched = { open: 'nothing opened or updated', close: 'nothing closed', hold: 'nothing commented' }[decision.action];
+  if (found.error) { infra.push(`failed to look up the tracking issue: ${found.error} — ${untouched}`); return; }
   const num = found.num;
   const runUrl = `${env.GITHUB_SERVER_URL || 'https://github.com'}/${repo}/actions/runs/${env.GITHUB_RUN_ID || ''}`;
   const stamp = new Date().toISOString().slice(0, 10);
+  if (decision.action === 'hold') {   // osv-scanner could not look: no verdict, so neither open nor close
+    if (!num) { infra.push('no tracking issue opened — osv-scanner could not look, so this sweep has no verdict'); return; }
+    const note = `No verdict as of ${stamp}: osv-scanner could not look — ${safe(osvReason, 200)}. This sweep neither updates nor closes this issue; it stays open until a sweep that looked comes back clean.\n\nRun: ${runUrl}`;
+    const r = run(GH_BIN, ['issue', 'comment', String(num), '-R', repo, '--body', note], { timeout: 60000 });
+    infra.push(r.status === 0 ? `tracking issue #${num} left open, with a comment — osv-scanner could not look, so this sweep has no verdict` : `tracking issue #${num} left open — osv-scanner could not look; the comment failed: ${ghFailure(r)}`);
+    return;
+  }
   if (decision.action === 'open') {
     const issueBody = `Scheduled dependency-currency sweep found advisories on **${repo}** (${stamp}).\n\nRun: ${runUrl}\n\nThis issue auto-closes when the next scheduled run is clean.\n\n${body}`;
     if (num) { const r = run(GH_BIN, ['issue', 'comment', String(num), '-R', repo, '--body', issueBody], { timeout: 60000 }); infra.push(r.status === 0 ? `updated tracking issue #${num}` : `failed to update tracking issue #${num}: ${ghFailure(r)}`); }
     else { const r = run(GH_BIN, ['issue', 'create', '-R', repo, '--title', ISSUE_TITLE, '--body', issueBody], { timeout: 60000 }); infra.push(r.status === 0 ? 'opened tracking issue' : `failed to open tracking issue: ${ghFailure(r)}`); }
-  } else { // close
+  } else if (decision.action === 'close') {
     if (num) {
       run(GH_BIN, ['issue', 'comment', String(num), '-R', repo, '--body', `Resolved — the scheduled deps-currency sweep is clean (0 advisories at/above floor **${FLOOR}**) as of ${stamp}.`], { timeout: 60000 });
       const r = run(GH_BIN, ['issue', 'close', String(num), '-R', repo], { timeout: 60000 });
@@ -197,7 +216,9 @@ process.on('uncaughtException', (e) => {
 
 (function main() {
   const { ecosystems, lockfiles } = resolveEcosystems();
-  const { findings } = runOsv();
+  const osv = runOsv();
+  const { findings, looked } = osv;
+  if (!looked) infra.push(`osv-scanner could not look — ${osv.reason}`);
   const floorFindings = filterByFloor(findings, FLOOR);
   // FIRST-PARTY owner set for the unpinned-action scan — NOT just the caller's owner. This read
   // `GITHUB_REPOSITORY.split('/')[0]` until the 2026-08 ownership split (callers moved to the org
@@ -219,18 +240,23 @@ process.on('uncaughtException', (e) => {
   const unpinned = scanUnpinnedActions(loadWorkflows(), firstParty);
 
   const report = renderReport(floorFindings, unpinned, {
-    floor: FLOOR, ecosystems, lockfiles, totalFindings: findings.length, firstPartyOwners: firstParty,
+    floor: FLOOR, ecosystems, lockfiles, totalFindings: findings.length, firstPartyOwners: firstParty, looked,
   });
 
   const lines = [report];
   if (infra.length) { lines.push('', '### ℹ️ scanner notes'); for (const m of infra) lines.push(`- ${safe(m, 240)}`); }
 
-  const decision = issueDecision(floorFindings, unpinned);
+  const decision = issueDecision(floorFindings, unpinned, { looked });
   const blocked = blockDecision(floorFindings, { failOnVuln: FAIL_ON_VULN });
+  // A sweep that could not look is a tool FAULT, under the crash guard's rule: exit 1 only under
+  // fail-on-vuln, so our failure never blocks a report-mode caller and never passes an enforcing one.
+  const faulted = !looked && FAIL_ON_VULN;
 
   lines.push('');
-  lines.push(`**at/above floor: ${floorFindings.length} · unpinned-action advisories: ${unpinned.length}**`);
-  if (blocked) lines.push(`BLOCKED — ${floorFindings.length} dependency advisory(ies) at/above floor **${FLOOR}** with \`fail-on-vuln: true\`. Bump/remove the package(s), or lower the floor / document the exposure.`);
+  lines.push(`**at/above floor: ${looked ? floorFindings.length : 'unknown — osv-scanner could not look'} · unpinned-action advisories: ${unpinned.length}**`);
+  if (faulted) lines.push('FAULT — osv-scanner could not look, so the dependency tree was not audited. No verdict: a tool fault in deps-currency, not a finding about this repository.');
+  else if (!looked) lines.push('report-only — osv-scanner could not look, so the dependency tree was not audited: no verdict. Under `fail-on-vuln: true` this run would FAULT.');
+  else if (blocked) lines.push(`BLOCKED — ${floorFindings.length} dependency advisory(ies) at/above floor **${FLOOR}** with \`fail-on-vuln: true\`. Bump/remove the package(s), or lower the floor / document the exposure.`);
   else if (floorFindings.length > 0) lines.push(`report-only — ${floorFindings.length} advisory(ies) at/above floor would BLOCK under \`fail-on-vuln: true\`.`);
   else lines.push('PASS — no dependency advisories at or above the severity floor.');
 
@@ -238,7 +264,7 @@ process.on('uncaughtException', (e) => {
 
   if (MANAGE_ISSUE) {
     const mark = infra.length;
-    try { manageIssue(decision, report); } catch (e) { /* issue mgmt must never fail the run by itself */ emit(`\n- ℹ️ issue management error (non-fatal): ${safe(String((e && e.message) || e), 160)}`); }
+    try { manageIssue(decision, report, osv.reason); } catch (e) { /* issue mgmt must never fail the run by itself */ emit(`\n- ℹ️ issue management error (non-fatal): ${safe(String((e && e.message) || e), 160)}`); }
     // manageIssue reports into `infra`, but the scanner notes above were rendered before it ran. Until
     // v1.18.1 its outcome reached neither the log nor the summary, so a caller without `issues: write`
     // got a green run, no tracking issue, and nothing saying the open failed.
@@ -246,11 +272,14 @@ process.on('uncaughtException', (e) => {
     if (lifecycle.length) emit(['', '### ℹ️ issue lifecycle', ...lifecycle.map((m) => `- ${safe(m, 240)}`)].join('\n'));
   }
 
-  // Last in the log: one annotation per at/above-floor advisory — `::error` when this run blocks,
-  // `::warning` when it only reports (the default).
+  // Last in the log: one annotation for a scan that could not look, then one per at/above-floor
+  // advisory — `::error` when this run exits 1, `::warning` when it only reports (the default).
+  // GitHub keeps 10 per level per step, the fault's included.
+  const level = blocked || faulted ? 'error' : 'warning';
   if (ANNOTATE) {
     const located = floorFindings.map((f) => ({ ...f, file: repoRelative(f.source, { workdir: WORKDIR, workspace: WORKSPACE }) }));
-    for (const a of annotations(located, blocked ? 'error' : 'warning')) say(a);
+    const lost = looked ? [] : [faultAnnotation(osv.reason, level)];
+    for (const a of [...lost, ...annotations(located, level, 10 - lost.length)]) say(a);
   }
-  process.exit(blocked ? 1 : 0);
+  process.exit(blocked || faulted ? 1 : 0);
 })();

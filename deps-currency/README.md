@@ -35,7 +35,24 @@ blocking only after it has cleared its backlog.
   clean — the same issue lifecycle as `linkcheck`. What happened to the issue (opened, updated,
   closed, or the error that stopped it) follows the report in both places; a run that cannot look
   the open issue up opens, updates and closes nothing.
-- Exits non-zero **only** when `fail-on-vuln: true` **and** an advisory at/above the floor exists.
+- Exits non-zero **only** under `fail-on-vuln: true`: when an advisory at/above the floor exists,
+  or when osv-scanner could not look (below).
+- **A scan that did not happen is not a clean one.** osv-scanner's run is judged on its exit status
+  and its report: exit 0 or 1 with a JSON report, or 128 (no package source in the tree, nothing to
+  audit), is a scan that looked. Anything else — the osv.dev API failing (129), an unreachable
+  osv.dev (127, as measured on v2.4.0), an invalid config (130), no JSON report, exit 1 with no
+  results, a timeout or kill, osv-scanner not installed, a `working-directory` that is not there —
+  is **no verdict**: never `PASS`, the tracking issue neither opened nor closed, and the exit is a
+  tool fault's (**0** under the default, **1** under `fail-on-vuln: true`). See
+  [A scan that could not look](#where-to-read-the-result--job-log-annotations-step-summary). Before
+  v1.19.4 such a run read as "no advisories", said `PASS`, and **closed an open tracking issue as
+  resolved**.
+- **Known limit: exit 128 reads as nothing to audit.** osv-scanner v2.4.0 also exits 128, with
+  nothing on stdout, when every lockfile it found failed to parse (measured: a truncated
+  `package-lock.json`; junk `bun.lock`, `composer.lock`, `pnpm-lock.yaml`). Only its stderr
+  (`Error during extraction`) tells that apart from a tree with no lockfile, so such a run still
+  says `PASS`. It does not read `bun.lockb` at all. A lockfile it can read beside one it cannot
+  exits 127, which is no verdict.
 - **A scanner fault is not a finding.** If the scan itself crashes, the report says so
   (`❌ deps-currency crashed: …` in the job log and the job summary) and the exit code follows the same
   report-mode-first rule: **0** under the default, **1** only under `fail-on-vuln: true`. A broken
@@ -87,7 +104,7 @@ jobs:
 | `ecosystems` | `auto` | `auto` (enable npm/composer by lockfile presence) or an explicit `npm`/`composer`/`"npm composer"`. Unknown values are reported + ignored. |
 | `severity-floor` | `HIGH` | Minimum advisory severity that counts toward the issue / optional block (`CRITICAL`/`HIGH`/`MODERATE`/`LOW`; CVSS-bucketed, no-CVSS → HIGH). |
 | `manage-issue` | `true` | Open/auto-close the `deps-currency: dependency advisories` issue (needs `issues: write`). A failed issue call never fails the run; the `ℹ️ issue lifecycle` block after the report says what happened. |
-| `fail-on-vuln` | `false` | `true` = BLOCK when a ≥floor advisory exists. Default `false` (report-only). Unpinned-action advisories never block regardless. |
+| `fail-on-vuln` | `false` | `true` = BLOCK when a ≥floor advisory exists, and FAULT (exit 1, no verdict) when osv-scanner could not look. Default `false` (report-only, exit 0 either way). Unpinned-action advisories never block regardless. |
 | `issue-title` | `deps-currency: dependency advisories` | Stable title so the same issue is reused / closed. |
 | `osv-version` | `v2.4.0` | Pinned osv-scanner release (mirrors `security-baseline`). |
 | `first-party-owners` | *(empty)* | **Extra** owners to treat as first-party in the unpinned-action scan, space/comma separated. The caller's owner and this action's own owner are already included — see below. Only needed for a third account you also control. |
@@ -178,6 +195,22 @@ Since **v1.18.0** the report is in three places, so a scheduled run's findings n
   word, and a dirty one went on to create one, a duplicate whenever an issue was open and the
   create went through. `linkcheck` already stopped there: its lookup runs under
   `bash -eo pipefail`, so a failed `gh issue list` ends the step before it creates or closes.
+- **A scan that could not look.** When osv-scanner could not look (see
+  [What it does](#what-it-does)), the scanner notes name why, with osv-scanner's own exit and error
+  line — `osv-scanner could not look — exit 129: <its last stderr line>` — the report reads
+  `advisories in tree: **unknown**` and `⚠️ no verdict`, never ✅, and the verdict line is
+  `report-only — osv-scanner could not look, so the dependency tree was not audited: no verdict. …`
+  (exit 0), or under `fail-on-vuln: true` `FAULT — … No verdict: a tool fault in deps-currency, not
+  a finding about this repository.` (exit 1). One annotation names the fault for the check-run API
+  (`::warning` / `::error title=deps-currency could not look::…`), ahead of any advisory's, within
+  GitHub's 10. The tracking issue is **held**: never opened and never closed, whatever else the
+  sweep found. An open one gets a comment — `No verdict as of <date>: osv-scanner could not look —
+  <reason>. This sweep neither updates nor closes this issue; it stays open until a sweep that
+  looked comes back clean.` — and the block says `tracking issue #N left open, with a comment`, or
+  `no tracking issue opened` when none is open. Anything a failed run did report is still listed,
+  marked `may be incomplete`. osv-scanner's error text goes through `safe()` and loses any URL
+  userinfo and the middle of any long letters-and-digits run, so a credential it echoes cannot land
+  whole in the log or the issue.
 
 Tool output never reaches the start of a log line, where the runner would read it as a workflow
 command: every osv-scanner string (a package name, a version, an advisory id, a path) and gh's
@@ -247,12 +280,35 @@ itself refused after a dirty and after a clean sweep, and answered with no JSON 
 issue open; plus no `gh`, no `GITHUB_REPOSITORY`, and a clean run with nothing to close. Each note
 must reach the log and the summary exactly once, after the report and before the annotations, with
 the report byte-identical to a `manage-issue: false` run, the same exit code and no new
-command-shaped line, and each row pins the `gh` verbs the run called: a failed lookup must stop at
-`list`. A summary made unwritable while the issue opens must still leave the block in the log. 16
+command-shaped line, and each row where gh can run pins the `gh` verbs the run called: a failed
+lookup must stop at `list`. A summary made unwritable while the issue opens must still leave the block in the log. 16
 targeted mutants turn that part red, and 16 more the lookup rows and the verb column; two of those,
 a `create` after the lookup note and a close without its resolving comment, only the verb column
 catches. Dropping one of the two `safe()` passes a note goes through is equivalent (the other still
 flattens it). Runs in CI on `deps-currency/**`.
+
+**Could-not-look legs (v1.19.4).** Unit legs feed `osvOutcome()` canned osv-scanner processes: exit
+0 `{"results":[]}`, 1 with results and 128 with nothing on stdout looked; 129, 127, 130, exit 0
+with an empty or cut-short stdout, a JSON report with no `results` array, exit 1 with no results,
+exit 2 with a valid-looking report, not installed, a timeout, the output cap, a kill and a spawn
+error did not, each with its reason. Others pin the `hold` decision, the no-verdict rendering, the
+fault annotation and `scrub()`. End to end, the stub `osv-scanner` exits 129 with nothing on
+stdout, in both modes with #7 open: the note names the exit and osv's error line once in the log
+and once in the summary, nothing says `PASS` or ✅, the verdict line and the exit are the mode's,
+gh runs `list comment` and never `close`, the comment names the fault, and the only command-shaped
+line is the fault's annotation. Exit 128 with nothing on stdout stays a clean sweep in both modes:
+`PASS`, exit 0, and #7 closed. Seven more ways to fail to look (127, 130, an empty or cut-short
+report, exit 1 without results, not installed, a missing `working-directory`, and a kill after the
+whole report) each hold #7, in both modes; a failed run's partial report is listed and marked
+incomplete, with the fault's annotation counted in GitHub's 10. The lifecycle table gains five
+held rows. The old `scan.mjs` reads the 129 run as clean and closes #7 as resolved, and the table
+goes red; every one of the 79 new assertions turns red under at least one of 52 targeted mutants,
+50 of which turn the self-test red. Two survive: one is equivalent, and dropping `run()`'s `error`
+field changes only a reason's wording, since a timeout and the output cap also kill the process and
+the signal still says could-not-look. A second CI job, `real-osv-scanner`, installs the pinned osv-scanner and asks
+the real binary what the stubs assume: on this repository it looked, in an empty directory (exit
+128) the sweep passes, and with osv.dev unreachable (a dead proxy) the run is no verdict and, under
+`fail-on-vuln`, a FAULT with exit 1. It needs osv.dev, so an osv.dev outage turns it red.
 
 > The owner-set fixtures deliberately use **different** literals for the caller's owner and the
 > action's owner (`creme-ypsilon` vs `mvalasis`). The original fixture used the same literal for
@@ -262,12 +318,13 @@ flattens it). Runs in CI on `deps-currency/**`.
 
 ## Implementation
 
-`scripts/engine.mjs` — pure, network-free engine (CVSS bucketing, floor filter, issue/block
-decisions, first-party owner-set resolution, unpinned-action text scan, spoof-safe report rendering;
-unit-tested by `selftest.mjs`).
-`scripts/scan.mjs` — CLI: discovers lockfiles, runs osv-scanner over the full tree, normalizes its
-output into findings, filters + decides via the engine, renders to `GITHUB_STEP_SUMMARY` and the
-job log, manages the tracking issue and reports the outcome to both, annotates each ≥floor advisory
-(`annotations()` in `engine.mjs`),
-exits non-zero only on a ≥floor advisory under `fail-on-vuln`. **Zero npm
+`scripts/engine.mjs` — pure, network-free engine (whether osv-scanner looked — `osvOutcome()` —
+CVSS bucketing, floor filter, issue/block decisions, first-party owner-set resolution,
+unpinned-action text scan, spoof-safe report rendering; unit-tested by `selftest.mjs`).
+`scripts/scan.mjs` — CLI: discovers lockfiles, runs osv-scanner over the full tree, classifies the
+run as looked or could not look, normalizes its output into findings, filters + decides via the
+engine, renders to `GITHUB_STEP_SUMMARY` and the job log, manages the tracking issue and reports
+the outcome to both, annotates each ≥floor advisory (`annotations()` in `engine.mjs`) and a scan
+that could not look, and exits non-zero only under `fail-on-vuln`: on a ≥floor advisory, or when
+osv-scanner could not look. **Zero npm
 dependencies** (pure Node 22). osv-scanner is a pinned binary installed in `action.yml`.

@@ -4,7 +4,8 @@ name: deps-currency self-test
 # osv-scanner JSON fixture + workflow-text fixtures to the pure engine and asserts CVSS→bucket,
 # severity-floor filtering, the issue open/close lifecycle, the fail-on-vuln block decision
 # (report-mode-first), the unpinned-secret-consuming-action detection, and the spoof/disclosure
-# guard. Deterministic — the action's own regression guard.
+# guard. Deterministic — the action's own regression guard. A second job runs the REAL pinned
+# osv-scanner (network: osv.dev) to prove the could-not-look classification against the binary.
 
 on:
   push:
@@ -25,3 +26,44 @@ jobs:
       - name: Offline engine self-test
         working-directory: deps-currency
         run: node scripts/selftest.mjs
+
+  # The self-test's stub osv-scanner answers the way v2.4.0 was measured to. This job asks the REAL
+  # binary, at action.yml's pin, the three questions the could-not-look classification (v1.19.4)
+  # stakes on it: on this repository's lockfiles it looked; in an empty directory (its exit 128) it
+  # looked at nothing and the sweep PASSes; with osv.dev unreachable it could not look, so the run is
+  # no verdict — a FAULT under fail-on-vuln — never "PASS". Needs osv.dev: red during an osv.dev
+  # outage is the check doing its job. Annotations and the step summary are off, and gh is never run.
+  real-osv-scanner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Install osv-scanner (action.yml's pin)
+        run: |
+          v="$(awk '/^  osv-version:/ { f = 1 } f && /default:/ { print $2; exit }' deps-currency/action.yml | tr -d "'\"")"
+          [ -n "$v" ] || { echo "::error::could not read osv-version's default from deps-currency/action.yml"; exit 1; }
+          sudo curl -fsSL "https://github.com/google/osv-scanner/releases/download/${v}/osv-scanner_linux_amd64" -o /usr/local/bin/osv-scanner
+          sudo chmod +x /usr/local/bin/osv-scanner
+          osv-scanner --version
+      - name: Looked, looked at nothing, could not look
+        run: |
+          set +e
+          fail=0
+          bad() { echo "::error title=deps-currency real osv-scanner::$1"; fail=1; }
+          scan() { env GITHUB_ACTIONS= GITHUB_STEP_SUMMARY= MANAGE_ISSUE=false "$@" node deps-currency/scripts/scan.mjs; }
+          out="$(scan WORKING_DIRECTORY=.)"; rc=$?; printf '%s\n\n' "$out"
+          case "$out" in *'could not look'*) bad 'this repository: the real osv-scanner could not look' ;; esac
+          [ "$rc" = 0 ] || bad "this repository: exit $rc in report mode"
+          mkdir -p "$RUNNER_TEMP/empty"
+          out="$(scan WORKING_DIRECTORY="$RUNNER_TEMP/empty" FAIL_ON_VULN=true)"; rc=$?; printf '%s\n\n' "$out"
+          case "$out" in *'PASS — no dependency advisories'*) ;; *) bad 'an empty directory, osv exit 128: no PASS' ;; esac
+          case "$out" in *'could not look'*) bad 'an empty directory, osv exit 128: read as could-not-look' ;; esac
+          [ "$rc" = 0 ] || bad "an empty directory under fail-on-vuln: exit $rc"
+          out="$(scan WORKING_DIRECTORY=. FAIL_ON_VULN=true HTTPS_PROXY=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9)"; rc=$?; printf '%s\n\n' "$out"
+          case "$out" in *'osv-scanner could not look — '*) ;; *) bad 'osv.dev unreachable: no could-not-look note' ;; esac
+          case "$out" in *'FAULT — osv-scanner could not look'*) ;; *) bad 'osv.dev unreachable under fail-on-vuln: no FAULT verdict' ;; esac
+          case "$out" in *'PASS —'*) bad 'osv.dev unreachable: PASS' ;; esac
+          [ "$rc" = 1 ] || bad "osv.dev unreachable under fail-on-vuln: exit $rc, want 1"
+          exit "$fail"
