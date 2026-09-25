@@ -21,9 +21,10 @@ across the whole fleet — a bad commit on `@main` would lock merges everywhere.
 
 - **`v1`** — floating; moved forward on every backward-compatible release. This
   is the only ref callers reference.
-- **`v1.x.y`** — immutable point tags; cut one per release as a changelog marker
-  and rollback anchor. Optional/lazy — cut when a release is worth naming, not
-  per push.
+- **`v1.x.y`** — immutable point tags; cut one per release (not per push) as a
+  changelog marker and rollback anchor. Every `v1` move needs one at its target:
+  the release gate (a local pre-tag hook) refuses to move `v1` onto a commit
+  without one.
 - **`v2`** — only ever for a **breaking** change (removed/renamed input, or a
   default that breaks existing callers). Callers opt in by editing `@v1`→`@v2`;
   that's the *only* time caller repos get touched after the initial wiring.
@@ -31,10 +32,16 @@ across the whole fleet — a bad commit on `@main` would lock merges everywhere.
 **Release ritual** (after merging compatible work to `main`):
 
 ```bash
-git tag -a v1.2.0 -m "v1.2.0 — <what changed>"   # optional immutable anchor
+git tag -a v1.2.0 -m "v1.2.0 — <what changed>"   # immutable anchor (required)
 git push origin v1.2.0
 git tag -f --no-sign v1 HEAD && git push -f origin v1   # move the floating major
 ```
+
+**A move ships every version staged below it.** `v1 HEAD` carries everything on
+`main`, including entries below whose tag is not yet cut. Cut each one's anchor on
+its own commit, mark its entry as shipped with this move, and tell whoever staged it
+not to move `v1` onto that anchor later: it sits behind `v1`, so that move would
+roll every caller back.
 
 **Rollback:** `git tag -f --no-sign v1 v1.1.0 && git push -f origin v1` (point
 callers back at the last-good release; they pick it up on their next run).
