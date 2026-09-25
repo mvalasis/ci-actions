@@ -161,7 +161,10 @@ echo "# (H) the verify-token stays out of argv, the environment and readable fil
 # its --config WHILE audit.sh runs, and `mktemp` logs every dir it makes, so a dir
 # left behind on any exit path is caught. They find their log dir from their own
 # path, so nothing is added to the environment under test.
-TOKEN="a11y-selftest-canary-4d1f"   # a canary, not a secret
+# A canary, minted per run. A fixed literal here is exactly the shape gitleaks'
+# generic-api-key matches (a key-named variable, a 10+ char value), and the
+# security-baseline self-scan reported the old one as a T0 critical.
+TOKEN="a11y-canary-$$-$RANDOM"
 cat > "$WORK/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 W="$(cd "$(dirname "$0")/.." && pwd)"
