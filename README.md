@@ -49,6 +49,26 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.17.0** — `security-baseline` gains **`argv-secret`** (T1, promotable WARN): a `-H` /
+`--header` whose value expands a `*TOKEN*` / `*SECRET*` / `*KEY*` / `*PASS*` variable into a child
+process's argv, where `ps` and `/proc` show it to every process on the runner. v1.15.1 and v1.15.2
+fixed that class by hand in `a11y-audit` and `linkcheck`; the fleet had shipped it in more places
+than those, and nothing would have caught the next one. The matcher is the one this repo's lint
+gained as rule 4 (a99163c). It moved into `security-baseline/scripts/argv-secret.mjs`, with the
+JavaScript scrubber it needs in `js-scrub.mjs`, and the lint imports both, so the fleet gate and the
+repo lint run one copy. It grades shell, Python and CI-side JS/TS on the diff (the whole tree under
+`scan-scope: full`), and `.github` YAML on every run, so a workflow leak that predates the check is
+reported on the first run. Prose, UI components, vendored code and selftest/fixture corpora are
+not graded, and `lint-allow-argv-secret: <reason>` waives a non-secret. Measured before release
+over every caller's tree and full history: every hit on non-fixture code was a real secret in argv,
+and nothing else fired. A rehearsal of this `scan.mjs` against each caller's HEAD matched the
+measurement, and a leak planted in each caller was found. `scripts/selftest.mjs` gains unit and
+end-to-end legs (the shapes the fleet shipped, the `-H @file` fix, comments, the pragma, file
+selection, promotion annotating `header ← variable`), 20 targeted mutants each turn it red, and
+the lint's 101 fixtures pass unchanged over the moved code. **Caller-visible:** a ⚠️ `argv-secret`
+group on a run that finds one — WARN, so it blocks nobody until a caller lists it in
+`critical-checks`. No input and no existing verdict changed. The `v1` move newly-blocks nobody.
+
 **v1.16.1** *(tag not yet cut; lands with the next `v1` move)* — `linkcheck` refuses a sitemap
 that declares a DOCTYPE, and caps every sitemap body at the protocol's 50 MB. `sitemap-urls.py`
 parsed whatever a sitemap URL returned with `xml.etree.ElementTree`, and that body can come from

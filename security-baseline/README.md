@@ -17,7 +17,7 @@ silently un-enforce every repo.
 | Tier | Behaviour | Checks |
 |---|---|---|
 | **T0 — CRITICAL** | always blocks (when `fail-on-critical`, the default) | `sast-critical` (semgrep community ERROR on the diff — *today's block, unchanged*); `secret-pattern` (gitleaks pattern on the diff — *today's block, unchanged*); `secret-verified` (trufflehog `--only-verified` on the **diff range** — NEW; a provider just authenticated it → ~zero FP) |
-| **T1 — promotable WARN** | reports; a caller ELEVATES any id to CRITICAL via `critical-checks` | `sca-critical`, `sca-high` (osv-scanner); the custom **WP/PHP** rules (`wp-nonce-missing`, `wp-cap-missing`, `wp-sql-unprepared`, `wp-unserialize`, `wp-file-include`, `wp-rest-error-detail`, `wp-rest-error-detail-laundered`, `wp-weak-crypto`, `turnstile-test-key`); the custom **Astro/TS/RN** rules (`ts-dangerous-html`, `ts-eval`, `ts-child-process`, `ts-public-secret-leak`, `ts-ssrf`, `ts-open-redirect`, `ts-secret-in-log`, `rn-insecure-storage`, `rn-cleartext-http`); the **GitHub-Actions** rules (`gha-unpinned-action`, `gha-script-injection`, `gha-pr-target`); `dockerfile-lint` |
+| **T1 — promotable WARN** | reports; a caller ELEVATES any id to CRITICAL via `critical-checks` | `sca-critical`, `sca-high` (osv-scanner); the custom **WP/PHP** rules (`wp-nonce-missing`, `wp-cap-missing`, `wp-sql-unprepared`, `wp-unserialize`, `wp-file-include`, `wp-rest-error-detail`, `wp-rest-error-detail-laundered`, `wp-weak-crypto`, `turnstile-test-key`); the custom **Astro/TS/RN** rules (`ts-dangerous-html`, `ts-eval`, `ts-child-process`, `ts-public-secret-leak`, `ts-ssrf`, `ts-open-redirect`, `ts-secret-in-log`, `rn-insecure-storage`, `rn-cleartext-http`); the **GitHub-Actions** rules (`gha-unpinned-action`, `gha-script-injection`, `gha-pr-target`); `dockerfile-lint`; `argv-secret` (a secret spelled into a child's argv — §argv-secret) |
 | **T2 — advisory** | reports (WARN/INFO); never promotable | `sca-moderate`/`sca-low` (INFO); `wp-unescaped-output` (syntactic XSS — too FP-heavy to promote); `wp-rest-wp-error-detail` (`WP_Error::get_error_message()` in a REST/AJAX body — usually the *intended* client message, so advisory-only); `ts-cors-wildcard`; `secrets-history` (full-history baseline — clearing needs a history rewrite, so it can **never** be a merge precondition) |
 
 The CRITICAL core is exactly what a clean repo always passes; **a failure there is always a real
@@ -185,6 +185,42 @@ lux-main found two **laundered** CWE-209 leaks the plain accessor-grep called cl
 provider `error_description` reflected via `add_query_arg`/`wp_safe_redirect` on the public `/login/`
 page — now caught by **`wp-rest-error-detail-laundered`** (see §Honest limits for the four shapes).
 
+## argv-secret — a secret spelled into a child's argv
+
+A `-H` / `--header` whose **value expands a variable named like** `TOKEN`, `SECRET`, `KEY` or `PASS`
+(a substring, any case): `$VAR`, `${VAR}`, a Python f-string `{VAR}`, a GitHub Actions
+`${{ secrets.X }}`, a JS template `${…}`, or `"Name: " + VAR`. argv is world-readable — `ps` and
+`/proc/<pid>/cmdline` show it to every process on the machine (on a runner: the caller's other steps
+and every action they use), and an argv-logging wrapper first on `PATH` records it verbatim. No green
+run shows it. The fix is always the same: hand curl the header from a mode-600 file (`-H @file`),
+the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
+
+- **What it grades.** Shell (`.sh`/`.bash`/`.zsh`, or an extensionless file by its shebang), Python,
+  and the JS/TS a build or CI step runs (`.mjs`/`.cjs`/`.js`/`.ts`) — on the **diff** (the whole tree
+  under `scan-scope: full`), like the rule packs. `.github` YAML (workflows, local composite actions)
+  on **every run**, like `gha.yaml`: a workflow is rarely edited, so a diff-only pass would never
+  report a leak that predates the check. Not prose (a README's `curl` example is a one-off on a
+  person's own machine, not a script re-running under whatever `PATH` it inherits), not UI
+  components, not vendored or minified code, and not `selftest*` / `fixtures/` corpora, which must
+  spell the banned form to test it (unlike the rule packs' fixtures, which the self-scan grades on
+  purpose — §Self-test — a hit on one proves nothing: the end-to-end leg of `selftest.mjs` is this
+  check's proof that it runs through `scan.mjs`). Only tracked files are read; a tree it cannot
+  list or a file it cannot read is a scanner note, never a silent clean.
+- **One matcher, two gates.** `scripts/argv-secret.mjs` is also rule 4 of this repo's own lint
+  (`.github/scripts/lint-entrypoint-output.mjs`, over the action entrypoints here), which imports it.
+- **Waive a non-secret, with a reason:** `# lint-allow-argv-secret: <why this is not a secret>`
+  (`//` in JS) on the flagged line or the line above; a bare pragma does not count. The known false
+  positive is a value that merely looks like a secret — `$CACHE_KEY`, an idempotency key.
+- **Not seen** (stated, not implied): a header built on an earlier line and passed as `-H "$hdr"`
+  (that is dataflow); `.format()` / `%` formatting; other argv spellings (`-u user:$PASS`,
+  `-d token=…`, a query string, `--api-token $T`); a secret held in a variable not named like one
+  (`$AUTH`). A trailing `#` comment on a code line is scanned, so it can fire.
+- **Measured before it shipped (2026-09-25),** over every caller's tree and full history and this
+  repo's: every hit on non-fixture code was a real secret in argv — the WAF token in shell arrays,
+  Python argv lists and workflow `--header` flags, and a workflow expanding `${{ secrets.* }}` inside
+  a `-H` — and nothing else fired.
+- **Promote** it with `critical-checks: argv-secret` once a run is clean.
+
 ## Honest limits
 
 - **No reachability.** OSS semgrep + osv-scanner are syntactic / present-in-tree; there is no
@@ -249,6 +285,11 @@ page — now caught by **`wp-rest-error-detail-laundered`** (see §Honest limits
   commands (stdout a socket, as node's child_process gives it — the case that crashed the old
   `/dev/stdout` fallback on Linux), report-mode annotating as `::warning`, and an unwritable summary
   still reaching the log under the caller's exit setting. 19 targeted mutants each turn it red.
+  Its **argv-secret** leg asserts that every shape the fleet shipped fires and the `-H @file` fix,
+  comment lines and a reasoned pragma do not; the file selection (languages, the always-on `.github`
+  pass, the skipped corpora); and, end to end, an untouched workflow reported on a diff run, an
+  untouched script only under full scope, a selftest fixture never, and a promoted finding
+  annotating `header ← variable` with no value. 20 targeted mutants each turn it red.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
 
@@ -276,7 +317,10 @@ A new critical in the self-scan is therefore a real one.
 `scripts/tiers.mjs` — pure, network-free tier engine (the `CHECKS` map is the single source of
 truth; unit-tested by `selftest.mjs`). `scripts/firstparty.mjs` — pure first-party owner resolution
 and the `gha-unpinned-action` post-filter (see §First-party ownership); kept out of `tiers.mjs`
-because it is an ownership question, not a severity one. `scripts/scan.mjs` — CLI: resolves the diff base, runs the
+because it is an ownership question, not a severity one. `scripts/argv-secret.mjs` — the pure
+`argv-secret` matcher and file selection, shared with the repo lint; `scripts/js-scrub.mjs` — the
+JavaScript comment/literal scrubber it and the lint run (both moved out of the lint in v1.17.0, so a
+change to either is a release). `scripts/scan.mjs` — CLI: resolves the diff base, runs the
 scanners, normalizes their output into `{checkId, rule, file, line, msg}` findings, tiers + promotes
 via the engine, renders a per-check report to `GITHUB_STEP_SUMMARY` and the job log, annotates each
 CRITICAL (`annotations()` in `tiers.mjs`), exits non-zero only on a CRITICAL under

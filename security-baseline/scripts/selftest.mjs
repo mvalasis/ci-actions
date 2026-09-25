@@ -14,6 +14,7 @@ import {
   isPromotable, baseSev, safe, redact, escapeData, escapeProperty, annotation, annotations,
 } from './tiers.mjs';
 import { firstPartyOwners, ownerOf, parseOwners, refFromText, readLineFromDisk, filterFirstPartyGha } from './firstparty.mjs';
+import { findArgvSecrets, argvLang, argvTargets, argvFinding } from './argv-secret.mjs';
 
 // The checkIds a scanner adapter in scan.mjs actually emits (kept in sync by the coverage
 // assertion below — a new CHECKS id must be either wired here or explicitly RESERVED).
@@ -24,7 +25,7 @@ const EMITTED = new Set([
   'wp-rest-error-detail', 'wp-rest-error-detail-laundered', 'wp-weak-crypto', 'turnstile-test-key', 'wp-unescaped-output', 'wp-rest-wp-error-detail',
   'ts-dangerous-html', 'ts-eval', 'ts-child-process', 'ts-public-secret-leak', 'ts-ssrf',
   'ts-open-redirect', 'ts-secret-in-log', 'rn-insecure-storage', 'rn-cleartext-http', 'ts-cors-wildcard',
-  'gha-unpinned-action', 'gha-script-injection', 'gha-pr-target', 'dockerfile-lint',
+  'gha-unpinned-action', 'gha-script-injection', 'gha-pr-target', 'dockerfile-lint', 'argv-secret',
 ]);
 
 let failed = 0;
@@ -321,6 +322,86 @@ console.log('\n# workflow-command encoding + annotations (pure)');
   check('annotations: a WARN finding is never annotated', !out.some((l) => l.includes('sca-high')) && annotations([warnOnly]).length === 0);
 }
 
+console.log('\n# argv-secret — a secret spelled into a child\'s argv (argv-secret.mjs)');
+{
+  const hits = (lang, ...lines) => findArgvSecrets(lines.join('\n'), lang);
+  const n = (lang, ...lines) => hits(lang, ...lines).length;
+  // The shapes the fleet actually shipped, each fixed by hand before this check existed.
+  check('a shell array on a line that never names curl (a11y-audit before v1.15.1)',
+    n('sh', '[ -n "${VERIFY_TOKEN:-}" ] && hdr=(-H "X-Verify-Source: $VERIFY_TOKEN")') === 1);
+  check('a shell array handed to curl lines later',
+    n('sh', 'CURL_HEADER_ARGS=(-H "X-Verify-Source: $VERIFY_HOMEPAGE_TOKEN")', 'curl "${CURL_HEADER_ARGS[@]}" "$u"') === 1);
+  check('a ${VAR:+-H "Name: $VAR"} expansion on a continued curl line',
+    n('sh', 'code=$(curl -sL ${VERIFY_HOMEPAGE_TOKEN:+-H "X-Verify-Source: $VERIFY_HOMEPAGE_TOKEN"} \\', '  -o /dev/null "$url")') === 1);
+  check('a Python argv list with an f-string (linkcheck before v1.15.2)',
+    n('py', '    return ["-H", f"X-Verify-Source: {TOKEN}"] if (TOKEN and is_internal(url)) else []') === 1);
+  check('a Python list exploded one element per line',
+    n('py', 'cmd = [', '    "curl",', '    "-H",', '    f"X-Verify-Source: {TOKEN}",', '    url,', ']') === 1);
+  check('a workflow run: step expanding ${{ secrets.* }} inside the header',
+    n('yaml', '        run: |', '          curl -s -X POST "https://api.example.invalid/purge" \\', '            -H "Authorization: Bearer ${{ secrets.DEPLOY_API_KEY }}" \\', '            -H "Content-Type: application/json"') === 1);
+  check('a workflow --header with a shell variable',
+    n('yaml', '          curl -sS \\', '            --header "X-Verify-Source: ${VERIFY_HOMEPAGE_TOKEN}" \\', '            "$u"') === 1);
+  check('a JS spawn with a template literal',
+    n('js', "spawnSync('curl', ['-H', `X-Verify-Source: ${process.env.VERIFY_TOKEN}`, url]);") === 1);
+  check('a "Name: " + VAR concatenation',
+    n('py', 'cmd += ["-H", "X-Verify-Source: " + TOKEN]') === 1);
+  const h = hits('yaml', 'steps:', '  - run: |', '      curl -H "Authorization: Bearer ${{ secrets.DEPLOY_API_KEY }}" "$u"');
+  check('a hit names the header and the VARIABLE (never a value) at the line the value sits on',
+    h.length === 1 && h[0].flag === '-H' && h[0].header === 'Authorization' && h[0].secret === 'secrets.DEPLOY_API_KEY' && h[0].line === 3, JSON.stringify(h));
+  // What must NOT fire.
+  check('NOT the fix: -H "@file" from a mode-600 file',
+    n('sh', 'hdr=(-H "@$workdir/token-header")') === 0 && n('py', 'cmd += ["-H", "@" + _token_header()]') === 0);
+  check('NOT a header whose value expands no secret-named variable',
+    n('sh', 'curl -H "Content-Type: application/json" -H "X-Request-Id: $REQ_ID" "$u"') === 0);
+  check('NOT ssh-keyscan -H (a flag with no Name: value after it)',
+    n('yaml', '          ssh-keyscan -p ${{ steps.env.outputs.port }} -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts') === 0);
+  check('NOT a whole-line # comment, in shell, Python or YAML',
+    n('sh', '# never `-H "X-Verify-Source: $VERIFY_TOKEN"`') === 0
+    && n('py', '    # never -H "X-Verify-Source: {TOKEN}"') === 0
+    && n('yaml', '      # -H "Authorization: Bearer ${{ secrets.DEPLOY_API_KEY }}"') === 0);
+  check('NOT a // comment in JavaScript', n('js', "run(); // not ['-H', `X-Verify-Source: ${token}`]") === 0);
+  check('a pragma with a reason, on the line above, waives it',
+    n('sh', '# lint-allow-argv-secret: a cache key, not a credential', 'curl -H "X-Cache-Key: $CACHE_KEY" "$u"') === 0);
+  check('a bare pragma (no reason) does not',
+    n('sh', '# lint-allow-argv-secret:', 'curl -H "X-Cache-Key: $CACHE_KEY" "$u"') === 1);
+
+  // Which files the fleet check grades.
+  const L = argvLang;
+  check('languages: .sh/.bash → sh, .py → py, .mjs/.js/.ts → js',
+    L('scripts/a.sh') === 'sh' && L('scripts/a.bash') === 'sh' && L('tools/a.py') === 'py'
+    && L('scripts/a.mjs') === 'js' && L('scripts/a.js') === 'js' && L('scripts/a.ts') === 'js');
+  check('an extensionless file, by its shebang',
+    L('bin/tool', '#!/usr/bin/env bash') === 'sh' && L('bin/tool', '#!/usr/bin/env python3') === 'py'
+    && L('bin/tool', '#!/usr/bin/env node') === 'js' && L('bin/tool', 'plain text') === null);
+  check('.github YAML and a composite action.yml → yaml; other YAML is not graded',
+    L('.github/workflows/deploy.yml') === 'yaml' && L('.github/actions/x/action.yaml') === 'yaml'
+    && L('my-action/action.yml') === 'yaml' && L('config/app.yml') === null);
+  check('not graded: prose, UI components, vendored or minified code',
+    [L('README.md'), L('src/Page.tsx'), L('src/Page.astro'), L('vendor/lib/x.sh'), L('node_modules/p/x.js'), L('wp-includes/x.js'), L('public/app.min.js')].every((v) => v === null));
+  check('not graded: selftest and fixture corpora, which must spell the banned form',
+    [L('a/scripts/selftest.mjs'), L('a/scripts/selftest-rules.sh'), L('.github/scripts/x.selftest.mjs'), L('rules/selftest/gha.yml'), L('tests/fixtures/x.sh')].every((v) => v === null));
+  const tracked = ['scripts/changed.sh', 'scripts/untouched.sh', '.github/workflows/deploy.yml', 'README.md'];
+  const files = (changed) => argvTargets({ changed, tracked }).map((t) => t.file).sort();
+  check('diff scope: the changed script and every .github YAML, never an untouched script',
+    JSON.stringify(files(['scripts/changed.sh', 'README.md'])) === JSON.stringify(['.github/workflows/deploy.yml', 'scripts/changed.sh']), JSON.stringify(files(['scripts/changed.sh', 'README.md'])));
+  check('diff scope with nothing changed: the .github YAML is still graded',
+    JSON.stringify(files([])) === JSON.stringify(['.github/workflows/deploy.yml']));
+  check('full scope: every graded tracked file',
+    JSON.stringify(files(null)) === JSON.stringify(['.github/workflows/deploy.yml', 'scripts/changed.sh', 'scripts/untouched.sh']));
+  const asked = [];
+  const t = argvTargets({ changed: ['bin/tool', 'scripts/x.sh'], tracked: [], headOf: (f) => { asked.push(f); return '#!/bin/sh'; } });
+  check('only an extensionless file has its head read', t.length === 2 && JSON.stringify(asked) === '["bin/tool"]', JSON.stringify(asked));
+
+  // What the engine receives: T1 WARN, promotable, value-free.
+  const fnd = argvFinding('.github/workflows/deploy.yml', h[0]);
+  check('argv-secret is T1 and promotable', CHECKS['argv-secret'] && CHECKS['argv-secret'].tier === 'T1' && isPromotable('argv-secret'));
+  check('unpromoted: WARN, never blocks', evaluate([fnd]).blocked === false && evaluate([fnd]).warn === 1);
+  check('promoted via critical-checks: CRITICAL, blocks', evaluate([fnd], { promote: ['argv-secret'] }).blocked === true);
+  const ann = annotation({ ...fnd, sev: SEV.CRIT });
+  check('its annotation names the check, header, variable, file and line',
+    ann === '::error file=.github/workflows/deploy.yml,line=3,title=security-baseline argv-secret::argv-secret -H Authorization ← secrets.DEPLOY_API_KEY at .github/workflows/deploy.yml:3', ann);
+}
+
 console.log('\n# scan.mjs end to end — the job log carries the report; secret values reach neither output');
 {
   // scan.mjs runs a top-level IIFE, so it is exercised as a PROCESS: stub scanners on disk, a
@@ -391,9 +472,19 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     const put = (rel, text) => { fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true }); fs.writeFileSync(path.join(repo, rel), text); };
     git('init', '-q');
     put('README.md', 'base\n');
+    // argv-secret fixtures. The workflow and the untouched script predate the diff range: the
+    // workflow must be reported anyway (.github YAML is graded on every run), the script must not.
+    put('.github/workflows/deploy.yml', [
+      'on: push', 'jobs:', '  purge:', '    runs-on: ubuntu-latest', '    steps:', '      - run: |',
+      '          curl -s -X POST "https://api.example.invalid/purge" \\',
+      '            -H "Authorization: Bearer ${{ secrets.DEPLOY_API_KEY }}"', '',
+    ].join('\n'));
+    put('scripts/untouched.sh', '#!/bin/sh\ncurl -H "X-Api-Key: $OLD_API_KEY" "$u"\n');
     git('add', '.'); git('commit', '-q', '-m', 'base');
     put('app/config.php', '<?php // fixture\n');
     put('app/login.php', '<?php // fixture\n');
+    put('scripts/smoke.sh', '#!/bin/sh\nhdr=(-H "X-Verify-Source: $VERIFY_TOKEN")\ncurl "${hdr[@]}" "$u"\n');
+    put('scripts/selftest.sh', '#!/bin/sh\nhdr=(-H "X-Verify-Source: $VERIFY_TOKEN")\n');   // a fixture corpus: never graded
     git('add', '.'); git('commit', '-q', '-m', 'change');
     check('fixture repo has two commits (else every assertion below is vacuous)', (git('rev-list', '--count', 'HEAD').stdout || '').trim() === '2');
 
@@ -433,6 +524,12 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('NO planted secret value in the job log, the step summary or stderr', !leaked(a.stdout) && !leaked(a.summary) && !leaked(a.stderr));
     const argv = fs.existsSync(argvLog) ? fs.readFileSync(argvLog, 'utf8').trim().split('\n') : [];
     check('gitleaks ran twice (diff + history), both times with --redact', argv.length === 2 && argv.every((l) => /(^| )--redact( |$)/.test(l)), `${argv.length} call(s)`);
+    check('argv-secret: a T1 WARN group in the report', a.stdout.includes('### ⚠️ `argv-secret` · T1 · 2 finding(s)'));
+    check('argv-secret: the untouched workflow IS reported (.github YAML is graded on every run)',
+      a.stdout.includes("- ⚠️ .github/workflows/deploy.yml:8 — -H Authorization expands secrets.DEPLOY_API_KEY into a child's argv"));
+    check('argv-secret: the changed script is reported', a.stdout.includes('- ⚠️ scripts/smoke.sh:2 — -H X-Verify-Source expands VERIFY_TOKEN'));
+    check('argv-secret: an untouched script is NOT graded in diff scope, nor a selftest fixture ever',
+      !a.stdout.includes('scripts/untouched.sh') && !a.stdout.includes('scripts/selftest.sh'));
 
     // (B) Off Actions (a local run): stdout is the only output — the report prints once, with no
     // commands. spawnSync hands the child a SOCKET as stdout, which is the case that caught the old
@@ -462,6 +559,21 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('unwritable summary: the fault is named in the log', /security-baseline crashed: .*EISDIR/.test(d.stdout));
     check('unwritable summary: the crash re-flush echoes only the new line, not the report again', d.stdout.split('## 🔒 security-baseline').length === 2);
     check('unwritable summary under report-mode: exit 0, not an unhandled throw', d.status === 0, `exit ${d.status}`);
+
+    // (E) argv-secret promoted by the caller: it blocks, and each finding annotates by header ←
+    // variable name — the scan never sees a value, so none can reach an annotation.
+    const e = scan({ GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', CRITICAL_CHECKS: 'argv-secret' });
+    const argvCmds = commands(e.stdout).filter((l) => l.includes('argv-secret')).sort();
+    check('argv-secret promoted: BLOCK, one ::error per finding, naming header ← variable', e.status === 1 && JSON.stringify(argvCmds) === JSON.stringify([
+      '::error file=.github/workflows/deploy.yml,line=8,title=security-baseline argv-secret::argv-secret -H Authorization ← secrets.DEPLOY_API_KEY at .github/workflows/deploy.yml:8',
+      '::error file=scripts/smoke.sh,line=2,title=security-baseline argv-secret::argv-secret -H X-Verify-Source ← VERIFY_TOKEN at scripts/smoke.sh:2',
+    ]), `exit ${e.status} ${JSON.stringify(argvCmds)}`);
+
+    // (F) Full scope grades every tracked script, the untouched one included — still never a fixture.
+    const f = scan({ GITHUB_STEP_SUMMARY: summaryPath, SCAN_SCOPE: 'full' });
+    check('full scope: argv-secret grades the untouched script too', f.stdout.includes('### ⚠️ `argv-secret` · T1 · 3 finding(s)')
+      && f.stdout.includes('- ⚠️ scripts/untouched.sh:2 — -H X-Api-Key expands OLD_API_KEY'), f.stdout.split('\n').filter((l) => l.includes('argv')).join(' | '));
+    check('full scope: a selftest fixture is still never graded', f.stdout.length > 0 && !f.stdout.includes('scripts/selftest.sh'));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

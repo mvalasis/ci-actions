@@ -72,12 +72,18 @@
 //      directly above it. A reason is REQUIRED — a bare pragma does not pass.
 //
 // Repo-internal only: no caller consumes this, so changing it needs no version
-// bump and no `v1` tag move.
+// bump and no `v1` tag move. Two of its parts are NOT repo-internal: the source
+// scrubber and rule 4's matcher are imported from security-baseline/scripts/
+// (js-scrub.mjs, argv-secret.mjs), which ships — changing THOSE is a release.
 // ---------------------------------------------------------------------------
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { blankNonCode } from '../../security-baseline/scripts/js-scrub.mjs';
+import { findArgvSecrets } from '../../security-baseline/scripts/argv-secret.mjs';
+
+export { blankNonCode };
 
 // This linter is subject to its own rule. Its output is a variable-length
 // violation list followed by process.exit() — precisely the shape that
@@ -87,125 +93,12 @@ const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log
 const PRAGMA = /\/\/\s*lint-allow-raw-output:\s*\S/;
 
 // ---------- source scrubber ----------
-// Blank every non-code span (comments, string and template literals, regex
-// literals) so the matcher below only ever sees CODE. Offsets and line numbers
-// are preserved: each blanked character becomes a space, newlines are kept.
-//
-// Without this the lint would fire on its own remediation advice — run.mjs:37
-// and render-check.mjs:44 both spell out `console.log` in a comment explaining
-// why they do not use it — and a regex such as /['"]/ would desync a naive
-// string scanner and swallow real code after it.
-const REGEX_KEYWORDS = new Set([
-  'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void',
-  'case', 'do', 'else', 'yield', 'await',
-]);
+// blankNonCode (comments, string/template/regex literals → spaces, offsets kept)
+// lives in security-baseline/scripts/js-scrub.mjs since v1.17.0: that action's
+// argv-secret check runs it too, so it moved to where it ships instead of being
+// copied. It is re-exported below for the fixture suite. Being shipped code, a
+// change to it is a release — unlike a change to this file.
 
-// Decide whether `/` opens a regex literal or is a division operator, from the
-// last significant code token. 'w' = identifier/number, 'x' = a completed
-// literal. After a value, `/` divides; after an operator or a keyword, it opens
-// a regex.
-function regexAllowed(prev, word) {
-  if (prev === '') return true;                       // start of file
-  if (prev === 'w') return REGEX_KEYWORDS.has(word);  // `return /re/` vs `a / b`
-  if (prev === 'x') return false;                     // after a string/regex
-  if (prev === ')' || prev === ']') return false;     // (a+b)/2, arr[0]/2
-  return true;                                        // ( , = : [ ! & | ? { } ; …
-}
-
-// `literals: false` blanks comments ONLY and keeps string, template and regex
-// literals as written — rule 4's view, since the secret-bearing header lives in a
-// literal. The scan is the same either way; only what gets wiped differs.
-export function blankNonCode(src, { literals = true } = {}) {
-  // UTF-16 code units, the unit `src[i]` indexes by — NOT Array.from(src), which
-  // splits by code point: after an astral character (an emoji; six .mjs
-  // entrypoints carry one) every wipe landed one slot late per astral char, so a
-  // comment's wipe ate the newline after it and, from the second on, the first
-  // characters of the next line's code. That can hide a finding — the permissive
-  // direction. (No live result changed when this was fixed.)
-  const out = src.split('');
-  const n = src.length;
-  const wipe = (i) => { if (i < n && src[i] !== '\n') out[i] = ' '; };
-  const wipeLit = literals ? wipe : () => {};
-  const interp = [];   // brace depths at which a `${` interpolation was opened
-  let depth = 0;
-  let prev = '';
-  let word = '';
-  let mode = 'code';
-  let i = 0;
-
-  while (i < n) {
-    if (mode === 'tmpl') {
-      if (src[i] === '\\') { wipeLit(i); wipeLit(i + 1); i += 2; continue; }
-      if (src[i] === '`') { wipeLit(i); i++; mode = 'code'; prev = 'x'; word = ''; continue; }
-      if (src[i] === '$' && src[i + 1] === '{') {
-        wipeLit(i); wipeLit(i + 1); i += 2;
-        interp.push(depth); depth++;              // the `{` of `${`
-        mode = 'code'; prev = '{'; word = '';
-        continue;
-      }
-      wipeLit(i); i++; continue;
-    }
-
-    const c = src[i], d = src[i + 1];
-
-    if (c === '/' && d === '/') {                 // line comment
-      while (i < n && src[i] !== '\n') wipe(i++);
-      continue;
-    }
-    if (c === '/' && d === '*') {                 // block comment
-      wipe(i); wipe(i + 1); i += 2;
-      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) wipe(i++);
-      if (i < n) { wipe(i); wipe(i + 1); i += 2; }
-      continue;
-    }
-    if (c === "'" || c === '"') {                 // string literal
-      wipeLit(i); i++;
-      while (i < n && src[i] !== c && src[i] !== '\n') {
-        if (src[i] === '\\') { wipeLit(i); wipeLit(i + 1); i += 2; continue; }
-        wipeLit(i); i++;
-      }
-      if (i < n && src[i] === c) { wipeLit(i); i++; }
-      prev = 'x'; word = '';
-      continue;
-    }
-    if (c === '`') { wipeLit(i); i++; mode = 'tmpl'; continue; }
-    if (c === '/' && regexAllowed(prev, word)) {  // regex literal
-      wipeLit(i); i++;
-      let inClass = false;
-      while (i < n && src[i] !== '\n') {
-        const r = src[i];
-        if (r === '\\') { wipeLit(i); wipeLit(i + 1); i += 2; continue; }
-        if (r === '[') inClass = true;
-        else if (r === ']') inClass = false;
-        else if (r === '/' && !inClass) break;
-        wipeLit(i); i++;
-      }
-      if (i < n && src[i] === '/') { wipeLit(i); i++; }
-      while (i < n && /[a-z]/.test(src[i])) { wipeLit(i); i++; }   // flags
-      prev = 'x'; word = '';
-      continue;
-    }
-    if (c === '{') { depth++; prev = '{'; word = ''; i++; continue; }
-    if (c === '}') {
-      if (interp.length && depth === interp[interp.length - 1] + 1) {
-        interp.pop(); depth--; wipeLit(i); i++; mode = 'tmpl';  // close `${…}`
-        continue;
-      }
-      depth--; prev = '}'; word = ''; i++;
-      continue;
-    }
-    if (/\s/.test(c)) { i++; continue; }
-    if (/[A-Za-z_$0-9]/.test(c)) {                // identifier / number / member path
-      let j = i, w = '';
-      while (j < n && /[A-Za-z_$0-9.]/.test(src[j])) { w += src[j]; j++; }
-      word = w; prev = 'w'; i = j;
-      continue;
-    }
-    prev = c; word = ''; i++;
-  }
-
-  return out.join('');
-}
 
 // ---------- rule 2: crash-guard ordering ----------
 // THE DEFECT CLASS: `process.on('uncaughtException', …)` registered BELOW the main
@@ -451,69 +344,26 @@ export function lintCrashGuardPresence(src, file = '<input>', executed = false) 
 // Both fixes hand curl `-H @file` from a mode-600 file, so the value never enters
 // argv. That shape has no `Name:` after the flag, so it never matches.
 //
-// THE RULE: a `-H` / `--header` whose VALUE expands a variable named like TOKEN,
-// SECRET, KEY or PASS — a substring match, case-insensitive (VERIFY_TOKEN,
-// apiKey, self.token, process.env.X_SECRET). The value is a `Name: …` literal,
-// and the variable enters it as `$VAR` / `${VAR}` (bash, JS template), `{expr}`
-// (Python f-string) or `"Name: " + VAR`. The flag and the value may sit on
-// different lines, as in a Python list exploded one element per line.
-//
-// Comments are not code: whole `#` comment lines in .sh/.py (audit.sh explains
-// its fix in exactly the text this rule matches), and every `//` / `/* */`
-// comment in .mjs via the scrubber above, run with its literals kept.
-//
-// KNOWN LIMITS, stated rather than papered over. Not seen: a header string built
-// on an earlier line and passed as `-H "$hdr"` (that is dataflow), `%` /
-// `.format()` formatting, a trailing `#` comment on a .sh/.py code line (it is
-// scanned, so it can fire), and other argv spellings of a secret (`-u user:$PASS`,
-// `-d token=…`, a query string). A substring match also fires on a non-secret
-// that merely looks like one (`$CACHE_KEY`) — annotate that, don't narrow the
-// regex. Scope is the EXECUTED set, as for rule 3; a library module that builds
-// the argv for an entrypoint is not scanned.
-const ARGV_EXT = ['.mjs', '.py', '.sh'];
-// 1 flag · 2 value's opening quote · 3 header name · 4 rest of the literal ·
-// 5 a `+ VAR` concatenated onto it. Between flag and value: bash whitespace,
-// wget's `=`, or a list's closing quote and comma (newlines included).
-const HEADER_ARG = /(-H|--header)(?:=|["'`]?\s*(?:,\s*)?)[fF]?(["'`])([A-Za-z][\w-]*):([^\n]*?)\2(?:\s*\+\s*([A-Za-z_][\w.]*))?/dg;
-const EXPANSION = /\$\{?\s*([A-Za-z_][\w.]*)|\{\s*([A-Za-z_][\w.]*)/g;
-const SECRET_NAME = /token|secret|key|pass/i;
-
-// `# lint-allow-argv-secret: <reason>` (`//` in .mjs), on the flagged line or
-// the line directly above it. A reason is REQUIRED, as for the other two pragmas:
-// the point is to record why the value is not a secret, not to switch the rule off.
-const ARGV_PRAGMA = /(?:\/\/|#)[ \t]*lint-allow-argv-secret:[ \t]*\S/;
-
-// The source with its comments blanked and everything else intact — offsets and
-// line numbers preserved, so a match maps straight back to the raw line.
-function commentsBlanked(src, ext) {
-  if (ext === '.mjs') return blankNonCode(src, { literals: false });
-  return src.split('\n').map((l) => (/^\s*#/.test(l) ? ' '.repeat(l.length) : l)).join('\n');
-}
+// THE RULE — the matcher, its comment handling, its `lint-allow-argv-secret:
+// <reason>` pragma and its KNOWN LIMITS — lives in
+// security-baseline/scripts/argv-secret.mjs (findArgvSecrets) since v1.17.0,
+// shared with that action's `argv-secret` check: the fleet-wide gate and this
+// repo's own lint run one matcher, not two copies that drift. What stays here is
+// the SCOPE: the EXECUTED set, as for rule 3, in the three languages an action
+// ships an entrypoint in. A library module that builds the argv for an
+// entrypoint is not scanned.
+const ARGV_LANG = { '.mjs': 'js', '.py': 'py', '.sh': 'sh' };
 
 export function lintArgvSecret(src, file = '<input>', executed = false) {
   if (!executed) return [];
-  const ext = path.extname(file);
-  if (!ARGV_EXT.includes(ext)) return [];
-  const code = commentsBlanked(src, ext);
-  const rawLines = src.split('\n');
-  const findings = [];
-  for (const m of code.matchAll(HEADER_ARG)) {
-    const exprs = [...m[4].matchAll(EXPANSION)].map((e) => e[1] || e[2]);
-    if (m[5]) exprs.push(m[5]);
-    const secret = exprs.find((e) => SECRET_NAME.test(e));
-    if (!secret) continue;
-    // Report where the secret is spelled: the value, not the flag.
-    const before = code.slice(0, m.indices[2][0]).split('\n');
-    const line = before.length, col = before[before.length - 1].length + 1;
-    if (ARGV_PRAGMA.test(rawLines[line - 1] || '') || ARGV_PRAGMA.test(rawLines[line - 2] || '')) continue;
-    findings.push({
-      file, line, col, kind: 'argv-secret',
-      what: `${m[1]} ${m[3]} ← ${secret}`,
-      text: (rawLines[line - 1] || '').trim(),
-      detail: secret,
-    });
-  }
-  return findings;
+  const lang = ARGV_LANG[path.extname(file)];
+  if (!lang) return [];
+  return findArgvSecrets(src, lang).map((h) => ({
+    file, line: h.line, col: h.col, kind: 'argv-secret',
+    what: `${h.flag} ${h.header} ← ${h.secret}`,
+    text: h.text,
+    detail: h.secret,
+  }));
 }
 
 // Dispatch the whole rule set for one entrypoint. The JS rules (raw output,

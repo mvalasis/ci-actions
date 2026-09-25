@@ -18,6 +18,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { SEV, evaluate, parsePromote, groupByCheck, sevRank, CHECKS, safe, redact, annotations } from './tiers.mjs';
 import { firstPartyOwners, filterFirstPartyGha } from './firstparty.mjs';
+import { argvTargets, findArgvSecrets, argvFinding } from './argv-secret.mjs';
 
 const env = process.env;
 const ACTION_PATH = env.GITHUB_ACTION_PATH || path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -261,6 +262,42 @@ function collectHadolint() {
   return out;
 }
 
+// ---------- argv-secret (a secret spelled into a child's argv) — zero egress ----------
+// The matcher is argv-secret.mjs, shared with this repo's own lint. Scripts are graded on the diff
+// (or the whole tree), like the custom rule packs; `.github` YAML on EVERY run, like gha.yaml: a
+// workflow is small, rarely edited, and a leak there runs on every push, so a diff-only pass would
+// never report one that predates the check. Only tracked files are read. A tree it cannot list, or a
+// file it cannot read, is a scanner note — never a silent "clean" for what it did not see.
+function collectArgvSecret() {
+  const out = [];
+  const ls = run('git', ['ls-files', '-z'], { timeout: 30000 });
+  if (ls.status !== 0) { infra.push('argv-secret: git ls-files failed — no file was graded for secrets in argv'); return out; }
+  const tracked = ls.stdout.split('\0').filter(Boolean);
+  const headOf = (f) => {
+    try {
+      const fd = fs.openSync(f, 'r');
+      try { const b = Buffer.alloc(256); return b.subarray(0, fs.readSync(fd, b, 0, 256, 0)).toString('utf8'); } finally { fs.closeSync(fd); }
+    } catch { return ''; }
+  };
+  const targets = argvTargets({ changed: DIFF ? CHANGED : null, tracked, headOf });
+  if (targets.length === 0) infra.push('argv-secret: nothing in scope to grade — no changed script and no .github YAML');
+  let unread = 0, big = 0;
+  for (const { file, lang } of targets) {
+    let src;
+    try {
+      const st = fs.lstatSync(file);
+      if (!st.isFile()) continue;   // a tracked symlink is not followed out of the tree
+      if (st.size > 2 * 1024 * 1024) { big++; continue; }
+      src = fs.readFileSync(file, 'utf8');
+    } catch { unread++; continue; }
+    if (src.includes('\0')) continue;   // binary, not a script
+    for (const hit of findArgvSecrets(src, lang)) out.push(argvFinding(file, hit));
+  }
+  if (unread) infra.push(`argv-secret: ${unread} file(s) could not be read — not graded`);
+  if (big) infra.push(`argv-secret: ${big} file(s) over 2 MB skipped — not graded`);
+  return out;
+}
+
 function hashish(s) { let h = 0; for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; } return h; }
 // Report lines already echoed to the job log, so the crash path's re-flush echoes only the new ones.
 // The log goes first: when the summary write is what throws, the report is already readable.
@@ -284,7 +321,7 @@ function flush() {
   note('');
 
   let findings = [];
-  for (const collect of [collectSemgrep, collectGitleaks, collectTrufflehog, collectOsv, collectHadolint]) {
+  for (const collect of [collectSemgrep, collectGitleaks, collectTrufflehog, collectOsv, collectHadolint, collectArgvSecret]) {
     try { findings = findings.concat(collect()); } catch (e) { infra.push(`${collect.name}: ${safe(String(e && e.message || e), 120)}`); }
   }
 

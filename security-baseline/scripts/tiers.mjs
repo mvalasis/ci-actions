@@ -53,6 +53,7 @@ export const CHECKS = {
   'gha-pr-target':        { tier: 'T1', sev: SEV.WARN },
 
   // ---- T1: promotable WARN (secrets / supply chain / IaC) ----
+  'argv-secret':       { tier: 'T1', sev: SEV.WARN },  // a -H/--header value expanding a *TOKEN*/*SECRET*/*KEY*/*PASS* variable into a child's argv (argv-secret.mjs)
   'secret-worktree':   { tier: 'T1', sev: SEV.WARN },  // gitleaks --no-git over .env / wp-config in the tree
   'license-denied':    { tier: 'T1', sev: SEV.WARN },
   'dockerfile-lint':   { tier: 'T1', sev: SEV.WARN },
