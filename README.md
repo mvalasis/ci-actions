@@ -49,6 +49,42 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.19.0** *(tag not yet cut; lands with the next `v1` move)* — `security-baseline` no longer
+reads a scanner that could not look as one that found nothing. Every adapter did: semgrep's exit
+status and `errors[]` went unread, a gitleaks run that died before writing its report parsed as
+`[]`, a failed trufflehog or osv-scanner run read as empty output, and a crashed collector became a
+scanner note. A registry outage for `p/security-audit`, a rule pack that did not load or a gitleaks
+config it rejected all ended in `PASS — no critical findings`; only "not installed" reached the
+report, as a note under that PASS. `scripts/outcome.mjs` now classifies every scanner run from its
+exit status, its report's shape and, for semgrep, `errors[]` read in full, since semgrep's exit code
+follows only the last error it recorded. Measured on the pinned binaries, three cases exit 0 having
+scanned nothing, and each is now caught: gitleaks outside a git repository and on a `--log-opts`
+range git cannot resolve (scan.mjs checks for history first, and an unresolvable base faults the
+changed-file list), and trufflehog on a `--since-commit` it cannot resolve, which it now runs with
+`--fail-on-scan-errors` for. A leg that could not look and could have produced a CRITICAL for this
+caller (a T0 leg, or a T1 leg with a check it promoted) FAULTs the run under `fail-on-critical`:
+exit 1, `FAULT — … No verdict: a tool fault in security-baseline, not a finding about this
+repository.` and one `::error title=security-baseline could not look::` per leg. Under
+`report-mode` or `fail-on-critical: false` it exits 0 and says it would FAULT. A leg whose checks
+only warn is listed and PASS stands. The reason quotes the tool's own error line through
+`scrub()`, and trufflehog's stderr never. A secret finding now names its commit (`… in commit
+739c623`), since its `file:line` is that commit's line, under `scan-scope: full` often not the
+tip's. The gitleaks report moved from a fixed name in the shared tmp, which could hand back an
+earlier run's report, to a directory made per run. `scripts/selftest.mjs` gains unit legs over
+canned scanner processes and end-to-end cases on a clean stub set that each break one scanner;
+each of 52 targeted mutants turns it red. The selftest workflow now also runs the real scanners it
+installed over this repo, in both scopes, and fails if any leg could not look. **Measured before
+release** with semgrep 1.178.0, gitleaks 8.30.1 and trufflehog 3.95.6 against all eleven callers'
+`origin` heads: every leg looked on each caller's last push (diff scope) and over each full tree,
+hadolint aside (not installed for the rehearsal; its leg only warns for every caller). semgrep's
+per-file warnings (16 files in 4 callers) are listed, not faulted, and no caller file drew a
+per-file entry at level "error". A 40-commit diff of epn.one hit one registry stall (exit 2 after ~100 s, no output)
+that did not recur in three re-runs: the case that used to pass silently. **Caller-visible:** a
+leg that could not look is now in the report and, where it could have blocked, a FAULT (exit 1)
+instead of a PASS. A semgrep registry outage now reads as a red run; re-run it, or vendor the
+config through `semgrep-config`. No input changed, and on the measured state the `v1` move
+newly-blocks nobody.
+
 **v1.17.0** — `security-baseline` gains **`argv-secret`** (T1, promotable WARN): a `-H` /
 `--header` whose value expands a `*TOKEN*` / `*SECRET*` / `*KEY*` / `*PASS*` variable into a child
 process's argv, where `ps` and `/proc` show it to every process on the runner. v1.15.1 and v1.15.2

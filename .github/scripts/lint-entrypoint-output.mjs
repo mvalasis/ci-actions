@@ -58,11 +58,12 @@
 //
 // The seven `*/scripts/selftest.mjs` files legitimately end in `console.log(...)`
 // then `process.exit(...)`. They are exempt because they CANNOT hit the bug:
-// measured output is 1375–7679 bytes (contract-check 2534, seo-aeo 3043,
-// form-protection 3396, security-baseline 7679 since v1.16.0's end-to-end leg,
-// deps-currency 2577, test-suite 4117, verify-homepage 1375) — at least eight times
-// under the 65,536-byte pipe buffer. Do not "fix" them; the exemption is the
-// finding, not an oversight.
+// measured output is at most 17,124 bytes: security-baseline, the largest since
+// v1.19.0's could-not-look legs. On 2026-09-25 contract-check measured 3,511,
+// deps-currency 5,503, test-suite 4,117 and verify-homepage 2,518; seo-aeo (3,043)
+// and form-protection (3,396) are their last measurements, since both need their
+// npm dependencies installed to run. All are at least three times under the 65,536-byte
+// pipe buffer. Do not "fix" them; the exemption is the finding, not an oversight.
 //
 // ALLOWANCES (both deliberate, both narrow)
 //   1. The sync-write fallback itself: a `console.*` that is the `catch` arm of

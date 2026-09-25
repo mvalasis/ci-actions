@@ -108,6 +108,14 @@ export function evaluate(findings, opts = {}) {
   return { graded, crit, warn, info, blocked, reportMode, promoted: [...promoteSet] };
 }
 
+// Could any of these checkIds be CRITICAL for this caller — a T0, or a T1 it promoted? A scanner leg
+// that could not look is judged by this: its silence would have laundered a verdict only if what it
+// missed could have blocked. A leg that can only ever warn here is reported, never a fault.
+export function canBeCritical(checkIds, promote = []) {
+  const promoted = new Set((promote || []).filter((id) => T1_CHECKS.has(id)));
+  return (checkIds || []).some((id) => T0_CHECKS.has(id) || promoted.has(id));
+}
+
 // Group graded findings by checkId for a compact report.
 export function groupByCheck(graded) {
   const m = new Map();
@@ -144,6 +152,8 @@ export const escapeProperty = (s) => escapeData(s).replace(/:/g, '%3A').replace(
 // <file>:<line>` and NEVER `msg` — for a secret, msg carries the redacted value, and an annotation
 // identifies a secret by rule id alone. The location is repeated in the message because the job log
 // shows an annotation as its message only; `file=`/`line=` reach the annotation, not the log line.
+// A secret found in git history also names its commit (shortSha): its line is that commit's line,
+// which under scan-scope: full is often not the tip's.
 export function annotation(f, level = 'error') {
   const file = String(f.file || '');
   const line = Number.isInteger(+f.line) && +f.line > 0 ? +f.line : 0;
@@ -152,9 +162,11 @@ export function annotation(f, level = 'error') {
   if (isPath) props.push(`file=${escapeProperty(file)}`);
   if (isPath && line) props.push(`line=${line}`);
   props.push(`title=${escapeProperty(`security-baseline ${f.checkId}`)}`);
-  const where = isPath ? ` at ${file}${line ? `:${line}` : ''}` : '';
+  const where = (isPath ? ` at ${file}${line ? `:${line}` : ''}` : '') + (shortSha(f.commit) ? ` in commit ${shortSha(f.commit)}` : '');
   return `::${level} ${props.join(',')}::${escapeData(safe(`${f.checkId} ${f.rule || ''}`.trim() + where, 300))}`;
 }
+// A full commit sha, shortened; '' for anything else (a non-git scan, or the all-zero sha).
+export const shortSha = (sha) => (/^[0-9a-f]{40}$/i.test(String(sha || '')) && !/^0+$/.test(String(sha)) ? String(sha).slice(0, 7).toLowerCase() : '');
 
 // The annotation lines for a graded run: CRITICALs only (T0, or a T1 this caller promoted — exactly what
 // BLOCKED counts). `level` is 'error' when the run blocks, 'warning' when it only reports (report-mode,
@@ -163,8 +175,14 @@ export function annotation(f, level = 'error') {
 export function annotations(graded, level = 'error', cap = 10) {
   const crits = graded.filter((f) => f.sev === SEV.CRIT);
   const out = crits.slice(0, cap).map((f) => annotation(f, level));
-  if (crits.length > cap) out.push(`security-baseline: ${crits.length - cap} more critical finding(s) not annotated (GitHub keeps ${cap} per step) — the report above lists them all.`);
+  if (crits.length > cap) out.push(`security-baseline: ${crits.length - cap} more critical finding(s) not annotated (GitHub keeps 10 per step) — the report above lists them all.`);
   return out;
+}
+
+// A scanner leg that could not look, as one annotation, so a headless reader learns why a run has no
+// verdict the way it learns why one blocked. No file=: the fault is the gate's, not a line's.
+export function faultAnnotation(name, reason, level = 'error') {
+  return `::${level} title=${escapeProperty('security-baseline could not look')}::${escapeData(safe(`${name} could not look — ${reason}`, 300))}`;
 }
 
 // RESERVED — declared in CHECKS so a FUTURE scanner can emit them with no engine change, but NO

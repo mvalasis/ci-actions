@@ -65,14 +65,14 @@ keeps those working with zero edits**; the new WARN tiers ride along automatical
 |---|---|---|
 | `scan-scope` | `diff` | `diff` (changed files vs base) or `full` (whole tree). Keep `diff` — `full` re-scans vendored WP core / deps and can newly-block. |
 | `base-ref` | _(auto)_ | PR base → push `event.before` (full pushed range) → `HEAD~1`. |
-| `fail-on-critical` | `true` | `true` = BLOCK on any CRITICAL (T0 or a promoted T1). |
+| `fail-on-critical` | `true` | `true` = BLOCK on any CRITICAL (T0 or a promoted T1), and FAULT when a scanner leg that could have found one could not look (§When a scanner cannot look). |
 | `critical-checks` | `''` | Comma/space list of **T1** ids to elevate to CRITICAL for **this** caller. T0 ids are already critical; T2/unknown ids are reported and ignored. |
 | `first-party-owners` | `''` | **Extra** owners exempt from `gha-unpinned-action`. Already exempt with no config: `actions`/`github`, the caller's own owner, and **this action's own owner**. Only needed for a *third* owner (a second org whose actions you also control). |
 | `report-mode` | `false` | Onboarding escape hatch: report even T0 without blocking (loud banner). Must stay `false` for an enforcing caller. Pair with `report-mode-reason`. |
 | `semgrep-config` | `p/security-audit` | Community SAST ruleset (registry id or a vendored local path for full air-gap). The custom rule packs are always vendored-local. |
 | `semgrep-severity` | `ERROR` | Community-rule severity that blocks. |
-| `verified-secrets` | `auto` | `auto`/`on` = trufflehog `--only-verified` (provider test-auth egress); `off` = air-gap mode (gitleaks pattern floor still blocks). |
-| `enable-sca` | `true` | osv-scanner dependency audit (WARN; package-coordinate egress to osv.dev). |
+| `verified-secrets` | `auto` | `auto`/`on` = trufflehog `--only-verified` (provider test-auth egress); `off` = air-gap mode (gitleaks pattern floor still blocks), and the way to run without trufflehog. |
+| `enable-sca` | `true` | osv-scanner dependency audit (WARN; package-coordinate egress to osv.dev). `false` runs without osv-scanner. |
 | `enable-secrets-history` | `true` | Full-history secret baseline (WARN). Set `false` on huge repos to save CI minutes. |
 | `*-version` | _(pinned)_ | `gitleaks` / `trufflehog` / `osv` / `hadolint` / `semgrep` release pins. |
 
@@ -102,8 +102,14 @@ Since **v1.16.0** the report is in three places, so "why did it block?" never ne
   `gh api repos/<owner>/<repo>/check-runs/<job-id>/annotations`. A run that does not enforce
   (`report-mode`, `fail-on-critical: false`) annotates at `::warning` instead. GitHub keeps 10 per
   step; past that, one log line counts the rest (the report lists every finding either way). A
-  WARN or INFO finding is never annotated.
+  WARN or INFO finding is never annotated. Since v1.19.0 a scanner leg that could not look, and
+  could have blocked, gets one too, listed first:
+  `::error title=security-baseline could not look::<leg> could not look — <why>`.
 - **Step summary** — unchanged: the same report, rendered.
+
+A secret finding names the commit it was found in: `generic-api-key **** in commit 2bc10a3`, and
+` in commit 2bc10a3` on its annotation. gitleaks reads commit patches, so its `file:line` is the line
+in that commit, which under `scan-scope: full` is often not the tip's.
 
 No secret value reaches any of them. The log carries the summary's own lines: gitleaks runs with
 `--redact` (a finding reads `generic-api-key ****`; if gitleaks ever returned the value anyway,
@@ -113,6 +119,56 @@ message. Every tool-controlled string is `safe()`-stripped and every report line
 code-controlled text, so a hostile path cannot reach line-start and forge a workflow command;
 annotation values are escaped (`%`, CR, LF, and `:`/`,` in properties) so it cannot rewrite one.
 Off Actions (a local run) the report prints once to stdout, with no annotations.
+
+## When a scanner cannot look — FAULT, not PASS
+
+Since **v1.19.0** a scanner that failed is not a scanner that found nothing. Until then every
+adapter read a failure as "no findings": semgrep's exit status and `errors[]` went unread, a
+gitleaks run that died before writing its report parsed as `[]`, and a failed trufflehog or
+osv-scanner run read as empty output. A registry outage for `p/security-audit`, a rule pack that
+did not load or a gitleaks config it rejected all ended in **`PASS — no critical findings`** about
+code nothing had scanned. Only "not installed" reached the report, as a note
+under the same PASS.
+
+`scripts/outcome.mjs` now answers three ways for every scanner run: it looked and found something,
+it looked and found nothing, or it **could not look**:
+
+| Scanner | Could not look |
+|---|---|
+| any | not installed; killed or timed out; output over the 64 MB cap; its collector crashed. A run of 10 s or more says how long it took: a registry stall leaves no other trace. |
+| semgrep | exit 2 or higher, or 1 with no results (without `--error`, which this gate never passes, 1 is not "findings"); no JSON report; an `errors[]` entry at `level: "error"`: a rule or config that did not load, or semgrep's engine failing on a file (an AST builder or fatal error, which semgrep itself exits 2 for). A per-file `warn` (a file it could not fully parse or finish) is listed under scanner notes and is not a fault. |
+| gitleaks | exit other than 0 (it runs with `--exit-code 0`); exit 0 with no report written; a report that is not a JSON array; no git history to read, checked before it runs, because outside a repository gitleaks exits 0 with `[]` |
+| trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short |
+| osv-scanner | exit other than 0, 1 or 128 (128 = no package manifest in the tree, so nothing to audit); exit 1 with no results |
+| hadolint | no JSON array; exit other than 0 or 1 (1 = a rule fired) |
+| git | the diff that lists the changed files failed: a `base-ref` or PR base that does not resolve, which gitleaks would read as an empty range and exit 0 on; `git ls-files` failed |
+
+Each failure belongs to a **leg** (one scanner pass: semgrep's community, rule-pack and GitHub-Actions
+runs are three legs), and a leg is judged by the checks it could have found:
+
+- **❌ it could have blocked**: a T0 leg (semgrep community SAST, gitleaks, trufflehog on the diff,
+  the changed-file list), or a T1 leg with a check this caller promoted. The five callers that
+  promote `wp-rest-error-detail` fault when the WP/PHP pack does not load. Under `fail-on-critical`
+  (the default) the run **FAULTs**: exit 1, the verdict `FAULT — … No verdict: a tool fault in
+  security-baseline, not a finding about this repository.`, and one `::error` annotation per leg.
+  Under `report-mode` or `fail-on-critical: false` it exits 0, the verdict says it would FAULT, and
+  the annotation is a `::warning`. A run that also has criticals is `BLOCKED` and names the legs.
+- **⚠️ its checks only warn here**: listed the same way, never a fault. `PASS` stands and says how
+  many legs could not look. A T2 leg (a history baseline) can never block, so it is always this kind.
+
+A fault is never counted as a finding: the tally keeps `critical: N` and adds `· could not look: N`,
+and "✅ no findings across …" prints only when every leg looked. To run without a scanner, say so:
+`verified-secrets: off` (trufflehog), `enable-sca: false` (osv-scanner), `enable-secrets-history:
+false`. A missing binary is a fault, not an opt-out. The reason quotes the tool's own error line
+after `scrub()`: URL userinfo is dropped and any 20+-character run of letters and digits is cut to
+first4…last4. trufflehog's stderr is never quoted, since a live credential must not reach the log
+even redacted.
+
+Measured on the pinned tools (semgrep 1.178.0, gitleaks 8.30.1, trufflehog 3.95.6, osv-scanner
+2.4.0) before release, not taken from their docs: the gitleaks and trufflehog exit-0 cases above,
+and semgrep's own shapes (a registry config that will not download exits 7 with the reason in
+`errors[]`; no network exits 2 with no JSON at all; its exit code follows only the last error it
+recorded, which is why `errors[]` is read in full).
 
 ## Sovereignty — honest egress enumeration
 
@@ -259,6 +315,11 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
 - **The live-probe class is a separate gate.** Turnstile/server-reject end-to-end checks need a
   live HTTP probe of the deployed site → the proposed `form-protection` action, NOT this
   air-gapped static scan. `turnstile-test-key` here only catches a literal test key in *source*.
+- **Could-not-look is only as honest as each tool's exit status.** A scanner that exits cleanly
+  after quietly skipping part of its work still reads as having looked: osv-scanner passing over a
+  lockfile it cannot parse, trufflehog unable to reach a provider for one candidate (it reports it
+  unverified, which `--only-verified` drops), and semgrep's per-file parse failures, which are
+  listed but not faulted.
 - **First-party exemption is by OWNER, not by ref.** `gha-unpinned-action` trusts *every* action
   under a first-party owner at *whatever* tag it is pinned to — not just `ci-actions`. That is the
   deliberate trade for the fleet's floating-`@v1` policy (the whole point of `@v1` is that it
@@ -290,10 +351,23 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   pass, the skipped corpora); and, end to end, an untouched workflow reported on a diff run, an
   untouched script only under full scope, a selftest fixture never, and a promoted finding
   annotating `header ← variable` with no value. 20 targeted mutants each turn it red.
+  Its **could-not-look** legs (v1.19.0) feed `outcome.mjs` canned scanner processes (every exit code,
+  signal and report shape in §When a scanner cannot look, both ways) and pin every rule pack's
+  `metadata.checkId` to its leg. End to end, on a stub set where every scanner is clean (asserted
+  first, so no FAULT can pass for the wrong reason), each case breaks one scanner: semgrep exiting 2
+  on a registry outage, gitleaks exiting 1 without a report, a rule pack that does not load
+  (unpromoted and promoted), trufflehog exiting 1, osv-scanner exiting 128, 1 and 127, semgrep not
+  installed, an unresolvable diff base, a collector that crashes and a scanner killed by a signal.
+  Each asserts the note, the verdict and the exit under `fail-on-critical`, `report-mode` and
+  `fail-on-critical: false` as it applies, and that a value in a tool's error text never reaches an
+  output whole (trufflehog's, not even redacted). 52 targeted mutants each turn it red.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
 
-Both run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a report-mode self-scan.
+Both run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a report-mode self-scan,
+after which the same job runs `scan.mjs` over this repo with the real scanners the action just
+installed, in both scopes, and fails if any leg could not look: the one place real scanner output,
+not a stub's, goes through `outcome.mjs` before a release.
 
 The self-scan (`scan-scope: full`) covers this repo's whole tree, the rule fixtures included,
 and should report **critical: 0**. The fixtures' T1/T2 findings are expected: they are the
@@ -320,9 +394,11 @@ and the `gha-unpinned-action` post-filter (see §First-party ownership); kept ou
 because it is an ownership question, not a severity one. `scripts/argv-secret.mjs` — the pure
 `argv-secret` matcher and file selection, shared with the repo lint; `scripts/js-scrub.mjs` — the
 JavaScript comment/literal scrubber it and the lint run (both moved out of the lint in v1.17.0, so a
-change to either is a release). `scripts/scan.mjs` — CLI: resolves the diff base, runs the
+change to either is a release). `scripts/outcome.mjs` — pure classification of each finished
+scanner process (looked, or could not look and why) and the map of legs to the checks each can emit
+(§When a scanner cannot look). `scripts/scan.mjs` — CLI: resolves the diff base, runs the
 scanners, normalizes their output into `{checkId, rule, file, line, msg}` findings, tiers + promotes
 via the engine, renders a per-check report to `GITHUB_STEP_SUMMARY` and the job log, annotates each
-CRITICAL (`annotations()` in `tiers.mjs`), exits non-zero only on a CRITICAL under
-`fail-on-critical`. Zero npm dependencies (pure Node 22). Tools are pinned binaries installed
+CRITICAL (`annotations()` in `tiers.mjs`), exits non-zero under `fail-on-critical` only on a
+CRITICAL or on a FAULT. Zero npm dependencies (pure Node 22). Tools are pinned binaries installed
 in `action.yml`.

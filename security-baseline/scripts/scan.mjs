@@ -1,8 +1,9 @@
 // security-baseline CLI — runs the air-gapped scanners, normalizes their output into findings,
 // tiers them via the pure engine (tiers.mjs), renders a per-check report to GITHUB_STEP_SUMMARY and
 // the same report to the job log, annotates each CRITICAL (`::error file=…,line=…::`), and exits
-// non-zero only when a CRITICAL (T0, or a per-caller-promoted T1) fires under fail-on-critical.
-// Mirrors seo-aeo's check.mjs shape.
+// non-zero under fail-on-critical only when a CRITICAL (T0, or a per-caller-promoted T1) fires, or
+// when a scanner leg that could have produced one could not look (outcome.mjs) — a FAULT, reported
+// as the gate's own, never as a finding and never as a PASS. Mirrors seo-aeo's check.mjs shape.
 //
 // EGRESS (honest enumeration — see README §Sovereignty): NO source ever leaves the runner.
 //   - semgrep: --metrics=off (telemetry off). The default `p/security-audit` registry config is
@@ -16,9 +17,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { SEV, evaluate, parsePromote, groupByCheck, sevRank, CHECKS, safe, redact, annotations } from './tiers.mjs';
+import { SEV, evaluate, parsePromote, groupByCheck, sevRank, CHECKS, safe, redact, annotations, canBeCritical, faultAnnotation, shortSha } from './tiers.mjs';
 import { firstPartyOwners, filterFirstPartyGha } from './firstparty.mjs';
 import { argvTargets, findArgvSecrets, argvFinding } from './argv-secret.mjs';
+import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, scrub, errorLine } from './outcome.mjs';
 
 const env = process.env;
 const ACTION_PATH = env.GITHUB_ACTION_PATH || path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -69,15 +71,25 @@ const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log
 const lines = [];
 const note = (s = '') => lines.push(s);
 const ICON = { critical: '❌', warn: '⚠️', info: 'ℹ️', ok: '✅' };
-const infra = [];   // tool-availability / degrade notes (not findings)
+const infra = [];   // informational scanner notes (not findings, not faults)
+// Scanner legs that could not look: { leg, reason }. Never a finding, and never read as "nothing
+// found" — one whose checks can be CRITICAL for this caller takes the verdict away (see main).
+const faults = [];
+const couldNotLook = (leg, reason) => { if (!faults.some((f) => f.leg === leg)) faults.push({ leg, reason }); };
 // safe() + redact() are imported from tiers.mjs (pure, selftest-covered disclosure guards).
 
+// `signal` and `error` say a process never finished (a timeout, the output cap): outcome.mjs reads
+// them before any output, which a killed scanner may have left half-written.
 function run(bin, args, opts = {}) {
+  const t0 = Date.now();
   try {
     const r = spawnSync(bin, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: opts.timeout || 300000, ...opts });
-    if (r.error && r.error.code === 'ENOENT') return { missing: true, status: 127, stdout: '', stderr: '' };
-    return { missing: false, status: r.status == null ? 1 : r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
-  } catch (e) { return { missing: false, status: 1, stdout: '', stderr: String(e && e.message || e) }; }
+    if (r.error && r.error.code === 'ENOENT') return { missing: true, status: 127, signal: '', error: '', ms: 0, stdout: '', stderr: '' };
+    return {
+      missing: false, status: r.status == null ? 1 : r.status, signal: r.signal || '', ms: Date.now() - t0,
+      error: r.error ? String(r.error.code || r.error.message || r.error) : '', stdout: r.stdout || '', stderr: r.stderr || '',
+    };
+  } catch (e) { return { missing: false, status: 1, signal: '', error: String(e && e.message || e), ms: Date.now() - t0, stdout: '', stderr: '' }; }
 }
 const have = (bin) => !run(bin, ['--version'], { timeout: 15000 }).missing;
 const sh = (args) => { const r = run('git', args, { timeout: 30000 }); return r.status === 0 ? r.stdout.trim() : ''; };
@@ -95,23 +107,31 @@ const BASE = resolveBase();
 const DIFF = SCAN_SCOPE === 'diff' && BASE;
 function changedFiles() {
   if (!DIFF) return null; // full tree
-  const out = sh(['diff', '--name-only', '--diff-filter=d', `${BASE}...HEAD`]);
-  return out ? out.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+  const r = run('git', ['diff', '--name-only', '--diff-filter=d', `${BASE}...HEAD`], { timeout: 30000 });
+  // A diff that failed is not a diff with nothing in it: every diff-scoped leg would grade an empty
+  // list and call it clean. (A base named by base-ref or the PR is not verified to exist.)
+  if (r.status !== 0 || r.error) {
+    couldNotLook(LEGS.diff, `git diff ${safe(BASE, 60)}...HEAD failed, exit ${r.status}${errorLine(r.stderr) ? `: ${scrub(errorLine(r.stderr))}` : ''}`);
+    return [];
+  }
+  return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
 }
 const CHANGED = changedFiles();
 const byExt = (files, exts) => (files || []).filter((f) => exts.some((e) => f.toLowerCase().endsWith(e)) && fs.existsSync(f));
 
 // ---------- semgrep ----------
-function semgrepRun(configs, targets, { severity } = {}) {
-  if (!targets || targets.length === 0) return { ran: false, results: [] };
+// One semgrep leg. A leg that could not look is recorded as a fault and still hands back every
+// finding it did report: a scanner that half-failed has not un-found anything.
+function semgrepRun(leg, configs, targets, { severity } = {}) {
+  if (!targets || targets.length === 0) return { results: [] };
   const args = ['scan', '--json', '--metrics=off', '--disable-version-check', '--quiet', '--no-git-ignore'];
   if (severity) args.push('--severity', severity);
   for (const c of configs) args.push('--config', c);
   args.push(...targets);
-  const r = run(BIN.semgrep, args, { timeout: 420000 });
-  if (r.missing) return { ran: false, missing: true, results: [] };
-  let json; try { json = JSON.parse(r.stdout || '{}'); } catch { return { ran: true, results: [], parseError: true }; }
-  return { ran: true, results: json.results || [] };
+  const o = semgrepOutcome(run(BIN.semgrep, args, { timeout: 420000 }));
+  if (!o.looked) couldNotLook(leg, `semgrep ${o.reason}`);
+  if (o.skipped.length) infra.push(`${leg.name}: semgrep could not fully parse or finish ${o.skipped.length} file${o.skipped.length === 1 ? '' : 's'}, the rest were scanned — ${o.skipped.slice(0, 3).map((p) => safe(p, 80)).join(', ')}${o.skipped.length > 3 ? ', …' : ''}`);
+  return { results: o.results };
 }
 // `rule` names the rule in annotations. A registry id is a dotted namespace worth keeping whole; a
 // vendored rule's id arrives prefixed with its config's filesystem path (`home.runner.work.….rules.
@@ -125,61 +145,81 @@ const sgFinding = (r, checkId) => ({
 
 function collectSemgrep() {
   const out = [];
-  // T0 — community ERROR on the diff (or full tree). This IS today's block, preserved.
-  if (!have(BIN.semgrep)) { infra.push('semgrep not installed — SAST skipped (install in the action step)'); return out; }
   const sastTargets = DIFF ? byExt(CHANGED, ['.php', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.py', '.go', '.rb', '.java']) : ['.'];
-  if (sastTargets.length) {
-    const community = semgrepRun([SEMGREP_CONFIG], sastTargets, { severity: (env.SAST_SEVERITY || 'ERROR').trim() });
-    if (community.ran) for (const r of community.results) out.push(sgFinding(r, 'sast-critical'));
-  }
-  // T1/T2 — vendored custom rules (php/ts), diff-scoped; emit by metadata.checkId.
   const codeTargets = DIFF ? byExt(CHANGED, ['.php', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.astro']) : ['.'];
-  if (codeTargets.length) { // diff: only when code files changed; full: ['.']
-    const custom = semgrepRun([path.join(RULES_DIR, 'wp-php.yaml'), path.join(RULES_DIR, 'astro-ts.yaml')], codeTargets);
-    if (custom.ran) for (const r of custom.results) {
-      const id = r.extra && r.extra.metadata && r.extra.metadata.checkId;
-      if (id) out.push(sgFinding(r, id));
+  const ghaTargets = fs.existsSync('.github/workflows') ? ['.github/workflows'] : [];
+  if (!have(BIN.semgrep)) {
+    // Every leg that had something to grade could not look; one with nothing to grade missed nothing.
+    for (const [leg, targets] of [[LEGS.community, sastTargets], [LEGS.custom, codeTargets], [LEGS.gha, ghaTargets]]) {
+      if (targets.length) couldNotLook(leg, 'semgrep not installed');
     }
+    return out;
+  }
+  // T0 — community ERROR on the diff (or full tree). This IS today's block, preserved.
+  const community = semgrepRun(LEGS.community, [SEMGREP_CONFIG], sastTargets, { severity: (env.SAST_SEVERITY || 'ERROR').trim() });
+  for (const r of community.results) out.push(sgFinding(r, 'sast-critical'));
+  // T1/T2 — vendored custom rules (php/ts), diff-scoped (diff: only when code files changed; full:
+  // ['.']); emit by metadata.checkId.
+  const custom = semgrepRun(LEGS.custom, [path.join(RULES_DIR, 'wp-php.yaml'), path.join(RULES_DIR, 'astro-ts.yaml')], codeTargets);
+  for (const r of custom.results) {
+    const id = r.extra && r.extra.metadata && r.extra.metadata.checkId;
+    if (id) out.push(sgFinding(r, id));
   }
   // GitHub Actions supply-chain — always over .github/workflows (small, high value).
   // The rule pack is static YAML and cannot know whose actions these are, so it flags the caller's
   // OWN shared actions too (55 `<owner>/ci-actions/<action>@v1` refs across the 10 callers). Those
   // are first-party and deliberately floating-tag-pinned by the fleet's versioning policy; drop
   // them here, where the owner set is knowable. Anything unrecoverable stays — see firstparty.mjs.
-  if (fs.existsSync('.github/workflows')) {
-    const gha = semgrepRun([path.join(RULES_DIR, 'gha.yaml')], ['.github/workflows']);
-    if (gha.ran) for (const r of filterFirstPartyGha(gha.results, FIRST_PARTY)) {
-      const id = r.extra && r.extra.metadata && r.extra.metadata.checkId;
-      if (id) out.push(sgFinding(r, id));
-    }
+  const gha = semgrepRun(LEGS.gha, [path.join(RULES_DIR, 'gha.yaml')], ghaTargets);
+  for (const r of filterFirstPartyGha(gha.results, FIRST_PARTY)) {
+    const id = r.extra && r.extra.metadata && r.extra.metadata.checkId;
+    if (id) out.push(sgFinding(r, id));
   }
   return out;
 }
 
 // ---------- gitleaks (pattern secrets) ----------
-function gitleaksRun(extraArgs) {
-  const tmp = path.join(os.tmpdir(), `gl-${Math.abs(hashish(extraArgs.join('|')))}.json`);
-  const args = ['detect', '--redact', '--no-banner', '--report-format', 'json', '--report-path', tmp, '--exit-code', '0', ...extraArgs];
-  const r = run(BIN.gitleaks, args, { timeout: 300000 });
-  if (r.missing) return { missing: true, findings: [] };
-  let arr = []; try { arr = JSON.parse(fs.readFileSync(tmp, 'utf8') || '[]'); } catch { arr = []; }
-  try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-  return { missing: false, findings: arr };
+// The report goes to a directory made for this one run. The old fixed name under the shared tmp
+// (`gl-<hash of the args>.json`, the same on every run with the same base) could hand back a
+// previous run's report, or one planted there, whenever this run wrote none.
+function gitleaksRun(leg, extraArgs) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-gitleaks-'));
+  try {
+    const report = path.join(dir, 'report.json');
+    const args = ['detect', '--redact', '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', '0', ...extraArgs];
+    const r = run(BIN.gitleaks, args, { timeout: 300000 });
+    let text = null;
+    try { text = fs.readFileSync(report, 'utf8'); } catch { /* never written: gitleaksOutcome says why */ }
+    const o = gitleaksOutcome(r, text);
+    if (!o.looked) couldNotLook(leg, `gitleaks ${o.reason}`);
+    return o.results;
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
 }
+// Where a finding was introduced. gitleaks reads commit patches, so its file:line is the line in
+// THAT commit — under scan-scope: full, often not the tip's (the literal may have moved since).
+const inCommit = (f) => (shortSha(f.Commit) ? ` in commit ${shortSha(f.Commit)}` : '');
 function collectGitleaks() {
   const out = [];
-  if (!have(BIN.gitleaks)) { infra.push('gitleaks not installed — secret scan skipped'); return out; }
+  const legs = [LEGS.gitleaks, ...(ENABLE_HISTORY ? [LEGS.gitleaksHistory] : [])];
+  if (!have(BIN.gitleaks)) { for (const leg of legs) couldNotLook(leg, 'gitleaks not installed'); return out; }
+  // gitleaks reads git history, and outside a repository it exits 0 with `[]` — clean, having read
+  // nothing. (A diff range git cannot resolve does the same; the changed-file list faults on it first.)
+  if (sh(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']) === '') {
+    for (const leg of legs) couldNotLook(leg, 'no git history here — not a git repository, or no commit — so gitleaks would read nothing');
+    return out;
+  }
   // T0 — diff range (today's block).
   const diffArgs = DIFF && BASE ? ['--log-opts', `${BASE}..HEAD`] : [];
-  const diff = gitleaksRun(diffArgs);
-  for (const f of diff.findings) out.push({ checkId: 'secret-pattern', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, msg: `${f.RuleID || 'secret'} (${redact(f.Secret)})`, cwe: 'CWE-798' });
+  const diff = gitleaksRun(LEGS.gitleaks, diffArgs);
+  for (const f of diff) out.push({ checkId: 'secret-pattern', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, commit: f.Commit, msg: `${f.RuleID || 'secret'} (${redact(f.Secret)})${inCommit(f)}`, cwe: 'CWE-798' });
   // T2 — full-history baseline (WARN; never blocks). Dedup against the diff hits by file+rule.
   if (ENABLE_HISTORY) {
-    const seen = new Set(diff.findings.map((f) => `${f.File}:${f.RuleID}`));
-    const hist = gitleaksRun([]);
-    for (const f of hist.findings) {
+    const seen = new Set(diff.map((f) => `${f.File}:${f.RuleID}`));
+    for (const f of gitleaksRun(LEGS.gitleaksHistory, [])) {
       const k = `${f.File}:${f.RuleID}`; if (seen.has(k)) continue; seen.add(k);
-      out.push({ checkId: 'secrets-history', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, msg: `${f.RuleID || 'secret'} in history (${redact(f.Secret)}) — rotate at the provider, then scrub history`, cwe: 'CWE-798' });
+      out.push({ checkId: 'secrets-history', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, commit: f.Commit, msg: `${f.RuleID || 'secret'} in history (${redact(f.Secret)})${inCommit(f)} — rotate at the provider, then scrub history`, cwe: 'CWE-798' });
     }
   }
   return out;
@@ -189,27 +229,28 @@ function collectGitleaks() {
 function collectTrufflehog() {
   const out = [];
   if (VERIFIED_SECRETS === 'off') { infra.push('verified-secrets:off — live-credential probe disabled (gitleaks pattern floor still blocks)'); return out; }
-  if (!have(BIN.trufflehog)) { infra.push('trufflehog not installed — verified-live secret check skipped (gitleaks pattern floor still blocks)'); return out; }
+  const scoped = DIFF && !!BASE;
+  const leg = scoped ? LEGS.trufflehog : LEGS.trufflehogHistory;
+  if (!have(BIN.trufflehog)) { couldNotLook(leg, 'trufflehog not installed — verified-secrets: off runs without it, on the gitleaks pattern floor'); return out; }
   // CRITICAL `secret-verified` is the DIFF-scoped check: --since-commit bounds it to the NEW
   // commits, so it can only fire on a just-added live key (never pre-existing state). When there
   // is no diff range (scan-scope:full, or an unresolved base), the verified probe widens to full
   // history — a pre-existing live key must NOT block, so those are emitted as WARN `secrets-history`
   // (loud, but a history finding can't be a merge precondition). The raw value of a LIVE secret is
   // NEVER printed (not even redacted) — detector + file:line is enough.
-  const scoped = DIFF && !!BASE;
-  const args = ['git', 'file://.', '--only-verified', '--no-update', '--json'];
+  // --fail-on-scan-errors: without it, a scan that failed inside (a --since-commit it cannot
+  // resolve) exits 0, having scanned nothing.
+  const args = ['git', 'file://.', '--only-verified', '--no-update', '--json', '--fail-on-scan-errors'];
   if (scoped) args.push('--since-commit', BASE);
-  const r = run(BIN.trufflehog, args, { timeout: 300000 });
-  if (r.missing) return out;
-  for (const ln of (r.stdout || '').split('\n')) {
-    const t = ln.trim(); if (!t || t[0] !== '{') continue;
-    let o; try { o = JSON.parse(t); } catch { continue; }
-    if (o.Verified !== true) continue;
-    const g = (o.SourceMetadata && o.SourceMetadata.Data && o.SourceMetadata.Data.Git) || {};
+  const o = trufflehogOutcome(run(BIN.trufflehog, args, { timeout: 300000 }));
+  if (!o.looked) couldNotLook(leg, `trufflehog ${o.reason}`);
+  for (const obj of o.results) {
+    if (obj.Verified !== true) continue;
+    const g = (obj.SourceMetadata && obj.SourceMetadata.Data && obj.SourceMetadata.Data.Git) || {};
     out.push({
-      checkId: scoped ? 'secret-verified' : 'secrets-history', tool: 'trufflehog', rule: o.DetectorName || 'secret',
-      file: g.file || '(history)', line: g.line || 0, cwe: 'CWE-798',
-      msg: `🔴 VERIFIED-LIVE ${o.DetectorName || 'secret'} — ROTATE NOW${scoped ? '' : ' (pre-existing in history — WARN, not a block; rotate then scrub history)'}`,
+      checkId: scoped ? 'secret-verified' : 'secrets-history', tool: 'trufflehog', rule: obj.DetectorName || 'secret',
+      file: g.file || '(history)', line: g.line || 0, commit: g.commit, cwe: 'CWE-798',
+      msg: `🔴 VERIFIED-LIVE ${obj.DetectorName || 'secret'}${shortSha(g.commit) ? ` in commit ${shortSha(g.commit)}` : ''} — ROTATE NOW${scoped ? '' : ' (pre-existing in history — WARN, not a block; rotate then scrub history)'}`,
     });
   }
   return out;
@@ -228,11 +269,10 @@ function scaCheckId(score) {
 function collectOsv() {
   const out = [];
   if (!ENABLE_SCA) return out;
-  if (!have(BIN.osv)) { infra.push('osv-scanner not installed — dependency/SCA audit skipped'); return out; }
-  const r = run(BIN.osv, ['scan', 'source', '--recursive', '--format', 'json', '.'], { timeout: 300000 });
-  if (r.missing) return out;
-  let json; try { json = JSON.parse(r.stdout || '{}'); } catch { return out; }
-  for (const res of (json.results || [])) {
+  if (!have(BIN.osv)) { couldNotLook(LEGS.osv, 'osv-scanner not installed — enable-sca: false runs without it'); return out; }
+  const o = osvOutcome(run(BIN.osv, ['scan', 'source', '--recursive', '--format', 'json', '.'], { timeout: 300000 }));
+  if (!o.looked) couldNotLook(LEGS.osv, `osv-scanner ${o.reason}`);
+  for (const res of o.results) {
     const src = (res.source && res.source.path) || '';
     for (const pkg of (res.packages || [])) {
       const name = (pkg.package && pkg.package.name) || '?';
@@ -251,13 +291,18 @@ function collectOsv() {
 function collectHadolint() {
   const out = [];
   const dfChanged = DIFF ? (CHANGED || []).filter((f) => /(^|\/)Dockerfile(\.|$)|\.dockerfile$/i.test(f) && fs.existsSync(f)) : [];
-  const targets = DIFF ? dfChanged : (sh(['ls-files']).split('\n').filter((f) => /(^|\/)Dockerfile(\.|$)/i.test(f) && fs.existsSync(f)).slice(0, 20));
+  let targets = dfChanged;
+  if (!DIFF) {
+    const ls = run('git', ['ls-files'], { timeout: 30000 });
+    if (ls.status !== 0 || ls.error) { couldNotLook(LEGS.hadolint, `git ls-files failed, exit ${ls.status} — no Dockerfile was listed`); return out; }
+    targets = ls.stdout.split('\n').filter((f) => /(^|\/)Dockerfile(\.|$)/i.test(f) && fs.existsSync(f)).slice(0, 20);
+  }
   if (targets.length === 0) return out;
-  if (!have(BIN.hadolint)) { infra.push('Dockerfile changed but hadolint not installed — IaC lint skipped'); return out; }
+  if (!have(BIN.hadolint)) { couldNotLook(LEGS.hadolint, 'hadolint not installed, with a Dockerfile in scope'); return out; }
   for (const df of targets) {
-    const r = run(BIN.hadolint, ['--format', 'json', df], { timeout: 60000 });
-    let arr = []; try { arr = JSON.parse(r.stdout || '[]'); } catch { arr = []; }
-    for (const h of arr) if (h.level === 'error' || h.level === 'warning') out.push({ checkId: 'dockerfile-lint', tool: 'hadolint', rule: h.code || '', file: df, line: h.line || 0, msg: `${h.code}: ${h.message}`, cwe: 'CWE-1395' });
+    const o = hadolintOutcome(run(BIN.hadolint, ['--format', 'json', df], { timeout: 60000 }));
+    if (!o.looked) couldNotLook(LEGS.hadolint, `hadolint ${o.reason} on ${safe(df, 80)}`);
+    for (const h of o.results) if (h.level === 'error' || h.level === 'warning') out.push({ checkId: 'dockerfile-lint', tool: 'hadolint', rule: h.code || '', file: df, line: h.line || 0, msg: `${h.code}: ${h.message}`, cwe: 'CWE-1395' });
   }
   return out;
 }
@@ -271,7 +316,7 @@ function collectHadolint() {
 function collectArgvSecret() {
   const out = [];
   const ls = run('git', ['ls-files', '-z'], { timeout: 30000 });
-  if (ls.status !== 0) { infra.push('argv-secret: git ls-files failed — no file was graded for secrets in argv'); return out; }
+  if (ls.status !== 0 || ls.error) { couldNotLook(LEGS.argvSecret, `git ls-files failed, exit ${ls.status} — no file was graded for secrets in argv`); return out; }
   const tracked = ls.stdout.split('\0').filter(Boolean);
   const headOf = (f) => {
     try {
@@ -298,7 +343,6 @@ function collectArgvSecret() {
   return out;
 }
 
-function hashish(s) { let h = 0; for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; } return h; }
 // Report lines already echoed to the job log, so the crash path's re-flush echoes only the new ones.
 // The log goes first: when the summary write is what throws, the report is already readable.
 let echoed = 0;
@@ -320,17 +364,33 @@ function flush() {
   if (FIRST_PARTY.size) note(`- first-party owners (exempt from \`gha-unpinned-action\`): \`${[...FIRST_PARTY].map((o) => safe(o, 40)).join('`, `')}\``);
   note('');
 
+  // Each collector with the legs it runs. A collector that throws looked at nothing it had not
+  // already returned, so its legs could not look: a crash is never a quiet scanner note.
+  const collectors = [
+    [collectSemgrep, [LEGS.community, LEGS.custom, LEGS.gha]],
+    [collectGitleaks, [LEGS.gitleaks, ...(ENABLE_HISTORY ? [LEGS.gitleaksHistory] : [])]],
+    [collectTrufflehog, VERIFIED_SECRETS === 'off' ? [] : [DIFF && BASE ? LEGS.trufflehog : LEGS.trufflehogHistory]],
+    [collectOsv, ENABLE_SCA ? [LEGS.osv] : []],
+    [collectHadolint, [LEGS.hadolint]],
+    [collectArgvSecret, [LEGS.argvSecret]],
+  ];
   let findings = [];
-  for (const collect of [collectSemgrep, collectGitleaks, collectTrufflehog, collectOsv, collectHadolint, collectArgvSecret]) {
-    try { findings = findings.concat(collect()); } catch (e) { infra.push(`${collect.name}: ${safe(String(e && e.message || e), 120)}`); }
+  for (const [collect, legs] of collectors) {
+    try { findings = findings.concat(collect()); } catch (e) {
+      for (const leg of legs) couldNotLook(leg, `${collect.name} crashed: ${scrub(String(e && e.message || e), 120)}`);
+    }
   }
 
   const { graded, crit, warn, info, blocked } = evaluate(findings, { failOnCritical: FAIL_ON_CRITICAL, reportMode: REPORT_MODE, promote });
+  // The legs that could not look AND could have found a CRITICAL here: they take the verdict away.
+  const blind = faults.filter((f) => canBeCritical(f.leg.checks, promote));
+  const faulted = blind.length > 0 && FAIL_ON_CRITICAL && !REPORT_MODE;
 
   // ---- report, grouped by check, criticals first ----
   const groups = [...groupByCheck(graded)].sort((a, b) => sevRank(baseOf(a[1])) - sevRank(baseOf(b[1])));
   if (graded.length === 0) {
-    note('- ✅ no findings across SAST, secrets, SCA, and CI supply-chain.');
+    note(faults.length ? '- no findings from the scanners that looked — the legs that could not are listed below.' : '- ✅ no findings across SAST, secrets, SCA, and CI supply-chain.');
+    note('');
   } else {
     for (const [checkId, fs_] of groups) {
       const sev = fs_[0].sev;
@@ -341,20 +401,45 @@ function flush() {
       note('');
     }
   }
+  // ❌ a leg that could have produced a CRITICAL for this caller; ⚠️ one whose checks only warn here.
+  if (faults.length) {
+    note(`### ${blind.length ? ICON.critical : ICON.warn} could not look · ${faults.length} scanner leg(s) — a tool fault, not a finding`);
+    for (const f of faults) {
+      const can = blind.includes(f);
+      note(`- ${can ? ICON.critical : ICON.warn} ${safe(f.leg.name, 80)} — ${safe(f.reason, 240)}${can ? '' : ' (its checks only warn for this caller: reported, not a fault)'}`);
+    }
+    note('');
+  }
   if (infra.length) { note('### ℹ️ scanner notes'); infra.forEach((m) => note(`- ${safe(m, 240)}`)); note(''); }
 
-  note(`**critical: ${crit} · warnings: ${warn} · info: ${info}**`);
-  // Every verdict leaves through here: the report, then one annotation per CRITICAL — `::error` when
-  // this run blocks, `::warning` when it only reports (report-mode, fail-on-critical: false).
+  note(`**critical: ${crit} · warnings: ${warn} · info: ${info}${faults.length ? ` · could not look: ${faults.length}` : ''}**`);
+  // Every verdict leaves through here: the report, then one annotation per leg that could not look
+  // and could have blocked, then one per CRITICAL — `::error` when this run exits non-zero,
+  // `::warning` when it only reports (report-mode, fail-on-critical: false).
+  const level = blocked || faulted ? 'error' : 'warning';
   const finish = (code) => {
     flush();
-    if (ANNOTATE) for (const a of annotations(graded, blocked ? 'error' : 'warning')) say(a);
+    if (ANNOTATE) {
+      const lost = blind.map((f) => faultAnnotation(f.leg.name, f.reason, level));
+      for (const a of [...lost, ...annotations(graded, level, Math.max(0, 10 - lost.length))]) say(a);
+    }
     process.exit(code);
   };
-  if (REPORT_MODE && crit > 0) { note(`⚠️ REPORT-MODE — ${crit} critical finding(s) would BLOCK if enforcing. ${safe(env.REPORT_MODE_REASON || '')}`); finish(0); }
-  if (blocked) { note(`BLOCKED — ${crit} critical finding(s). Fix the ❌ items, or waive with documented rationale.`); finish(1); }
+  const blindly = `${blind.length} scanner leg(s) that could have blocked could not look (${blind.map((f) => f.leg.name).join(', ')})`;
+  if (REPORT_MODE && (crit > 0 || blind.length)) {
+    if (crit > 0) note(`⚠️ REPORT-MODE — ${crit} critical finding(s) would BLOCK if enforcing. ${safe(env.REPORT_MODE_REASON || '')}`);
+    if (blind.length) note(`⚠️ REPORT-MODE — ${blindly}; enforcing, this run would FAULT.`);
+    finish(0);
+  }
+  if (blocked) {
+    note(`BLOCKED — ${crit} critical finding(s). Fix the ❌ items, or waive with documented rationale.`);
+    if (blind.length) note(`…and ${blindly}, so the list above may be incomplete.`);
+    finish(1);
+  }
+  if (faulted) { note(`FAULT — ${blindly}. No verdict: a tool fault in security-baseline, not a finding about this repository.`); finish(1); }
   if (crit > 0) note(`report-only — ${crit} critical finding(s) would BLOCK under \`fail-on-critical: true\`.`);
-  else note('PASS — no critical findings.');
+  if (blind.length) note(`report-only — ${blindly}; under \`fail-on-critical: true\` this run would FAULT.`);
+  if (!crit && !blind.length) note(`PASS — no critical findings.${faults.length ? ` ${faults.length} scanner leg(s) that only warn here could not look (above).` : ''}`);
   finish(0);
 })().catch((e) => {
   note(`- ❌ security-baseline crashed: ${safe(String(e && e.stack || e), 400)}`);

@@ -18,7 +18,7 @@ inputs:
     required: false
     default: ''
   fail-on-critical:
-    description: 'true = BLOCK when a CRITICAL (T0, or a promoted T1) fires; false = report-only. Default true — this is the fleet''s always-on gate.'
+    description: 'true = BLOCK when a CRITICAL (T0, or a promoted T1) fires, and FAULT (exit 1, a tool fault, not a finding) when a scanner leg that could have found one could not look; false = report-only. Default true — this is the fleet''s always-on gate.'
     required: false
     default: 'true'
   critical-checks:
@@ -63,7 +63,8 @@ inputs:
       auto | on | off — trufflehog --only-verified live-credential probe. NOTE: auto == on (egress
       ON by default): when a candidate secret is in scope it sends a test-auth to that credential's
       OWN provider. Set off for a fully air-gapped runner (no probe; the gitleaks pattern floor
-      still blocks).
+      still blocks). off is also the only way to run without trufflehog: on the diff it is a
+      blocking leg, so a trufflehog that cannot run FAULTs the scan.
     required: false
     default: 'auto'
   enable-secrets-history:
@@ -76,7 +77,7 @@ inputs:
     default: 'true'
   # ---- SCA ----
   enable-sca:
-    description: 'Dependency/SCA audit via osv-scanner (WARN; egress: package coordinates → osv.dev). Set false to disable.'
+    description: 'Dependency/SCA audit via osv-scanner (WARN; egress: package coordinates → osv.dev). Set false to disable. A run that cannot complete is reported, and FAULTs the scan only if an sca-* check is promoted via critical-checks.'
     required: false
     default: 'true'
   # ---- pinned tool versions (air-gap / reproducibility) ----

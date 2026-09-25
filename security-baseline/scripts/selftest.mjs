@@ -1,8 +1,10 @@
 // Offline self-test for the security-baseline tier engine. No network, no real scanners — feeds
 // canned findings to the pure engine and asserts the tiering / promotion / block decision and
-// the redaction disclosure guard; then runs the real scan.mjs against stub scanners to assert
-// what reaches the job log. Run: node scripts/selftest.mjs (also runs in CI). Exits
-// non-zero on any regression — the gate's own regression guard, mirroring seo-aeo/selftest.mjs.
+// the redaction disclosure guard, and canned scanner PROCESSES to outcome.mjs to assert that one
+// which could not look never reads as one that found nothing; then runs the real scan.mjs against
+// stub scanners to assert what reaches the job log and the exit code. Run: node scripts/selftest.mjs
+// (also runs in CI). Exits non-zero on any regression — the gate's own regression guard, mirroring
+// seo-aeo/selftest.mjs.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -12,7 +14,9 @@ import { fileURLToPath } from 'node:url';
 import {
   SEV, CHECKS, T0_CHECKS, T1_CHECKS, T2_CHECKS, RESERVED_CHECKS, evaluate, parsePromote,
   isPromotable, baseSev, safe, redact, escapeData, escapeProperty, annotation, annotations,
+  canBeCritical, faultAnnotation, shortSha,
 } from './tiers.mjs';
+import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, scrub, errorLine } from './outcome.mjs';
 import { firstPartyOwners, ownerOf, parseOwners, refFromText, readLineFromDisk, filterFirstPartyGha } from './firstparty.mjs';
 import { findArgvSecrets, argvLang, argvTargets, argvFinding } from './argv-secret.mjs';
 
@@ -322,6 +326,139 @@ console.log('\n# workflow-command encoding + annotations (pure)');
   check('annotations: a WARN finding is never annotated', !out.some((l) => l.includes('sca-high')) && annotations([warnOnly]).length === 0);
 }
 
+console.log('\n# outcome.mjs — a scanner that could not look never reads as one that found nothing');
+{
+  // Canned PROCESSES, shaped like scan.mjs's run() result. Values that could look like a credential
+  // are minted per run, never spelled here: this file is itself scanned by the gate.
+  const R = (o) => ({ missing: false, status: 0, signal: '', error: '', stdout: '', stderr: '', ...o });
+  const minted = (tag) => `${tag}${crypto.randomBytes(15).toString('hex')}`;
+  const hit = { check_id: 'php.lang.x', path: 'a.php', start: { line: 1 } };
+  const sg = (status, body, extra = {}) => semgrepOutcome(R({ status, stdout: typeof body === 'string' ? body : JSON.stringify(body), ...extra }));
+
+  check('semgrep exit 0 with results: looked, every result kept', sg(0, { results: [hit], errors: [] }).looked === true && sg(0, { results: [hit], errors: [] }).results.length === 1);
+  check('semgrep exit 0 with nothing found: looked (found nothing is not could-not-look)', sg(0, { results: [], errors: [] }).looked === true);
+  // The shapes below are semgrep 1.178.0's own, measured: a registry config that will not download
+  // exits 7 with two error entries; no network at all exits 2 with no JSON and a traceback.
+  const registry = { results: [], errors: [
+    { code: 2, level: 'error', type: 'SemgrepError', message: 'Failed to download configuration from https://semgrep.dev/c/p/security-audit HTTP 503.' },
+    { code: 7, level: 'error', type: 'SemgrepError', message: 'invalid configuration file found (1 configs were invalid)' },
+  ] };
+  const down = sg(7, registry);
+  check('semgrep exit 7 (a registry config that did not download): could not look; the reason names the exit and the FIRST error',
+    down.looked === false && down.reason === 'exit 7: SemgrepError — Failed to download configuration from https[:]//semgrep.dev/c/p/security-audit HTTP 503.', down.reason);
+  const offline = sg(2, '', { stderr: [
+    '/venv/lib/python3.12/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+',
+    '  warnings.warn(',
+    'Traceback (most recent call last):',
+    '  File "/venv/lib/python3.12/site-packages/requests/adapters.py", line 723, in send',
+    "requests.exceptions.ConnectionError: HTTPSConnectionPool(host='semgrep.dev', port=443): Max retries exceeded with url: /c/p/security-audit",
+    '',
+  ].join('\n') });
+  check('semgrep with no network (exit 2, no JSON): could not look; the reason is the exception, not a warning',
+    offline.looked === false && offline.reason.startsWith('exit 2: requests.exceptions.ConnectionError: HTTPSConnectionPool'), offline.reason);
+  check('semgrep exit 7 on a rule schema it rejects (no message on the entry): could not look',
+    sg(7, { results: [], errors: [{ code: 4, level: 'error', type: 'InvalidRuleSchemaError', message: null }, registry.errors[1]] }).reason === 'exit 7: InvalidRuleSchemaError');
+  const ruleErr = sg(0, { results: [hit], errors: [{ code: 4, level: 'error', type: 'Rule parse error', message: 'Invalid pattern', rule_id: 'r' }] });
+  check('semgrep exit 0 with a level "error" entry (a rule that did not load): could not look, results kept',
+    ruleErr.looked === false && ruleErr.reason === 'exit 0 with 1 error — Rule parse error — Invalid pattern' && ruleErr.results.length === 1, ruleErr.reason);
+  const partial = sg(0, { results: [hit], errors: [{ code: 3, level: 'warn', type: ['PartialParsing', [{ path: 'b.php' }]], path: 'b.php', message: 'Syntax error' }] });
+  check('semgrep exit 0 with a per-file "warn" (a file it could not fully parse): looked, that file listed',
+    partial.looked === true && partial.skipped.join() === 'b.php' && partial.results.length === 1, JSON.stringify(partial));
+  check('semgrep: a traceback on stdout is could-not-look, not []', sg(1, 'Traceback (most recent call last):').looked === false);
+  check('semgrep: exit 0 with no stdout is could-not-look (no report is not an empty report)', sg(0, '').looked === false);
+  check('semgrep: JSON without a results array is could-not-look', sg(0, { errors: [] }).looked === false);
+  check('semgrep exit 1 WITH results and no error entry: looked (the --error findings exit)', sg(1, { results: [hit], errors: [] }).looked === true);
+  check('semgrep exit 1 with NO results: could not look (a findings exit without findings)', sg(1, { results: [], errors: [] }).looked === false);
+  const died = sg(2, { results: [hit], errors: [{ level: 'error', type: 'Fatal error', message: 'x' }] });
+  check('semgrep exit 2 keeps the findings it did report (a half-failed scan un-finds nothing)', died.looked === false && died.results.length === 1);
+  check('a scanner that is not installed: could not look', semgrepOutcome(R({ missing: true, status: 127 })).reason === 'not installed');
+  check('a timeout: could not look, even behind a complete-looking report', semgrepOutcome(R({ status: 1, error: 'ETIMEDOUT', signal: 'SIGTERM', stdout: '{"results":[]}' })).reason === 'timed out');
+  check('the 64 MB output cap: could not look', semgrepOutcome(R({ status: 1, error: 'ENOBUFS', signal: 'SIGTERM', stdout: '{"results":[' })).reason === 'output over the 64 MB buffer');
+  check('killed by a signal: could not look', semgrepOutcome(R({ status: 1, signal: 'SIGKILL', stdout: '{"results":[]}' })).reason === 'killed by SIGKILL');
+  check('a run of 10 s or more says how long it took (a registry stall leaves no other trace)',
+    semgrepOutcome(R({ status: 2, ms: 98400 })).reason === 'exit 2 after 98 s: no JSON report' && semgrepOutcome(R({ status: 2, ms: 9000 })).reason === 'exit 2: no JSON report'
+    && semgrepOutcome(R({ status: 1, error: 'ETIMEDOUT', signal: 'SIGTERM', ms: 420003 })).reason === 'timed out after 420 s');
+
+  const gl = (status, report, stderr = '') => gitleaksOutcome(R({ status, stderr }), report);
+  check('gitleaks exit 0, report []: looked, nothing found', gl(0, '[]\n').looked === true && gl(0, '[]\n').results.length === 0);
+  check('gitleaks exit 0, report null: looked, nothing found', gl(0, 'null\n').looked === true && gl(0, 'null\n').results.length === 0);
+  check('gitleaks exit 0 with a finding: looked', gl(0, '[{"RuleID":"x"}]').results.length === 1);
+  const glDied = gl(1, null, "noise\n10:00AM FTL failed to scan Git repository error=\"fatal: bad revision 'a..HEAD'\"");
+  check('gitleaks exit 1 with no report: could not look; the reason names the exit and its error', glDied.looked === false && /^exit 1: 10:00AM FTL failed to scan Git repository.*bad revision/.test(glDied.reason), glDied.reason);
+  check('gitleaks exit 1 WITH a report on disk: could not look (the run failed, whatever the file says)', gl(1, '[]').looked === false);
+  check('gitleaks exit 0 that wrote no report: could not look', gl(0, null).looked === false && gl(0, null).reason === 'exit 0 but wrote no report');
+  check('gitleaks report that is empty or not an array: could not look', gl(0, '').looked === false && gl(0, '{"a":1}').looked === false);
+
+  const th = (status, stdout, stderr = '') => trufflehogOutcome(R({ status, stdout, stderr }));
+  check('trufflehog exit 0 with JSON lines: looked, all kept', th(0, '{"Verified":true}\n{"Verified":false}\n').results.length === 2 && th(0, '').looked === true);
+  const logged = minted('THLOG');
+  const thDied = th(1, '', `error running scan: ${logged}`);
+  check('trufflehog exit 1: could not look, and its stderr is never quoted (not even redacted)',
+    thDied.looked === false && thDied.reason.startsWith('exit 1 — ') && !thDied.reason.includes(logged.slice(0, 8)) && !thDied.reason.includes(redact(logged)), thDied.reason);
+  check('trufflehog: a JSON line cut short is could-not-look', th(0, '{"Verified":true}\n{"Verif').looked === false);
+  check('trufflehog: a stdout line that is not JSON is skipped, not a fault', th(0, 'banner\n{"Verified":true}\n').looked === true);
+
+  const osv = (status, stdout, stderr = '') => osvOutcome(R({ status, stdout, stderr }));
+  check('osv-scanner exit 0 {"results":[]}: looked', osv(0, '{"results":[]}').looked === true);
+  check('osv-scanner exit 1 with results: looked (vulnerabilities found is not a failure)', osv(1, '{"results":[{"packages":[]}]}').looked === true);
+  check('osv-scanner exit 128 (no package manifest): looked, nothing to audit', osv(128, '', 'No package sources found').looked === true);
+  check('osv-scanner exit 127 (a general error): could not look, reason names it', osv(127, '', 'failed to query osv.dev').reason === 'exit 127: failed to query osv.dev');
+  check('osv-scanner exit 0 with unparseable output: could not look', osv(0, 'garbage').looked === false);
+  check('osv-scanner exit 1 with no results: could not look', osv(1, '{"results":[]}').looked === false);
+  check('osv-scanner exit 2 with a valid-looking report: could not look (the status decides, not the JSON)', osv(2, '{"results":[]}').looked === false);
+
+  const hd = (status, stdout, stderr = '') => hadolintOutcome(R({ status, stdout, stderr }));
+  check('hadolint exit 1 with a finding: looked (a rule firing is not a failure)', hd(1, '[{"code":"DL3007","level":"warning"}]').looked === true);
+  check('hadolint exit 0 with []: looked', hd(0, '[]').looked === true);
+  check('hadolint with no JSON (a file it could not open): could not look', hd(1, '', 'openBinaryFile: does not exist').looked === false);
+  check('hadolint exit 2 with a valid-looking array: could not look', hd(2, '[]').looked === false);
+
+  const tok = minted('ghp_');
+  check('scrub: a letters+digits run of 20+ is cut to first4…last4', !scrub(`auth failed for ${tok}`).includes(tok.slice(0, 8)) && scrub(`auth failed for ${tok}`).includes(redact(tok)));
+  check('scrub: a URL\'s userinfo is dropped', !scrub('dial postgres://admin:hunter2@db.internal/x').includes('hunter2'));
+  check('scrub: a letters-only rule id stays readable', scrub('rule wp-rest-error-detail-laundered failed').includes('wp-rest-error-detail-laundered'));
+  check('scrub: one line, structural characters stripped (it is safe() underneath)', !/[\n`|<>]/.test(scrub('a\n`b`|<c>')));
+  check('errorLine: git\'s fatal: line, not the usage hint printed after it',
+    errorLine("fatal: ambiguous argument 'x...HEAD': unknown revision\nUse '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'") === "fatal: ambiguous argument 'x...HEAD': unknown revision");
+  check('errorLine: a Python warning printed last is skipped for the line before it',
+    errorLine('boom: the scan failed\n/v/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+\n  warnings.warn(') === 'boom: the scan failed');
+}
+
+console.log('\n# which legs can take the verdict away (canBeCritical + LEGS)');
+{
+  check('a T0 leg can always block: semgrep community, gitleaks, trufflehog on the diff',
+    canBeCritical(LEGS.community.checks) && canBeCritical(LEGS.gitleaks.checks) && canBeCritical(LEGS.trufflehog.checks));
+  check('a T1 leg only warns until the caller promotes one of ITS checks',
+    !canBeCritical(LEGS.custom.checks) && canBeCritical(LEGS.custom.checks, ['wp-rest-error-detail']) && !canBeCritical(LEGS.custom.checks, ['sca-critical']));
+  check('osv-scanner, hadolint, argv-secret, gha: WARN until promoted', !canBeCritical(LEGS.osv.checks) && canBeCritical(LEGS.osv.checks, ['sca-critical'])
+    && !canBeCritical(LEGS.hadolint.checks) && !canBeCritical(LEGS.argvSecret.checks) && canBeCritical(LEGS.argvSecret.checks, ['argv-secret']) && !canBeCritical(LEGS.gha.checks));
+  check('a T2 leg can never block, not even "promoted" (the history baselines)',
+    !canBeCritical(LEGS.gitleaksHistory.checks, ['secrets-history']) && !canBeCritical(LEGS.trufflehogHistory.checks, ['secrets-history']));
+  check('the changed-file list can always block (it feeds sast-critical)', canBeCritical(LEGS.diff.checks));
+  // A checkId a leg emits but does not claim would turn that leg's failure into a silent PASS for a
+  // caller who promoted it. Every rule pack's metadata.checkId, read live, must belong to its leg.
+  const packIds = (f) => [...fs.readFileSync(new URL(`../rules/${f}`, import.meta.url), 'utf8').matchAll(/checkId:\s*([\w-]+)/g)].map((m) => m[1]);
+  const claims = (leg, list) => list.length > 0 && list.every((id) => leg.checks.includes(id));
+  check('every checkId in wp-php.yaml and astro-ts.yaml belongs to the rule-packs leg', claims(LEGS.custom, [...packIds('wp-php.yaml'), ...packIds('astro-ts.yaml')]));
+  check('every checkId in gha.yaml belongs to the gha leg', claims(LEGS.gha, packIds('gha.yaml')));
+  const claimed = new Set(Object.values(LEGS).flatMap((l) => l.checks));
+  check('every emitted checkId belongs to a leg', [...EMITTED].every((id) => claimed.has(id)), [...EMITTED].filter((id) => !claimed.has(id)).join(','));
+  check('every leg check is a real CHECKS id', [...claimed].every((id) => Object.prototype.hasOwnProperty.call(CHECKS, id)));
+  check('the changed-file list claims every diff-scoped leg\'s checks',
+    [LEGS.community, LEGS.custom, LEGS.hadolint, LEGS.argvSecret].every((l) => l.checks.every((id) => LEGS.diff.checks.includes(id))));
+
+  const fa = faultAnnotation('semgrep community SAST', 'semgrep exit 2: x');
+  check('faultAnnotation: one ::error, a fixed title, the leg and why', fa === '::error title=security-baseline could not look::semgrep community SAST could not look — semgrep exit 2: x', fa);
+  const evil = faultAnnotation('leg', 'x\n::stop-commands::tok', 'warning');
+  check('faultAnnotation: a hostile reason stays one line and cannot add a property',
+    !/[\r\n]/.test(evil) && (evil.match(/^::warning (.*?)::/) || [])[1] === 'title=security-baseline could not look', evil);
+  const sha = crypto.createHash('sha1').update('introducing commit').digest('hex');
+  check('shortSha: a full sha → its first 7; the all-zero sha, a short one or nothing → ""',
+    shortSha(sha.toUpperCase()) === sha.slice(0, 7) && shortSha('0'.repeat(40)) === '' && shortSha(sha.slice(0, 12)) === '' && shortSha(undefined) === '');
+  check('an annotation names the commit a secret was found in (its line is that commit\'s line)',
+    annotation({ checkId: 'secret-pattern', rule: 'generic-api-key', file: 'a.php', line: 75, commit: sha }).endsWith(`secret-pattern generic-api-key at a.php:75 in commit ${sha.slice(0, 7)}`));
+}
+
 console.log('\n# argv-secret — a secret spelled into a child\'s argv (argv-secret.mjs)');
 {
   const hits = (lang, ...lines) => findArgvSecrets(lines.join('\n'), lang);
@@ -431,9 +568,12 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     const argvLog = path.join(tmp, 'gitleaks-argv.log');
     // Worst case: a gitleaks that IGNORED --redact, so Secret/Match/Line carry the raw value; the
     // diff range (--log-opts) and the full-history pass answer with different findings.
-    const glFinding = (file, line, rule, value) => ({
+    // Each finding names the commit that introduced it, as gitleaks' does (a full sha, minted here).
+    const shaOf = (s) => crypto.createHash('sha1').update(s).digest('hex');
+    const SHA = { diff: shaOf('the commit in the pushed range'), hist: shaOf('a commit long ago') };
+    const glFinding = (file, line, rule, value, commit) => ({
       RuleID: rule, Description: 'stub', File: file, StartLine: line, EndLine: line,
-      Secret: value, Match: `key = "${value}"`, Line: `$key = '${value}';`, Commit: '0'.repeat(40),
+      Secret: value, Match: `key = "${value}"`, Line: `$key = '${value}';`, Commit: commit,
     });
     // Vendored rules arrive with semgrep's config-path prefix on check_id, as they do on a runner.
     const vendored = (id) => `home.runner.work._actions.mvalasis.ci-actions.v1.security-baseline.rules.${id}`;
@@ -455,8 +595,8 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
         'case "$*" in *--log-opts*) which=diff ;; *) which=hist ;; esac',
         'out=""',
         'while [ $# -gt 0 ]; do [ "$1" = "--report-path" ] && { shift; out="$1"; }; shift; done',
-        `if [ "$which" = diff ]; then cat > "$out" <<'JSON'\n${JSON.stringify([glFinding('app/config.php', 3, 'generic-api-key', planted.diff)])}\nJSON`,
-        `else cat > "$out" <<'JSON'\n${JSON.stringify([glFinding('old/legacy.php', 9, 'aws-access-token', planted.hist)])}\nJSON`,
+        `if [ "$which" = diff ]; then cat > "$out" <<'JSON'\n${JSON.stringify([glFinding('app/config.php', 3, 'generic-api-key', planted.diff, SHA.diff)])}\nJSON`,
+        `else cat > "$out" <<'JSON'\n${JSON.stringify([glFinding('old/legacy.php', 9, 'aws-access-token', planted.hist, SHA.hist)])}\nJSON`,
         'fi',
       ].join('\n')),
       // trufflehog's JSON always carries the raw credential (Raw/RawV2) — it has no --redact.
@@ -485,14 +625,15 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     put('app/login.php', '<?php // fixture\n');
     put('scripts/smoke.sh', '#!/bin/sh\nhdr=(-H "X-Verify-Source: $VERIFY_TOKEN")\ncurl "${hdr[@]}" "$u"\n');
     put('scripts/selftest.sh', '#!/bin/sh\nhdr=(-H "X-Verify-Source: $VERIFY_TOKEN")\n');   // a fixture corpus: never graded
+    put('Dockerfile', 'FROM alpine:latest\n');   // puts hadolint in scope (its stub above finds nothing)
     git('add', '.'); git('commit', '-q', '-m', 'change');
     check('fixture repo has two commits (else every assertion below is vacuous)', (git('rev-list', '--count', 'HEAD').stdout || '').trim() === '2');
 
     const summaryPath = path.join(tmp, 'summary.md');
-    const scan = (extra) => {
+    const scan = (extra, cwd = repo) => {
       try { fs.rmSync(summaryPath, { force: true }); } catch { /* fresh file per run */ }
       const r = spawnSync(process.execPath, [fileURLToPath(new URL('./scan.mjs', import.meta.url))], {
-        cwd: repo, encoding: 'utf8', timeout: 60000,
+        cwd, encoding: 'utf8', timeout: 60000,
         env: {
           ...base, ...stubs, GITHUB_ACTION_PATH: fileURLToPath(new URL('..', import.meta.url)),
           SCAN_SCOPE: 'diff', BASE_REF: 'HEAD~1', VERIFIED_SECRETS: 'on', ENABLE_SECRETS_HISTORY: 'true', ENABLE_SCA: 'false',
@@ -506,7 +647,7 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     const expected = (level, promoted = false) => [
       `::${level} file=app/login.php,line=7,title=security-baseline sast-critical::sast-critical php.lang.security.stub-rule at app/login.php:7`,
       ...(promoted ? [`::${level} file=app/login.php,line=12,title=security-baseline wp-rest-error-detail::wp-rest-error-detail wp-rest-exception-detail at app/login.php:12`] : []),
-      `::${level} file=app/config.php,line=3,title=security-baseline secret-pattern::secret-pattern generic-api-key at app/config.php:3`,
+      `::${level} file=app/config.php,line=3,title=security-baseline secret-pattern::secret-pattern generic-api-key at app/config.php:3 in commit ${SHA.diff.slice(0, 7)}`,
       `::${level} file=app/config.php,line=3,title=security-baseline secret-verified::secret-verified Github at app/config.php:3`,
     ];
 
@@ -524,6 +665,10 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('NO planted secret value in the job log, the step summary or stderr', !leaked(a.stdout) && !leaked(a.summary) && !leaked(a.stderr));
     const argv = fs.existsSync(argvLog) ? fs.readFileSync(argvLog, 'utf8').trim().split('\n') : [];
     check('gitleaks ran twice (diff + history), both times with --redact', argv.length === 2 && argv.every((l) => /(^| )--redact( |$)/.test(l)), `${argv.length} call(s)`);
+    check('each gitleaks finding names the commit it was found in (under full scope its line is that commit\'s, not the tip\'s)',
+      new RegExp(`app/config\\.php:3 — generic-api-key \\S+ in commit ${SHA.diff.slice(0, 7)}`).test(a.stdout)
+      && new RegExp(`old/legacy\\.php:9 — aws-access-token in history \\S+ in commit ${SHA.hist.slice(0, 7)} — rotate`).test(a.stdout));
+    check('findings are not faults: a run full of findings has no leg that could not look', a.stdout.length > 0 && !a.stdout.includes('could not look'));
     check('argv-secret: a T1 WARN group in the report', a.stdout.includes('### ⚠️ `argv-secret` · T1 · 2 finding(s)'));
     check('argv-secret: the untouched workflow IS reported (.github YAML is graded on every run)',
       a.stdout.includes("- ⚠️ .github/workflows/deploy.yml:8 — -H Authorization expands secrets.DEPLOY_API_KEY into a child's argv"));
@@ -574,6 +719,161 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('full scope: argv-secret grades the untouched script too', f.stdout.includes('### ⚠️ `argv-secret` · T1 · 3 finding(s)')
       && f.stdout.includes('- ⚠️ scripts/untouched.sh:2 — -H X-Api-Key expands OLD_API_KEY'), f.stdout.split('\n').filter((l) => l.includes('argv')).join(' | '));
     check('full scope: a selftest fixture is still never graded', f.stdout.length > 0 && !f.stdout.includes('scripts/selftest.sh'));
+
+    // ---- a scanner that could not look: FAULT under fail-on-critical, never PASS (v1.19.0) ----
+    // A CLEAN stub set: every scanner runs and finds nothing (hadolint's one rule firing exits 1, as
+    // hadolint does, and must stay a WARN). Each case below breaks exactly one scanner, so a verdict
+    // other than PASS can only come from that scanner. (G) proves the set is clean — without it every
+    // FAULT assertion below could pass for the wrong reason.
+    planted.glerr = mint('GLERR');
+    planted.therr = mint('THERR');
+    const reportPath = 'out=""\nwhile [ $# -gt 0 ]; do [ "$1" = "--report-path" ] && { shift; out="$1"; }; shift; done';
+    const clean = {
+      SEMGREP_BIN: stub('semgrep-clean', `echo '{"results":[],"errors":[]}'`),
+      GITLEAKS_BIN: stub('gitleaks-clean', `${reportPath}\nprintf '[]\\n' > "$out"`),
+      TRUFFLEHOG_BIN: stub('trufflehog-clean', `printf '%s\\n' "$*" >> '${path.join(tmp, 'trufflehog-argv.log')}'`),
+      OSV_BIN: stub('osv-clean', `echo '{"results":[]}'`),
+      HADOLINT_BIN: stub('hadolint-clean', `echo '[{"code":"DL3007","level":"warning","line":1,"message":"Using latest is prone to errors"}]'\nexit 1`),
+    };
+    const broken = (over, extra = {}, cwd = repo) => scan({ ...clean, ENABLE_SCA: 'true', ...over, ...extra }, cwd);
+    const verdict = (r) => `exit ${r.status}: ${r.stdout.split('\n').filter((l) => /^(PASS|BLOCKED|FAULT|report-only|⚠️ REPORT-MODE|- (❌|⚠️) .* — )/.test(l)).join(' | ')}`;
+    const semgrepAnswers = (severityLeg, packLeg = `echo '{"results":[],"errors":[]}'`) => [
+      'case "$*" in', `  *--severity*) ${severityLeg} ;;`, `  *wp-php.yaml*) ${packLeg} ;;`, `  *) echo '{"results":[],"errors":[]}' ;;`, 'esac',
+    ].join('\n');
+
+    const g = broken({}, { GITHUB_ACTIONS: 'true' });
+    check('(G) clean stubs: PASS, exit 0, no leg that could not look, no annotation', g.status === 0 && g.stdout.includes('\nPASS — no critical findings.\n')
+      && !g.stdout.includes('could not look') && commands(g.stdout).length === 0, verdict(g));
+    check('(G) findings are not failures: hadolint exit 1 with a finding is a WARN, not a fault', g.stdout.includes('### ⚠️ `dockerfile-lint` · T1 · 1 finding(s)'));
+    const thArgv = fs.existsSync(path.join(tmp, 'trufflehog-argv.log')) ? fs.readFileSync(path.join(tmp, 'trufflehog-argv.log'), 'utf8') : '';
+    check('(G) trufflehog runs with --fail-on-scan-errors (without it a --since-commit it cannot resolve exits 0, scanning nothing)',
+      /(^| )--fail-on-scan-errors( |$)/m.test(thArgv) && /(^| )--since-commit HEAD~1( |$)/m.test(thArgv), thArgv);
+
+    // (H) The registry fetch for the default p/security-audit fails.
+    // semgrep 1.178.0's own answer, measured: exit 7 and two error entries.
+    const registryDown = JSON.stringify({ results: [], errors: [
+      { code: 2, level: 'error', type: 'SemgrepError', message: 'Failed to download configuration from https://semgrep.dev/c/p/security-audit HTTP 503.' },
+      { code: 7, level: 'error', type: 'SemgrepError', message: 'invalid configuration file found (1 configs were invalid)' },
+    ] });
+    const sgDown = stub('semgrep-registry-down', semgrepAnswers(`echo '${registryDown}'; exit 7`));
+    const why503 = 'semgrep exit 7: SemgrepError — Failed to download configuration from https[:]//semgrep.dev/c/p/security-audit HTTP 503.';
+    const h = broken({ SEMGREP_BIN: sgDown }, { GITHUB_ACTIONS: 'true', GITHUB_STEP_SUMMARY: summaryPath });
+    check('(H) semgrep exit 7 under fail-on-critical: FAULT, exit 1 — not PASS', h.status === 1
+      && h.stdout.includes('\nFAULT — 1 scanner leg(s) that could have blocked could not look (semgrep community SAST). No verdict: a tool fault in security-baseline, not a finding about this repository.\n')
+      && !h.stdout.includes('PASS'), verdict(h));
+    check('(H) the note names the scanner, its exit and its error — in the log and the summary',
+      h.stdout.includes(`- ❌ semgrep community SAST — ${why503}`) && h.summary.includes(`- ❌ semgrep community SAST — ${why503}`), verdict(h));
+    check('(H) a tool fault, never a finding: critical 0, no BLOCKED, never the clean line',
+      h.stdout.includes('**critical: 0 · ') && h.stdout.includes(' · could not look: 1**') && !h.stdout.includes('BLOCKED') && !h.stdout.includes('✅ no findings across'));
+    check('(H) one ::error for the leg, naming it and why — nothing else command-shaped',
+      JSON.stringify(commands(h.stdout)) === JSON.stringify([`::error title=security-baseline could not look::semgrep community SAST could not look — ${why503}`]), JSON.stringify(commands(h.stdout)));
+    const hr = broken({ SEMGREP_BIN: sgDown }, { GITHUB_ACTIONS: 'true', REPORT_MODE: 'true' });
+    check('(H) the same under report-mode: exit 0, still reported, annotated as ::warning', hr.status === 0
+      && hr.stdout.includes('\n⚠️ REPORT-MODE — 1 scanner leg(s) that could have blocked could not look (semgrep community SAST); enforcing, this run would FAULT.\n')
+      && JSON.stringify(commands(hr.stdout)) === JSON.stringify([`::warning title=security-baseline could not look::semgrep community SAST could not look — ${why503}`]), verdict(hr));
+    const hn = broken({ SEMGREP_BIN: sgDown }, { FAIL_ON_CRITICAL: 'false' });
+    check('(H) the same under fail-on-critical: false: exit 0, "would FAULT"', hn.status === 0
+      && hn.stdout.includes('\nreport-only — 1 scanner leg(s) that could have blocked could not look (semgrep community SAST); under `fail-on-critical: true` this run would FAULT.\n'), verdict(hn));
+
+    // (I) gitleaks dies before writing its report — here on a config whose parse error quotes a value.
+    const glDead = stub('gitleaks-dead', `echo "10:00AM FTL unable to load gitleaks config, err: toml: line 3: expected a quote near ${planted.glerr}" >&2\nexit 1`);
+    const i = broken({ GITLEAKS_BIN: glDead }, { GITHUB_ACTIONS: 'true' });
+    check('(I) gitleaks exit 1 with no report: FAULT, exit 1 — not PASS', i.status === 1
+      && i.stdout.includes('\nFAULT — 1 scanner leg(s) that could have blocked could not look (gitleaks secret scan).') && !i.stdout.includes('PASS'), verdict(i));
+    check('(I) the note names gitleaks, its exit and its error; the history pass that also died only warns',
+      i.stdout.includes('- ❌ gitleaks secret scan — gitleaks exit 1: 10:00AM FTL unable to load gitleaks config, err: toml: line 3: expected a quote near ')
+      && i.stdout.includes('- ⚠️ gitleaks full-history baseline — gitleaks exit 1: ') && commands(i.stdout).length === 1, verdict(i));
+    check('(I) a value quoted in the error is cut to first4…last4 — no 8-character run in any output',
+      !leaked(i.stdout) && !leaked(i.stderr) && i.stdout.includes(redact(planted.glerr)));
+    const ir = broken({ GITLEAKS_BIN: glDead }, { REPORT_MODE: 'true' });
+    check('(I) the same under report-mode: exit 0', ir.status === 0
+      && ir.stdout.includes('⚠️ REPORT-MODE — 1 scanner leg(s) that could have blocked could not look (gitleaks secret scan); enforcing, this run would FAULT.'), verdict(ir));
+
+    // (J) A rule pack that does not load: its checks only warn — until the caller promotes one.
+    const packBroken = JSON.stringify({ results: [], errors: [
+      { code: 4, level: 'error', type: 'InvalidRuleSchemaError', message: null },
+      { code: 7, level: 'error', type: 'SemgrepError', message: 'invalid configuration file found (1 configs were invalid)' },
+    ] });
+    const sgPack = stub('semgrep-pack-broken', semgrepAnswers(`echo '{"results":[],"errors":[]}'`, `echo '${packBroken}'; exit 7`));
+    const j = broken({ SEMGREP_BIN: sgPack });
+    check('(J) a leg whose checks only warn here: reported ⚠️, PASS stands, exit 0', j.status === 0
+      && j.stdout.includes('- ⚠️ semgrep WP/PHP + Astro/TS rule packs — semgrep exit 7: InvalidRuleSchemaError (its checks only warn for this caller: reported, not a fault)')
+      && j.stdout.includes('\nPASS — no critical findings. 1 scanner leg(s) that only warn here could not look (above).\n'), verdict(j));
+    const jp = broken({ SEMGREP_BIN: sgPack }, { CRITICAL_CHECKS: 'wp-rest-error-detail' });
+    check('(J) the same leg with one of its checks promoted (the five lux-shaped callers): FAULT, exit 1', jp.status === 1
+      && jp.stdout.includes('\nFAULT — 1 scanner leg(s) that could have blocked could not look (semgrep WP/PHP + Astro/TS rule packs).'), verdict(jp));
+
+    // (K) trufflehog dies on the diff range (T0). Its log is never quoted, so nothing it printed —
+    // a live credential included — can reach the report, not even redacted.
+    const thDead = stub('trufflehog-dead', `echo "error running scan: verification of ${planted.therr} failed" >&2\nexit 1`);
+    const k = broken({ TRUFFLEHOG_BIN: thDead });
+    check('(K) trufflehog exit 1 on the diff: FAULT, exit 1', k.status === 1
+      && k.stdout.includes('- ❌ trufflehog verified-live secrets — trufflehog exit 1 — its log is not quoted here, rerun trufflehog to read it'), verdict(k));
+    check('(K) nothing from its stderr reaches any output, not even redacted', !leaked(k.stdout) && !leaked(k.stderr) && !k.stdout.includes(redact(planted.therr)));
+
+    // (L) osv-scanner: 128 (no manifest) and 1 (vulnerabilities) both looked; 127 could not.
+    const l1 = broken({ OSV_BIN: stub('osv-none', `echo 'No package sources found, --help for usage information.' >&2\nexit 128`) });
+    check('(L) osv-scanner exit 128 (no package manifest): nothing to audit, not a fault', l1.status === 0 && !l1.stdout.includes('could not look'), verdict(l1));
+    const vuln = JSON.stringify({ results: [{ source: { path: 'package-lock.json' }, packages: [{ package: { name: 'lodash', version: '4.17.20' }, groups: [{ ids: ['GHSA-35jh-r3h4-6jhm'], max_severity: '7.2' }] }] }] });
+    const l2 = broken({ OSV_BIN: stub('osv-vuln', `echo '${vuln}'\nexit 1`) });
+    check('(L) osv-scanner exit 1 with a vulnerability: a finding (sca-high WARN), not a fault', l2.status === 0
+      && l2.stdout.includes('### ⚠️ `sca-high` · T1 · 1 finding(s)') && !l2.stdout.includes('could not look'), verdict(l2));
+    const osvDead = stub('osv-dead', `echo 'failed to query osv.dev: 503' >&2\nexit 127`);
+    const l3 = broken({ OSV_BIN: osvDead });
+    check('(L) osv-scanner exit 127: reported ⚠️, PASS stands (its checks only warn)', l3.status === 0
+      && l3.stdout.includes('- ⚠️ osv-scanner dependency audit — osv-scanner exit 127: failed to query osv.dev: 503 (its checks only warn'), verdict(l3));
+    const l4 = broken({ OSV_BIN: osvDead }, { CRITICAL_CHECKS: 'sca-critical' });
+    check('(L) osv-scanner exit 127 with sca-critical promoted: FAULT', l4.status === 1 && l4.stdout.includes('could not look (osv-scanner dependency audit).'), verdict(l4));
+
+    // (M) semgrep not installed — "not installed" used to be a scanner note under a PASS.
+    const m = broken({ SEMGREP_BIN: path.join(tmp, 'no-such-dir', 'semgrep') });
+    check('(M) semgrep not installed: FAULT, exit 1', m.status === 1 && m.stdout.includes('- ❌ semgrep community SAST — semgrep not installed'), verdict(m));
+
+    // (N) A diff base git cannot resolve: the changed-file list failed, it is not an empty diff.
+    const n = broken({}, { BASE_REF: 'no-such-ref' });
+    check('(N) an unresolvable diff base: FAULT on the changed-file list, exit 1', n.status === 1
+      && n.stdout.includes("- ❌ changed-file list — git diff no-such-ref...HEAD failed, exit 128: fatal: ambiguous argument 'no-such-ref...HEAD': unknown revision"), verdict(n));
+
+    // (O) A collector that throws: its legs could not look (was a scanner note under a PASS).
+    const o = broken({ SEMGREP_BIN: stub('semgrep-null-result', `echo '{"results":[null],"errors":[]}'`) });
+    check('(O) a collector that crashes: FAULT naming it, exit 1', o.status === 1 && /\n- ❌ semgrep community SAST — collectSemgrep crashed: /.test(o.stdout), verdict(o));
+
+    // (P) A scanner killed mid-run (the timeout path sends SIGTERM): run() hands outcome.mjs the signal.
+    const p = broken({ GITLEAKS_BIN: stub('gitleaks-killed', 'kill -KILL $$') });
+    check('(P) a scanner killed by a signal: FAULT naming the signal, exit 1', p.status === 1 && p.stdout.includes('- ❌ gitleaks secret scan — gitleaks killed by SIGKILL'), verdict(p));
+
+    // (Q) With no finding at all, "✅ no findings across SAST, secrets, SCA, and CI supply-chain" is a
+    // claim about every scanner, so a leg that could not look must replace it. The fixture repo above
+    // always has WARN findings (argv-secret, hadolint), so it never reaches that line: a bare repo does.
+    const bare = path.join(tmp, 'bare');
+    fs.mkdirSync(bare);
+    const gitBare = (...a) => spawnSync('git', ['-c', 'user.name=selftest', '-c', 'user.email=selftest@example.invalid', '-c', 'commit.gpgsign=false', ...a], { cwd: bare, env: base, encoding: 'utf8' });
+    gitBare('init', '-q');
+    fs.writeFileSync(path.join(bare, 'README.md'), 'base\n'); gitBare('add', '.'); gitBare('commit', '-q', '-m', 'base');
+    fs.writeFileSync(path.join(bare, 'index.php'), '<?php // fixture\n'); gitBare('add', '.'); gitBare('commit', '-q', '-m', 'change');
+    const q0 = broken({}, {}, bare);
+    check('(Q) control: a bare repo with every scanner clean prints the ✅ clean line', q0.status === 0 && q0.stdout.includes('\n- ✅ no findings across SAST, secrets, SCA, and CI supply-chain.\n'), verdict(q0));
+    const q = broken({ SEMGREP_BIN: sgDown }, {}, bare);
+    check('(Q) the same repo with a leg that could not look: never the ✅ clean line', q.status === 1
+      && q.stdout.includes('\n- no findings from the scanners that looked — the legs that could not are listed below.\n') && !q.stdout.includes('✅ no findings across'), verdict(q));
+
+    // (R) Outside a git repository gitleaks exits 0 with `[]` (measured on 8.30.1): never a clean result.
+    const nogit = path.join(tmp, 'not-a-repo');
+    fs.mkdirSync(nogit);
+    fs.writeFileSync(path.join(nogit, 'index.php'), '<?php // fixture\n');
+    const r = broken({}, {}, nogit);
+    check('(R) no git history: the gitleaks legs could not look — FAULT, exit 1', r.status === 1
+      && r.stdout.includes('- ❌ gitleaks secret scan — no git history here — not a git repository, or no commit — so gitleaks would read nothing'), verdict(r));
+
+    // (S) The registry stall measured on 1.178.0: ~100 s, then exit 2 with nothing on stdout or stderr.
+    // The time is the only clue left, so the reason carries it (10 s here keeps the suite quick).
+    const stall = broken({ SEMGREP_BIN: stub('semgrep-stall', semgrepAnswers('sleep 10; exit 2')) });
+    check('(S) a stalled registry fetch: FAULT, and the reason says how long it took', stall.status === 1
+      && /\n- ❌ semgrep community SAST — semgrep exit 2 after 1\d s: no JSON report\n/.test(stall.stdout), verdict(stall));
+
+    // Each gitleaks run reports into a directory made for it, removed after — none may be left behind.
+    check('every gitleaks report directory is removed afterwards', fs.readdirSync(tmp).filter((d) => d.startsWith('sb-gitleaks-')).length === 0,
+      fs.readdirSync(tmp).join(','));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

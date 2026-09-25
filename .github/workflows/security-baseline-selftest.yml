@@ -3,7 +3,8 @@ name: security-baseline self-test
 # Two offline regression guards (no network, no secrets): (1) the pure tier-engine self-test
 # (block-by-default, never-newly-block, promotion, redaction); (2) the vendored semgrep rule
 # packs via `semgrep --test` (each bad fixture fires, each good fixture stays silent). Plus a
-# report-mode self-scan smoke so a syntax/wiring break in scan.mjs is caught.
+# report-mode self-scan smoke so a syntax/wiring break in scan.mjs is caught, and a pass of the
+# real scanners that fails when any leg could not look (a FAULT a green smoke would hide).
 
 on:
   push:
@@ -51,3 +52,23 @@ jobs:
           fail-on-critical: 'false'
           enable-secrets-history: 'false'
           verified-secrets: 'off'
+      # Every scanner leg must LOOK on a healthy runner. The step above cannot show that: with
+      # fail-on-critical: false a FAULT exits 0 too. So scan again with the scanners it installed, in
+      # both scopes (trufflehog on the diff), and fail on any leg that could not look or a crash. The
+      # selftest's stubs prove the classification; this is the one run of REAL scanner output through
+      # outcome.mjs before a release.
+      - name: Every scanner leg looked (real scanners, both scopes)
+        shell: bash
+        env:
+          FAIL_ON_CRITICAL: 'false'
+          ENABLE_SECRETS_HISTORY: 'false'
+          SEMGREP_SEND_METRICS: 'off'
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          out="$RUNNER_TEMP/scanner-legs.log"
+          SCAN_SCOPE=full VERIFIED_SECRETS=off node security-baseline/scripts/scan.mjs | tee "$out"
+          SCAN_SCOPE=diff VERIFIED_SECRETS=on node security-baseline/scripts/scan.mjs | tee -a "$out"
+          if grep -Eq 'could not look|security-baseline crashed' "$out"; then
+            echo "::error title=security-baseline self-test::a scanner leg could not look on a healthy runner; see the reports above"
+            exit 1
+          fi
