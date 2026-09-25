@@ -3,7 +3,8 @@
 // job), parses + floor-filters the advisories via the pure engine, also flags unpinned third-party
 // GitHub Actions that consume secrets, renders one report, optionally opens/auto-closes a
 // 'dependency advisories' tracking issue (linkcheck's lifecycle), and exits non-zero ONLY when
-// fail-on-vuln=true AND a >=floor advisory exists.
+// fail-on-vuln=true AND a >=floor advisory exists. The report goes to the job log as well as the
+// step summary, and each >=floor advisory is annotated (`::error file=<lockfile>,title=…::…`).
 //
 // EGRESS (honest enumeration — see README §Sovereignty): NO lockfile body leaves the runner.
 //   - osv-scanner: sends package COORDINATES (name@version) to osv.dev — never your lockfile body.
@@ -16,7 +17,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   parseOsv, filterByFloor, scanUnpinnedActions, resolveFirstPartyOwners, issueDecision,
-  blockDecision, renderReport, normalizeFloor, safe,
+  blockDecision, renderReport, normalizeFloor, safe, repoRelative, annotations,
 } from './engine.mjs';
 
 const env = process.env;
@@ -29,7 +30,24 @@ const OSV_BIN = env.OSV_BIN || 'osv-scanner';
 const GH_BIN = env.GH_BIN || 'gh';
 const ISSUE_TITLE = env.ISSUE_TITLE || 'deps-currency: dependency advisories';
 
-const summaryFile = env.GITHUB_STEP_SUMMARY || '/dev/stdout';
+const WORKSPACE = path.resolve(env.GITHUB_WORKSPACE || '.');   // the repository root, for `file=`
+
+// The report goes to the job LOG always, and to the step summary when there is one. The summary
+// alone needs a signed-in browser: `gh run view --log-failed` showed only "exit code 1" and the
+// check-run API's `output` was empty, so a headless reader learned THAT the gate blocked, never why
+// (security-baseline, 2026-09-23 — ported here in v1.18.0). The log is written through fd 1, never
+// by opening /dev/stdout: on Linux that open fails (ENXIO) when stdout is a socket, which is what
+// node's child_process hands a child. `/dev/stdout` as the summary (a local idiom) means none.
+const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';
+const ANNOTATE = env.GITHUB_ACTIONS === 'true';   // runner commands are for the runner, not a local run
+const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
+// One block of the report: the job log first, then the step summary — so when the summary write is
+// what throws, the block is already readable in the log. Every line of a block starts with our text;
+// tool-controlled strings (package names, advisory ids, paths) go through safe().
+function emit(text) {
+  say(text);
+  if (summaryFile) fs.appendFileSync(summaryFile, `${text}\n`);
+}
 const infra = [];
 
 function run(bin, args, opts = {}) {
@@ -155,7 +173,7 @@ function manageIssue(decision, body) {
 // report is appended only at the END of main — wrote NOTHING to the step summary. Statically
 // enforced now by .github/scripts/lint-entrypoint-output.mjs (crash-guard ordering rule).
 process.on('uncaughtException', (e) => {
-  try { fs.appendFileSync(summaryFile, `\n- ❌ deps-currency crashed: ${safe(String((e && e.stack) || e), 400)}\n`); } catch { /* ignore */ }
+  try { emit(`\n- ❌ deps-currency crashed: ${safe(String((e && e.stack) || e), 400)}`); } catch { /* summary sink unwritable; the job log already has the line */ }
   process.exit(FAIL_ON_VULN ? 1 : 0);
 });
 
@@ -198,11 +216,17 @@ process.on('uncaughtException', (e) => {
   else if (floorFindings.length > 0) lines.push(`report-only — ${floorFindings.length} advisory(ies) at/above floor would BLOCK under \`fail-on-vuln: true\`.`);
   else lines.push('PASS — no dependency advisories at or above the severity floor.');
 
-  fs.appendFileSync(summaryFile, lines.join('\n') + '\n');
+  emit(lines.join('\n'));
 
   if (MANAGE_ISSUE) {
-    try { manageIssue(decision, report); } catch (e) { /* issue mgmt must never fail the run by itself */ fs.appendFileSync(summaryFile, `\n- ℹ️ issue management error (non-fatal): ${safe(String((e && e.message) || e), 160)}\n`); }
+    try { manageIssue(decision, report); } catch (e) { /* issue mgmt must never fail the run by itself */ emit(`\n- ℹ️ issue management error (non-fatal): ${safe(String((e && e.message) || e), 160)}`); }
   }
 
+  // Last in the log: one annotation per at/above-floor advisory — `::error` when this run blocks,
+  // `::warning` when it only reports (the default).
+  if (ANNOTATE) {
+    const located = floorFindings.map((f) => ({ ...f, file: repoRelative(f.source, { workdir: WORKDIR, workspace: WORKSPACE }) }));
+    for (const a of annotations(located, blocked ? 'error' : 'warning')) say(a);
+  }
   process.exit(blocked ? 1 : 0);
 })();

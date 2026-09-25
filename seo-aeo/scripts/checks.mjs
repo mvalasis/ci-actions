@@ -455,3 +455,39 @@ export function analyzeRedirects(probes) {
   }
   return out;
 }
+
+// ---------- presentation (pure; the CLI renders with these, selftest.mjs covers them) ----------
+
+// Neutralize page-controlled strings before they reach the report: strip CR/LF and
+// markdown-structural chars + cap length so a hostile <title>/<loc>/canonical can't forge
+// verdict lines or inject an image beacon into the job summary (report-spoofing guard), and
+// can't reach the start of a job-log line, where the runner would read it as a workflow
+// command. Stripping `[`/`]` also rules out the legacy `##[command]` form anywhere in a line.
+export const safe = (s, max = 220) => String(s == null ? '' : s).replace(/[\r\n]+/g, ' ').replace(/[`|<>[\]]/g, '').slice(0, max);
+
+// Workflow-command encoding — @actions/core's escaping, restated (as in security-baseline's
+// tiers.mjs) so the action keeps cheerio as its only dependency. Data may not carry a line break
+// (a new line is a new command); a property value may not carry `:` or `,` either.
+export const escapeData = (s) => String(s == null ? '' : s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+export const escapeProperty = (s) => escapeData(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
+
+// One annotation per CRITICAL, so the check-run API and `gh run view` name the check and the page
+// without the step summary (which the API does not serve). This gate grades live URLs, not files
+// of the repo, so there is no `file=`/`line=`: the location — the page URL, or the origin for a
+// site-file check — is in the message, `<check> at <url>`. Never the finding's msg: that carries
+// page text, and the report in the job log already has it.
+export function annotation(x, level = 'error') {
+  const where = x.where ? ` at ${x.where}` : '';
+  return `::${level} title=${escapeProperty(`seo-aeo ${x.id}`)}::${escapeData(safe(`${x.id}${where}`, 300))}`;
+}
+
+// The annotation lines for a run: CRITICALs only (T0, or a T1 this caller promoted — exactly what
+// the verdict's `critical:` count counts). `level` is 'error' when the run blocks, 'warning' when
+// it only reports. GitHub keeps 10 annotations per level per step, so past `cap` one line says how
+// many were left out; the report lists every finding either way.
+export function annotations(graded, level = 'error', cap = 10) {
+  const crits = graded.filter((x) => x.sev === SEV.CRIT);
+  const out = crits.slice(0, cap).map((x) => annotation(x, level));
+  if (crits.length > cap) out.push(`seo-aeo: ${crits.length - cap} more critical finding(s) not annotated (GitHub keeps ${cap} per step) — the report above lists them all.`);
+  return out;
+}

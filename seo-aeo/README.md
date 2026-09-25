@@ -91,6 +91,33 @@ with:
 Only the T1 IDs in the table above are promotable. The CRITICAL core (`http-200`, `title-present`,
 `h1-present`) is always on and cannot be disabled.
 
+## Where to read the result — job log, annotations, step summary
+
+Since **v1.18.0** the report is in three places, so "why did it block?" never needs a browser:
+
+- **Job log** — the whole report, the same lines as the step summary, byte for byte:
+  `gh run view <run-id> --log-failed` (or `--log`). Before v1.18.0 the log said only
+  `Process completed with exit code 1`.
+- **Annotations** — one per CRITICAL (a T0, or a T1 you promoted), at the end of the log:
+  `::error title=seo-aeo <check>::<check> at <url>`, where `<url>` is the page, or the origin for a
+  site-file check (`robots-txt`, `sitemap`, …). There is no `file=`: this gate grades live URLs, not
+  files of your repo, so the location is in the message. `gh run view <run-id>` lists them under
+  ANNOTATIONS; the API has them at `gh api repos/<owner>/<repo>/check-runs/<job-id>/annotations`. A
+  report-only run (`fail-on-critical: false`) annotates at `::warning` instead. GitHub keeps 10 per
+  step; past that, one log line counts the rest (the report lists every finding either way). A WARN or
+  INFO finding is never annotated. A sitemap/URL list that resolves to nothing is the one CRITICAL
+  without a check id; it annotates as `no-urls-resolved` (at the sitemap, when one was given).
+- **Step summary** — unchanged: the same report, rendered.
+
+Page text never reaches the start of a log line, where the runner would read it as a workflow
+command: every page-controlled string (a title, a canonical, a `<loc>`, a fetch error) goes through
+`safe()`, which strips CR/LF and the markdown and bracket characters (so neither `::…` nor the
+legacy `##[…]` form can be spelled), and every report line starts with the gate's own text. An
+annotation carries the check id and the URL (which may come from the site's own sitemap), never a
+finding's message, and its values go through `safe()` and are escaped (`%`, CR, LF, and `:`/`,` in
+properties). Off Actions (a local run) the report prints once to stdout, with no
+annotations.
+
 ## AEO / GEO
 
 AEO/GEO is first-class here, not a footnote:
@@ -114,12 +141,22 @@ Content *quality* (quotable answers, entity-chain depth, render proof) stays the
 ## Self-test
 
 `node scripts/selftest.mjs` runs the engine against offline fixtures (no network) and asserts
-each defect class — the regression guard. It also runs in CI (`.github/workflows/selftest.yml`).
+each defect class — the regression guard. Its **end-to-end** leg runs the real `check.mjs` as a
+process against a local `node:http` server (127.0.0.1 only) whose hostile page plants workflow
+commands in `<html lang>` and a canonical. It asserts the job log carries the whole report byte for
+byte, one annotation per CRITICAL (the promoted T1 included, none for a WARN), no planted command at
+the start of a line, a local run printing once with no commands (stdout a socket, as node's
+child_process gives it — the case that crashes an `appendFileSync('/dev/stdout')` fallback on Linux),
+report-only annotating as `::warning`, an unwritable summary still reaching the log under the
+caller's exit setting, and the two early exits that run before the first `await`. 21 targeted
+mutants each turn it red. It runs in CI (`.github/workflows/seo-aeo-selftest.yml`).
 
 ## Implementation
 
-`scripts/checks.mjs` — pure, network-free check engine (unit-tested by `selftest.mjs`).
+`scripts/checks.mjs` — pure, network-free check engine, plus the report's `safe()` and the
+annotation encoding (all unit-tested by `selftest.mjs`).
 `scripts/check.mjs` — CLI: builds the URL list (sitemap expansion + retry), fetches JS-disabled
 with one transient-retry + manual redirect probes, renders a per-page report to
-`GITHUB_STEP_SUMMARY`, exits non-zero only on a CRITICAL under `fail-on-critical`. `cheerio` is the
+`GITHUB_STEP_SUMMARY` and the job log, annotates each CRITICAL, exits non-zero only on a CRITICAL
+under `fail-on-critical`. `cheerio` is the
 sole dependency (lockfile-pinned, installed with `npm ci --ignore-scripts`).
