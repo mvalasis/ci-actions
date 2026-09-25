@@ -20,6 +20,10 @@ const ids = (fs_) => fs_.map((x) => x.id);
 const sevOf = (fs_, id) => fs_.filter((x) => x.id === id).map((x) => x.sev);
 
 const REAL_KEY = '0x4AAAAAAABkMYinukE8nzYd'; // shape of a real Turnstile sitekey
+// Google's documented reCAPTCHA universal test site key — public, and deliberately NOT
+// named *KEY: spelled inline as data-sitekey="<value>", gitleaks' generic-api-key read it
+// as a credential (a T0 critical in the security-baseline self-scan).
+const RECAPTCHA_UNIVERSAL_TEST = '6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI';
 const A = (html, opts = {}) => analyzeForms({ requestUrl: opts.url || 'https://example.com/contact/', html, endpointMap: opts.map || [], extraTestKeys: opts.extra || [] });
 
 console.log('\n# sitekey classification');
@@ -28,7 +32,7 @@ check('Turnstile force-pass 1x…AA → test', classifySitekey('1x00000000000000
 check('Turnstile force-block 2x…AB → test', classifySitekey('2x00000000000000000000AB') === 'test');
 check('Turnstile force-challenge 3x…FF → test', classifySitekey('3x00000000000000000000FF') === 'test');
 check('all-zeros placeholder 0x000…0 → test (the epn fallback)', classifySitekey('0x0000000000000000000000') === 'test');
-check('reCAPTCHA universal test key → test', classifySitekey('6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI') === 'test');
+check('reCAPTCHA universal test key → test', classifySitekey(RECAPTCHA_UNIVERSAL_TEST) === 'test');
 check('hCaptcha test key → test', classifySitekey('10000000-ffff-ffff-ffff-000000000001') === 'test');
 check('empty/missing → missing', classifySitekey('') === 'missing' && classifySitekey(null) === 'missing' && classifySitekey('  ') === 'missing');
 check('extra exact value → test', classifySitekey(REAL_KEY, [REAL_KEY]) === 'test');
@@ -80,7 +84,7 @@ console.log('\n# page analyzer — the epn shape (static data-sitekey + action a
   check('no widget + no map match → WARN no-gated-form', sevOf(findings, 'no-gated-form').includes(SEV.WARN) && surfaces.length === 0);
 }
 {
-  const { findings } = A(`<form action="/x"><div class="g-recaptcha" data-sitekey="6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI"></div></form>`);
+  const { findings } = A(`<form action="/x"><div class="g-recaptcha" data-sitekey="${RECAPTCHA_UNIVERSAL_TEST}"></div></form>`);
   check('reCAPTCHA widget with Google test key → CRITICAL', sevOf(findings, 'sitekey-real').includes(SEV.CRIT));
 }
 
