@@ -12,7 +12,9 @@ bypass) ONLY to the internal host (LINKCHECK_HOST, or the seed sitemap
 hosts) and its subdomains, re-scoped per redirect hop — never to a
 cross-host child-sitemap <loc> or redirect target. curl reads the header
 from a mode-600 file, never from its argv or env. Uses a real-browser
-UA so the fetch isn't challenged on cloud-runner IPs.
+UA so the fetch isn't challenged on cloud-runner IPs. A body that
+declares a DOCTYPE, or runs past the protocol's 50 MB before or after
+gunzip, is refused before it is parsed (see parse()).
 
 # lint-allow-no-crash-guard: this is a PIPELINE STAGE, not a gate, and it has no
 # report-mode input to consult. Its whole output is the URL list the crawl runs
@@ -29,13 +31,18 @@ UA so the fetch isn't challenged on cloud-runner IPs.
 """
 import atexit
 import gzip
+import io
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import xml.etree.ElementTree as ET
+# semgrep's use-defused-xml flags the stdlib import itself; it cannot see parse(),
+# which refuses a DTD before ElementTree reads a byte. defusedxml would be this
+# repo's first Python dependency, for one handler.
+import xml.etree.ElementTree as ET  # nosemgrep: python.lang.security.use-defused-xml.use-defused-xml
 from urllib.parse import urlsplit
+from xml.parsers import expat  # nosemgrep: python.lang.security.use-defused-xml.use-defused-xml
 
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -45,6 +52,7 @@ TOKEN = os.environ.get("VERIFY_HOMEPAGE_TOKEN", "")
 INTERNAL = os.environ.get("LINKCHECK_HOST", "").lower()
 NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
 MAX_HOPS = 8
+MAX_SITEMAP_BYTES = 52_428_800   # the protocol's own per-file limit (sitemaps.org: 50 MB)
 
 # Hosts allowed to receive the WAF-bypass token. Seeded in main() from
 # LINKCHECK_HOST (when the action passes it) plus every seed sitemap URL's host,
@@ -86,6 +94,47 @@ def _token_header():
     return _HDR_PATH
 
 
+# A hostile or broken sitemap must not be able to exhaust the machine parsing it.
+# The body can come from any host a sitemap index or a redirect names, not only
+# from the caller's own site.
+#
+# ENTITY EXPANSION (billion laughs). ElementTree never resolves an EXTERNAL entity,
+# but it leaves internal expansion to whatever libexpat Python links, and only
+# expat >= 2.4.1 bounds it. macOS's system Python 3.9 links 2.2.8, where 487 bytes
+# expanded to 30 MB in half a second (2026-09-25). An entity can be declared only
+# inside a DTD, and a sitemap never has one (the protocol is XML-Schema-defined),
+# so parse() refuses any DOCTYPE outright. The refusal runs INSIDE expat, over the
+# bytes ElementTree then parses, so a UTF-16 body or a BOM cannot hide the
+# declaration from it the way they would from a byte search.
+#
+# SIZE. The body is capped at the protocol's 50 MB twice: as read back from curl,
+# and again as gunzip inflates it, so a small .gz cannot inflate past the cap.
+class Refused(ValueError):
+    """A body this script will not parse: a DOCTYPE, or over MAX_SITEMAP_BYTES."""
+
+
+def _refuse_doctype(name, *_):
+    # StartDoctypeDeclHandler fires as the DOCTYPE opens, before its internal
+    # subset (where every entity would be declared) is read.
+    raise Refused(f"refused: it declares <!DOCTYPE {name}>, which a sitemap never "
+                  "does (an HTML page, or an entity-expansion payload)")
+
+
+def _capped(data, what):
+    if len(data) > MAX_SITEMAP_BYTES:
+        raise Refused(f"refused: {what} is over the sitemap protocol's "
+                      f"{MAX_SITEMAP_BYTES:,}-byte cap")
+    return data
+
+
+def parse(data):
+    """The ElementTree root of a sitemap body, refusing any DOCTYPE first."""
+    guard = expat.ParserCreate()
+    guard.StartDoctypeDeclHandler = _refuse_doctype
+    guard.Parse(data, True)
+    return ET.fromstring(data)
+
+
 def fetch(url):
     # Shell out to curl rather than urllib: the WP edge can enforce a hardened
     # TLS floor that macOS's bundled LibreSSL-Python fails to negotiate; curl
@@ -102,7 +151,8 @@ def fetch(url):
             env = {k: v for k, v in os.environ.items() if k != "VERIFY_HOMEPAGE_TOKEN"}
             wo = subprocess.run(cmd + [cur], capture_output=True, check=True,
                                 env=env).stdout.decode("utf-8", "ignore").split()
-            data = open(tf.name, "rb").read()
+            with open(tf.name, "rb") as f:
+                data = _capped(f.read(MAX_SITEMAP_BYTES + 1), "the body")
         code = int(wo[0]) if wo and wo[0].isdigit() else 0
         nxt = wo[1] if len(wo) > 1 else ""
         if 300 <= code < 400 and nxt:
@@ -110,7 +160,8 @@ def fetch(url):
             continue
         break
     if cur.endswith(".gz") or data[:2] == b"\x1f\x8b":
-        data = gzip.decompress(data)
+        with gzip.GzipFile(fileobj=io.BytesIO(data)) as gz:
+            data = _capped(gz.read(MAX_SITEMAP_BYTES + 1), "the gunzipped body")
     return data
 
 
@@ -119,7 +170,7 @@ def collect(url, seen_sitemaps, pages):
         return
     seen_sitemaps.add(url)
     try:
-        root = ET.fromstring(fetch(url))
+        root = parse(fetch(url))
     except Exception as exc:  # noqa: BLE001 — one bad child shouldn't abort the run
         print(f"WARN: failed to fetch/parse {url}: {exc}", file=sys.stderr)
         return

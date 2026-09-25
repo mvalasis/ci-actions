@@ -16,6 +16,10 @@ It also guards where the token may sit on the RUNNER (v1.15.2): an argv-logging
 `curl` stands first on PATH for the whole run and records each call's argv, its
 environment and the mode of any `-H @file` it is handed.
 
+And that a hostile sitemap cannot exhaust the machine parsing it (v1.16.1): a
+DOCTYPE is refused inside expat before ElementTree runs, and the body is capped at
+the protocol's 50 MB as read and as gunzipped (hostile_sitemap_checks).
+
 Run: `python3 linkcheck/scripts/selftest.py`  (exit 0 = pass, 1 = a leak/regression)
 """
 import atexit
@@ -98,6 +102,20 @@ def _make_handler(label):
             elif p == "/page-a":         # end to end: one internal and one external link
                 self._ok((f'<html><a href="http://a.localhost:{INT_PORT}/int-landing">i</a>'
                           f'<a href="http://127.0.0.1:{EXT_PORT}/ext-landing">e</a></html>').encode())
+            elif p.startswith("/bytes-"):    # n bytes as-is — the body cap
+                self._ok(b"x" * int(p[len("/bytes-"):]))
+            elif p.startswith("/gz-"):       # n bytes, gzipped, no Content-Encoding — the inflate cap
+                import gzip as _gz
+                self._ok(_gz.compress(b"\0" * int(p[len("/gz-"):])))
+            elif p == "/dtd-index.xml":      # end to end: a DOCTYPE child beside a real one
+                self._ok(('<?xml version="1.0"?><sitemapindex xmlns="http://www.sitemaps.org/'
+                          f'schemas/sitemap/0.9"><sitemap><loc>http://localhost:{INT_PORT}/'
+                          f'dtd-child.xml</loc></sitemap><sitemap><loc>http://localhost:{INT_PORT}'
+                          '/sitemap.xml</loc></sitemap></sitemapindex>').encode())
+            elif p == "/dtd-child.xml":      # a HARMLESS entity: only the refusal keeps its URL out
+                self._ok(('<?xml version="1.0"?><!DOCTYPE urlset [<!ENTITY u "http://localhost:'
+                          f'{INT_PORT}/from-a-dtd">]><urlset xmlns="http://www.sitemaps.org/'
+                          'schemas/sitemap/0.9"><url><loc>&u;</loc></url></urlset>').encode())
             else:
                 self._ok(b"<html>DIRECT</html>")
 
@@ -296,6 +314,131 @@ def extraction_checks(linkcheck):
           a_of('<use xlink:href="#icon-badResponse"/>') == [])
 
 
+SM_NS = 'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
+
+
+def _refusal(sitemap, data):
+    """parse()'s own refusal message for `data`, or '' — an error from expat does
+    not count, since that is expat's limit (or a syntax error), not the guard."""
+    try:
+        sitemap.parse(data)
+    except sitemap.Refused as e:
+        return str(e)
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def _parsed(sitemap, data):
+    """parse()'s root for `data`, or None however it failed."""
+    try:
+        return sitemap.parse(data)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def hostile_sitemap_checks(sitemap):
+    """A hostile sitemap cannot exhaust the machine that parses it (v1.16.1).
+
+    The security-baseline self-scan (run 36124011254) flagged the stdlib XML
+    parse as use-defused-xml. ElementTree leaves entity expansion to the libexpat
+    Python links, and only expat >= 2.4.1 bounds it: on macOS's system Python 3.9
+    (expat 2.2.8) 487 bytes expanded to 30 MB in half a second. parse() now
+    refuses any DOCTYPE inside expat before ElementTree runs, and fetch() caps
+    the body at the protocol's 50 MB as read and again as gunzipped.
+
+    The positive controls come first, because a guard that refused everything
+    would pass every refusal below. The HARMLESS-entity case is the one a missing
+    guard fails on every expat. The bomb alone proves nothing on a Linux runner,
+    whose expat refuses it by its own limit, and on the Mac it would expand ~3 GB
+    before failing at all — so it runs only once the guard is proven present.
+    """
+    print("sitemap-urls.py — a DOCTYPE is refused before any entity expands; bodies are capped")
+    print(f"  (this Python links {sitemap.expat.EXPAT_VERSION}; expansion is bounded by expat "
+          "itself only from 2.4.1)")
+
+    # --- still parses what real generators emit --------------------------------
+    wp = _parsed(sitemap, (
+        '﻿<?xml version="1.0" encoding="UTF-8"?>'
+        '<?xml-stylesheet type="text/xsl" href="//example.com/main-sitemap.xsl"?>'
+        f'<urlset {SM_NS}><url><loc>https://example.com/a/</loc></url></urlset>').encode())
+    check("a WordPress-shaped urlset (BOM, XML declaration, xml-stylesheet PI) still parses",
+          wp is not None and [e.text for e in wp.findall(".//sm:url/sm:loc", sitemap.NS)]
+          == ["https://example.com/a/"])
+    idx = _parsed(sitemap, (f'<sitemapindex {SM_NS}><sitemap><loc>https://example.com/s.xml'
+                            '</loc></sitemap></sitemapindex>').encode())
+    check("a sitemapindex still parses", idx is not None and idx.tag.endswith("sitemapindex"))
+    u16 = _parsed(sitemap, (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        f'<urlset {SM_NS}><url><loc>https://example.com/b/</loc></url></urlset>').encode("utf-16"))
+    check("a UTF-16 sitemap still parses", u16 is not None
+          and [e.text for e in u16.findall(".//sm:url/sm:loc", sitemap.NS)] == ["https://example.com/b/"])
+
+    # --- the refusals ------------------------------------------------------------
+    benign = ('<?xml version="1.0"?><!DOCTYPE urlset [<!ENTITY x "https://example.com/c/">]>'
+              f'<urlset {SM_NS}><url><loc>&x;</loc></url></urlset>').encode()
+    guarded = "<!DOCTYPE urlset>" in _refusal(sitemap, benign)
+    check("a DOCTYPE is refused even when its entity is harmless (so it is the guard, "
+          "not an expat limit, that refuses)", guarded)
+    if guarded:
+        ents = ['<!ENTITY l0 "lol">'] + [f'<!ENTITY l{i} "{("&l%d;" % (i - 1)) * 10}">'
+                                         for i in range(1, 10)]
+        bomb = (f'<?xml version="1.0"?><!DOCTYPE urlset [{"".join(ents)}]>'
+                f'<urlset {SM_NS}><url><loc>&l9;</loc></url></urlset>').encode()
+        check("the billion-laughs payload (~3 GB once expanded) is refused, by the guard",
+              "<!DOCTYPE urlset>" in _refusal(sitemap, bomb))
+    else:
+        check("the billion-laughs payload — NOT run: with no guard it expands ~3 GB on "
+              "expat < 2.4.1", False)
+    check("…in UTF-16 too, where a byte search for '<!DOCTYPE' finds nothing",
+          "<!DOCTYPE urlset>" in _refusal(sitemap, benign.decode().replace(
+              '<?xml version="1.0"?>', '<?xml version="1.0" encoding="UTF-16"?>').encode("utf-16")))
+    check("an external-DTD DOCTYPE is refused too — the policy is 'no DTD', not 'no entity'",
+          "<!DOCTYPE urlset>" in _refusal(sitemap, (
+              '<?xml version="1.0"?><!DOCTYPE urlset SYSTEM "file:///etc/passwd">'
+              f'<urlset {SM_NS}/>').encode()))
+    check("an HTML page (a WAF challenge, an error page) is refused BY NAME, so the WARN "
+          "says what came back", "<!DOCTYPE html>" in _refusal(
+              sitemap, b'<!DOCTYPE html><html><body>Just a moment...</body></html>'))
+
+    # --- the size cap, as read and as inflated -----------------------------------
+    check("the cap is the protocol's own: 50 MB = 52,428,800 bytes (sitemaps.org)",
+          sitemap.MAX_SITEMAP_BYTES == 52_428_800)
+    base = f"http://localhost:{INT_PORT}"
+
+    def fetched(path):
+        try:
+            return len(sitemap.fetch(base + path))
+        except sitemap.Refused:
+            return "refused"
+        except Exception as exc:  # noqa: BLE001
+            return f"raised {exc!r}"
+
+    real_cap, sitemap.MAX_SITEMAP_BYTES = sitemap.MAX_SITEMAP_BYTES, 4096
+    try:
+        check("a body AT the cap is fetched", fetched("/bytes-4096") == 4096)
+        check("a body one byte over it is refused", fetched("/bytes-4097") == "refused")
+        check("a gzip body inflating to the cap is fetched", fetched("/gz-4096") == 4096)
+        check("a small gzip inflating one byte past it is refused (a gzip bomb)",
+              fetched("/gz-4097") == "refused")
+    finally:
+        sitemap.MAX_SITEMAP_BYTES = real_cap
+
+    # --- end to end: main() keeps the real child and drops the DOCTYPE one -------
+    tmp = tempfile.mkdtemp(prefix="lc-selftest-tmp.")
+    r = subprocess.run([sys.executable, os.path.join(HERE, "sitemap-urls.py"),
+                        f"{base}/dtd-index.xml"], capture_output=True, text=True, cwd=tmp,
+                       env=dict(os.environ, TMPDIR=tmp))
+    shutil.rmtree(tmp, True)
+    check("end to end: the real child's page is still listed, and the run exits 0",
+          r.returncode == 0 and f"{base}/page-a" in r.stdout.split())
+    check("end to end: nothing from the DOCTYPE child reaches the page list",
+          "from-a-dtd" not in r.stdout)
+    check("end to end: the refused child is WARNed by URL, with the reason",
+          f"WARN: failed to fetch/parse {base}/dtd-child.xml: refused: it declares "
+          "<!DOCTYPE urlset>" in r.stderr)
+
+
 def main():
     global INT_PORT, EXT_PORT
     int_srv, INT_PORT = _start("INT")
@@ -388,6 +531,7 @@ def main():
     check("is_allowed(localhost.evil.com) is False",
           not sitemap.is_allowed("http://localhost.evil.com/"))
 
+    hostile_sitemap_checks(sitemap)
     runner_checks()
 
     int_srv.shutdown()
@@ -400,7 +544,8 @@ def main():
     if FAILS:
         print(f"FAIL — {len(FAILS)} check(s) failed: {', '.join(FAILS)}")
         raise SystemExit(1)
-    print("PASS — token scoping, crash-guard attribution and the crawl-size floor hold.")
+    print("PASS — token scoping, the hostile-sitemap refusals, crash-guard attribution "
+          "and the crawl-size floor hold.")
 
 
 def crash_guard_checks():

@@ -49,6 +49,33 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.16.1** *(tag not yet cut; lands with the next `v1` move)* — `linkcheck` refuses a sitemap
+that declares a DOCTYPE, and caps every sitemap body at the protocol's 50 MB. `sitemap-urls.py`
+parsed whatever a sitemap URL returned with `xml.etree.ElementTree`, and that body can come from
+any host a sitemap index or a redirect names. ElementTree resolves no external entity, but it
+leaves internal entity expansion to the libexpat Python links, and only expat ≥ 2.4.1 bounds it.
+macOS's system Python 3.9 links 2.2.8, where a 487-byte document expanded to 30 MB in half a
+second; the billion-laughs payload is ~3 GB. Ubuntu runners link a bounding expat, so the
+exposure was local and self-hosted runs. `parse()` now runs a bare expat pass whose DOCTYPE
+handler raises, so the declaration is refused inside the parser, in any encoding, before
+ElementTree reads the bytes. An entity can only be declared in a DTD, and no sitemap has one.
+Separately, the gunzip that `.gz` sitemaps go through was unbounded on every platform. The body
+is now capped at 52,428,800 bytes as read back from curl and again as it inflates. A refused
+sitemap gets a `WARN: failed to fetch/parse <url>: refused: …` line that names the DOCTYPE
+(`<!DOCTYPE html>` for an HTML page), and contributes no pages, exactly like an unreachable one.
+Found by this repo's own security-baseline self-scan (run 36124011254, semgrep
+`use-defused-xml`). No dependency was added: `defusedxml` would have been the repo's first
+Python dependency, for one handler. The imports carry a `nosemgrep` for that rule, which flags
+the import and cannot see the guard. `scripts/selftest.py` gains 16 checks: real generator
+output still parses (BOM, `xml-stylesheet` PI, UTF-16); a DOCTYPE with a harmless entity is
+refused (the case a missing guard fails on every expat); then the billion-laughs payload, a
+UTF-16 DOCTYPE a byte search cannot see, an external-DTD DOCTYPE and an HTML page by name;
+both caps at their boundary; and end to end, an index whose DOCTYPE child is dropped with a
+WARN while its real sibling is listed. Each of 8 targeted mutants turns it red.
+**Caller-visible:** nothing. The seven callers' six live sitemap URLs (epn.one ×2,
+hlektrologos-vlaves.gr, lampakia.gr, lux-airport.lu, prevedourou.gr) expand to byte-identical
+URL lists under both versions: 5,668 URLs, zero WARNs (2026-09-25).
+
 **v1.16.0** — `security-baseline` prints its report to the **job log** as well as the step
 summary, and annotates every CRITICAL. The report went only to `$GITHUB_STEP_SUMMARY`, so
 `gh run view --log-failed` showed `Process completed with exit code 1` and nothing else, the
@@ -705,6 +732,17 @@ Keep a `scripts/linkcheck-allow.txt` in each caller repo (one URL per line,
 `#` comments). Any URL listed is treated as OK — use it only to silence
 genuinely-low-value legacy cruft, never to hide a real outage. It is read
 from **your** checkout, not from this action.
+
+### A hostile sitemap is refused, not parsed
+
+A sitemap body can come from any host your index or a redirect names. `sitemap-urls.py`
+refuses one that declares a DOCTYPE (the only place an entity can be declared, so the
+billion-laughs class ends there, whatever libexpat the machine links), and one over the
+protocol's 50 MB, as fetched or as gunzipped (v1.16.1). A refused sitemap contributes no
+pages and says why in a `WARN: failed to fetch/parse <url>: refused: …` line. An HTML page
+answering for a sitemap is named there as `<!DOCTYPE html>`. A lowercase `<!doctype html>`
+is not XML at all, so it fails as a syntax error, as it always did. A seed sitemap that is
+refused ends the run as `sitemap expansion produced no URLs`, with the WARN just above it.
 
 ### Token scoping & self-test
 
