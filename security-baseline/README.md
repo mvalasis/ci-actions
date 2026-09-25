@@ -89,6 +89,31 @@ conservative. A report-mode caller can **rehearse** a strict posture (`critical-
 `fail-on-critical: false`) to see what *would* block, at zero risk. Only the **T1** ids are
 promotable; the CRITICAL core is always on and cannot be disabled.
 
+## Where to read the result — job log, annotations, step summary
+
+Since **v1.16.0** the report is in three places, so "why did it block?" never needs a browser:
+
+- **Job log** — the whole report, the same lines as the step summary, byte for byte:
+  `gh run view <run-id> --log-failed` (or `--log`). Before v1.16.0 the log said only
+  `Process completed with exit code 1`.
+- **Annotations** — one per CRITICAL (a T0, or a T1 you promoted), at the end of the log:
+  `::error file=<path>,line=<n>,title=security-baseline <check>::<check> <rule> at <path>:<n>`.
+  `gh run view <run-id>` lists them under ANNOTATIONS; the API has them at
+  `gh api repos/<owner>/<repo>/check-runs/<job-id>/annotations`. A run that does not enforce
+  (`report-mode`, `fail-on-critical: false`) annotates at `::warning` instead. GitHub keeps 10 per
+  step; past that, one log line counts the rest (the report lists every finding either way). A
+  WARN or INFO finding is never annotated.
+- **Step summary** — unchanged: the same report, rendered.
+
+No secret value reaches any of them. The log carries the summary's own lines: gitleaks runs with
+`--redact` (a finding reads `generic-api-key ****`; if gitleaks ever returned the value anyway,
+`redact()` would keep first4…last4), and trufflehog's raw credential is never read — a verified
+secret is detector + `file:line`. An annotation names a secret by rule id only, never by its
+message. Every tool-controlled string is `safe()`-stripped and every report line starts with
+code-controlled text, so a hostile path cannot reach line-start and forge a workflow command;
+annotation values are escaped (`%`, CR, LF, and `:`/`,` in properties) so it cannot rewrite one.
+Off Actions (a local run) the report prints once to stdout, with no annotations.
+
 ## Sovereignty — honest egress enumeration
 
 The gate's selling point is air-gapped, EU-runner-safe operation. To be precise rather than
@@ -216,6 +241,13 @@ page — now caught by **`wp-rest-error-detail-laundered`** (see §Honest limits
   (`scan.mjs`'s three clauses + the `action.yml` env) against those files' source, because
   `firstparty.mjs` can be perfect while the CLI feeds it the caller's owner alone — which is the
   2026-08 bug restored, with every unit assertion still green. The regression guard.
+  Its **end-to-end** leg runs the real `scan.mjs` as a process against stub scanners on a two-commit
+  fixture repo: a gitleaks that ignores `--redact` and a trufflehog whose `Raw` carries the value,
+  both planting values minted at run time. It asserts the job log carries the whole report byte for
+  byte, one annotation per CRITICAL (none for a WARN), no 8-character run of a planted value in the
+  log, the summary or stderr, `--redact` on every gitleaks call, a local run printing once with no
+  commands, report-mode annotating as `::warning`, and an unwritable summary still reaching the log
+  under the caller's exit setting. 18 targeted mutants each turn it red.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
 
@@ -227,7 +259,8 @@ Both run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a repor
 truth; unit-tested by `selftest.mjs`). `scripts/firstparty.mjs` — pure first-party owner resolution
 and the `gha-unpinned-action` post-filter (see §First-party ownership); kept out of `tiers.mjs`
 because it is an ownership question, not a severity one. `scripts/scan.mjs` — CLI: resolves the diff base, runs the
-scanners, normalizes their output into `{checkId, file, line, msg}` findings, tiers + promotes via
-the engine, renders a per-check report to `GITHUB_STEP_SUMMARY`, exits non-zero only on a CRITICAL
-under `fail-on-critical`. Zero npm dependencies (pure Node 22). Tools are pinned binaries installed
+scanners, normalizes their output into `{checkId, rule, file, line, msg}` findings, tiers + promotes
+via the engine, renders a per-check report to `GITHUB_STEP_SUMMARY` and the job log, annotates each
+CRITICAL (`annotations()` in `tiers.mjs`), exits non-zero only on a CRITICAL under
+`fail-on-critical`. Zero npm dependencies (pure Node 22). Tools are pinned binaries installed
 in `action.yml`.

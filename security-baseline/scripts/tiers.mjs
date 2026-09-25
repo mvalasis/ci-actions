@@ -131,6 +131,41 @@ export const safe = (s, max = 200) => String(s == null ? '' : s)
   .slice(0, max);
 export const redact = (s) => { const v = String(s == null ? '' : s); return v.length <= 12 ? '****' : `${v.slice(0, 4)}…${v.slice(-4)}`; };
 
+// Workflow-command encoding — @actions/core's escaping, restated so the action stays dependency-free.
+// Data may not carry a line break (a new line is a new command); a property value may not carry `:`
+// or `,` either (they delimit properties). Without it a hostile path like `x.php,line=1::forged`
+// rewrites the annotation, and one carrying `\n::stop-commands::…` switches command processing off.
+export const escapeData = (s) => String(s == null ? '' : s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+export const escapeProperty = (s) => escapeData(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
+
+// One annotation per CRITICAL finding, so the check-run API and `gh run view` name the file, line and
+// rule without the step summary (which the API does not serve). The message is `<checkId> <rule> at
+// <file>:<line>` and NEVER `msg` — for a secret, msg carries the redacted value, and an annotation
+// identifies a secret by rule id alone. The location is repeated in the message because the job log
+// shows an annotation as its message only; `file=`/`line=` reach the annotation, not the log line.
+export function annotation(f, level = 'error') {
+  const file = String(f.file || '');
+  const line = Number.isInteger(+f.line) && +f.line > 0 ? +f.line : 0;
+  const isPath = file !== '' && !/^\(.*\)$/.test(file);            // '(history)' is not a path
+  const props = [];
+  if (isPath) props.push(`file=${escapeProperty(file)}`);
+  if (isPath && line) props.push(`line=${line}`);
+  props.push(`title=${escapeProperty(`security-baseline ${f.checkId}`)}`);
+  const where = isPath ? ` at ${file}${line ? `:${line}` : ''}` : '';
+  return `::${level} ${props.join(',')}::${escapeData(safe(`${f.checkId} ${f.rule || ''}`.trim() + where, 300))}`;
+}
+
+// The annotation lines for a graded run: CRITICALs only (T0, or a T1 this caller promoted — exactly what
+// BLOCKED counts). `level` is 'error' when the run blocks, 'warning' when it only reports (report-mode,
+// fail-on-critical:false). GitHub keeps 10 annotations per level per step, so past `cap` one line says
+// how many were left out; the report lists every finding either way.
+export function annotations(graded, level = 'error', cap = 10) {
+  const crits = graded.filter((f) => f.sev === SEV.CRIT);
+  const out = crits.slice(0, cap).map((f) => annotation(f, level));
+  if (crits.length > cap) out.push(`security-baseline: ${crits.length - cap} more critical finding(s) not annotated (GitHub keeps ${cap} per step) — the report above lists them all.`);
+  return out;
+}
+
 // RESERVED — declared in CHECKS so a FUTURE scanner can emit them with no engine change, but NO
 // adapter emits them today (see README §Honest limits). secret-worktree is a *local* pre-push
 // concern (a fresh CI checkout has no untracked/gitignored files to scan); license-denied /

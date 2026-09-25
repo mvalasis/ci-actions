@@ -1,7 +1,8 @@
 // security-baseline CLI — runs the air-gapped scanners, normalizes their output into findings,
-// tiers them via the pure engine (tiers.mjs), renders a per-check report to GITHUB_STEP_SUMMARY,
-// and exits non-zero only when a CRITICAL (T0, or a per-caller-promoted T1) fires under
-// fail-on-critical. Mirrors seo-aeo's check.mjs shape.
+// tiers them via the pure engine (tiers.mjs), renders a per-check report to GITHUB_STEP_SUMMARY and
+// the same report to the job log, annotates each CRITICAL (`::error file=…,line=…::`), and exits
+// non-zero only when a CRITICAL (T0, or a per-caller-promoted T1) fires under fail-on-critical.
+// Mirrors seo-aeo's check.mjs shape.
 //
 // EGRESS (honest enumeration — see README §Sovereignty): NO source ever leaves the runner.
 //   - semgrep: --metrics=off (telemetry off). The default `p/security-audit` registry config is
@@ -15,7 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { SEV, evaluate, parsePromote, groupByCheck, sevRank, CHECKS, safe, redact } from './tiers.mjs';
+import { SEV, evaluate, parsePromote, groupByCheck, sevRank, CHECKS, safe, redact, annotations } from './tiers.mjs';
 import { firstPartyOwners, filterFirstPartyGha } from './firstparty.mjs';
 
 const env = process.env;
@@ -56,6 +57,13 @@ const BIN = {
 };
 
 const summaryFile = env.GITHUB_STEP_SUMMARY || '/dev/stdout';
+// The job LOG gets the same report. The step summary needs a signed-in browser: `gh run view
+// --log-failed` showed only "exit code 1", the check-run API's `output` was empty, and a headless
+// session learned THAT the gate blocked, never why (2026-09-23, luxairportlu 739c623). Off Actions
+// the summary already IS stdout, so a mirror would print it twice.
+const MIRROR = summaryFile !== '/dev/stdout';
+const ANNOTATE = env.GITHUB_ACTIONS === 'true';   // runner commands are for the runner, not a local run
+const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
 const lines = [];
 const note = (s = '') => lines.push(s);
 const ICON = { critical: '❌', warn: '⚠️', info: 'ℹ️', ok: '✅' };
@@ -103,8 +111,12 @@ function semgrepRun(configs, targets, { severity } = {}) {
   let json; try { json = JSON.parse(r.stdout || '{}'); } catch { return { ran: true, results: [], parseError: true }; }
   return { ran: true, results: json.results || [] };
 }
+// `rule` names the rule in annotations. A registry id is a dotted namespace worth keeping whole; a
+// vendored rule's id arrives prefixed with its config's filesystem path (`home.runner.work.….rules.
+// <id>`), so only the last segment is kept there — its checkId already says which pack it came from.
 const sgFinding = (r, checkId) => ({
-  checkId, tool: 'semgrep', file: r.path, line: (r.start && r.start.line) || 0,
+  checkId, tool: 'semgrep', rule: checkId === 'sast-critical' ? (r.check_id || '') : String(r.check_id || '').split('.').pop(),
+  file: r.path, line: (r.start && r.start.line) || 0,
   cwe: (r.extra && r.extra.metadata && [].concat(r.extra.metadata.cwe || []).join(',')) || '',
   msg: (r.extra && r.extra.message) || r.check_id || '',
 });
@@ -158,14 +170,14 @@ function collectGitleaks() {
   // T0 — diff range (today's block).
   const diffArgs = DIFF && BASE ? ['--log-opts', `${BASE}..HEAD`] : [];
   const diff = gitleaksRun(diffArgs);
-  for (const f of diff.findings) out.push({ checkId: 'secret-pattern', tool: 'gitleaks', file: f.File, line: f.StartLine || 0, msg: `${f.RuleID || 'secret'} (${redact(f.Secret)})`, cwe: 'CWE-798' });
+  for (const f of diff.findings) out.push({ checkId: 'secret-pattern', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, msg: `${f.RuleID || 'secret'} (${redact(f.Secret)})`, cwe: 'CWE-798' });
   // T2 — full-history baseline (WARN; never blocks). Dedup against the diff hits by file+rule.
   if (ENABLE_HISTORY) {
     const seen = new Set(diff.findings.map((f) => `${f.File}:${f.RuleID}`));
     const hist = gitleaksRun([]);
     for (const f of hist.findings) {
       const k = `${f.File}:${f.RuleID}`; if (seen.has(k)) continue; seen.add(k);
-      out.push({ checkId: 'secrets-history', tool: 'gitleaks', file: f.File, line: f.StartLine || 0, msg: `${f.RuleID || 'secret'} in history (${redact(f.Secret)}) — rotate at the provider, then scrub history`, cwe: 'CWE-798' });
+      out.push({ checkId: 'secrets-history', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, msg: `${f.RuleID || 'secret'} in history (${redact(f.Secret)}) — rotate at the provider, then scrub history`, cwe: 'CWE-798' });
     }
   }
   return out;
@@ -193,7 +205,7 @@ function collectTrufflehog() {
     if (o.Verified !== true) continue;
     const g = (o.SourceMetadata && o.SourceMetadata.Data && o.SourceMetadata.Data.Git) || {};
     out.push({
-      checkId: scoped ? 'secret-verified' : 'secrets-history', tool: 'trufflehog',
+      checkId: scoped ? 'secret-verified' : 'secrets-history', tool: 'trufflehog', rule: o.DetectorName || 'secret',
       file: g.file || '(history)', line: g.line || 0, cwe: 'CWE-798',
       msg: `🔴 VERIFIED-LIVE ${o.DetectorName || 'secret'} — ROTATE NOW${scoped ? '' : ' (pre-existing in history — WARN, not a block; rotate then scrub history)'}`,
     });
@@ -226,7 +238,7 @@ function collectOsv() {
       for (const g of (pkg.groups || [])) {
         const score = parseFloat(g.max_severity || '0') || 0;
         const ids = (g.ids || []).slice(0, 3).join(', ');
-        out.push({ checkId: scaCheckId(score), tool: 'osv-scanner', file: src, line: 0, msg: `${name}@${ver} — ${ids}${score ? ` (CVSS ${score})` : ' (no CVSS)'} — present-in-tree, reachability unknown`, cwe: 'CWE-1395' });
+        out.push({ checkId: scaCheckId(score), tool: 'osv-scanner', rule: ids, file: src, line: 0, msg: `${name}@${ver} — ${ids}${score ? ` (CVSS ${score})` : ' (no CVSS)'} — present-in-tree, reachability unknown`, cwe: 'CWE-1395' });
       }
     }
   }
@@ -243,13 +255,19 @@ function collectHadolint() {
   for (const df of targets) {
     const r = run(BIN.hadolint, ['--format', 'json', df], { timeout: 60000 });
     let arr = []; try { arr = JSON.parse(r.stdout || '[]'); } catch { arr = []; }
-    for (const h of arr) if (h.level === 'error' || h.level === 'warning') out.push({ checkId: 'dockerfile-lint', tool: 'hadolint', file: df, line: h.line || 0, msg: `${h.code}: ${h.message}`, cwe: 'CWE-1395' });
+    for (const h of arr) if (h.level === 'error' || h.level === 'warning') out.push({ checkId: 'dockerfile-lint', tool: 'hadolint', rule: h.code || '', file: df, line: h.line || 0, msg: `${h.code}: ${h.message}`, cwe: 'CWE-1395' });
   }
   return out;
 }
 
 function hashish(s) { let h = 0; for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; } return h; }
-function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }
+// Report lines already echoed to the job log, so the crash path's re-flush echoes only the new ones.
+// The log goes first: when the summary write is what throws, the report is already readable.
+let mirrored = 0;
+function flush() {
+  if (MIRROR) for (; mirrored < lines.length; mirrored++) say(lines[mirrored]);
+  fs.appendFileSync(summaryFile, lines.join('\n') + '\n');
+}
 
 // ============================ main ============================
 (async () => {
@@ -288,11 +306,24 @@ function flush() { fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); }
   if (infra.length) { note('### ℹ️ scanner notes'); infra.forEach((m) => note(`- ${safe(m, 240)}`)); note(''); }
 
   note(`**critical: ${crit} · warnings: ${warn} · info: ${info}**`);
-  if (REPORT_MODE && crit > 0) { note(`⚠️ REPORT-MODE — ${crit} critical finding(s) would BLOCK if enforcing. ${safe(env.REPORT_MODE_REASON || '')}`); flush(); process.exit(0); }
-  if (blocked) { note(`BLOCKED — ${crit} critical finding(s). Fix the ❌ items, or waive with documented rationale.`); flush(); process.exit(1); }
+  // Every verdict leaves through here: the report, then one annotation per CRITICAL — `::error` when
+  // this run blocks, `::warning` when it only reports (report-mode, fail-on-critical: false).
+  const finish = (code) => {
+    flush();
+    if (ANNOTATE) for (const a of annotations(graded, blocked ? 'error' : 'warning')) say(a);
+    process.exit(code);
+  };
+  if (REPORT_MODE && crit > 0) { note(`⚠️ REPORT-MODE — ${crit} critical finding(s) would BLOCK if enforcing. ${safe(env.REPORT_MODE_REASON || '')}`); finish(0); }
+  if (blocked) { note(`BLOCKED — ${crit} critical finding(s). Fix the ❌ items, or waive with documented rationale.`); finish(1); }
   if (crit > 0) note(`report-only — ${crit} critical finding(s) would BLOCK under \`fail-on-critical: true\`.`);
   else note('PASS — no critical findings.');
-  flush(); process.exit(0);
-})().catch((e) => { note(`- ❌ security-baseline crashed: ${safe(String(e && e.stack || e), 400)}`); flush(); process.exit(FAIL_ON_CRITICAL && !REPORT_MODE ? 1 : 0); });
+  finish(0);
+})().catch((e) => {
+  note(`- ❌ security-baseline crashed: ${safe(String(e && e.stack || e), 400)}`);
+  // flush() echoes to the log before it touches the summary, so when the summary sink is what failed,
+  // this line still reaches the log — and the exit stays the caller's setting, not an unhandled throw.
+  try { flush(); } catch { /* summary sink unwritable; the job log already has the report */ }
+  process.exit(FAIL_ON_CRITICAL && !REPORT_MODE ? 1 : 0);
+});
 
 function baseOf(arr) { return arr[0] ? arr[0].sev : SEV.WARN; }

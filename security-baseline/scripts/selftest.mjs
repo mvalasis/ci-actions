@@ -1,13 +1,17 @@
-// Offline self-test for the security-baseline tier engine. No network, no scanners — feeds
+// Offline self-test for the security-baseline tier engine. No network, no real scanners — feeds
 // canned findings to the pure engine and asserts the tiering / promotion / block decision and
-// the redaction disclosure guard. Run: node scripts/selftest.mjs (also runs in CI). Exits
+// the redaction disclosure guard; then runs the real scan.mjs against stub scanners to assert
+// what reaches the job log. Run: node scripts/selftest.mjs (also runs in CI). Exits
 // non-zero on any regression — the gate's own regression guard, mirroring seo-aeo/selftest.mjs.
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   SEV, CHECKS, T0_CHECKS, T1_CHECKS, T2_CHECKS, RESERVED_CHECKS, evaluate, parsePromote,
-  isPromotable, baseSev, safe, redact,
+  isPromotable, baseSev, safe, redact, escapeData, escapeProperty, annotation, annotations,
 } from './tiers.mjs';
 import { firstPartyOwners, ownerOf, parseOwners, refFromText, readLineFromDisk, filterFirstPartyGha } from './firstparty.mjs';
 
@@ -289,6 +293,172 @@ console.log('\n# the OWNERSHIP WIRING — scan.mjs + action.yml, not just the pu
   // that shadow silently restores the pre-split behaviour with two green sources of truth.
   check('action.yml does NOT shadow the ambient GITHUB_ACTION_REPOSITORY', !/^\s+GITHUB_ACTION_REPOSITORY:/m.test(act));
   check('action.yml declares the first-party-owners input', /^\s{2}first-party-owners:/m.test(act));
+}
+
+console.log('\n# workflow-command encoding + annotations (pure)');
+{
+  check('escapeData encodes % CR LF', escapeData('a%b\r\nc') === 'a%25b%0D%0Ac');
+  check('escapeProperty also encodes : and ,', escapeProperty('a:b,c%') === 'a%3Ab%2Cc%25');
+  const f = { checkId: 'secret-pattern', rule: 'generic-api-key', file: 'app/config.php', line: 3, msg: 'generic-api-key (abcd…wxyz)', sev: SEV.CRIT };
+  const want = '::error file=app/config.php,line=3,title=security-baseline secret-pattern::secret-pattern generic-api-key at app/config.php:3';
+  check('annotation = file, line, title + `<checkId> <rule> at <file>:<line>`', annotation(f) === want, annotation(f));
+  check('annotation never carries msg (a secret is named by rule id, never by value)', !annotation(f).includes('abcd') && !annotation(f).includes('wxyz'));
+  check('annotation level is the caller\'s', annotation(f, 'warning').startsWith('::warning file='));
+  const hist = annotation({ ...f, checkId: 'secrets-history', file: '(history)', line: 0 });
+  check("'(history)' is not a path: no file=/line=, no location", hist === '::error title=security-baseline secrets-history::secrets-history generic-api-key', hist);
+  check('line 0 drops line= but keeps file=', annotation({ ...f, line: 0 }) === '::error file=app/config.php,title=security-baseline secret-pattern::secret-pattern generic-api-key at app/config.php');
+  // A HOSTILE path must stay one command with exactly the three properties we set. Unescaped, the `,`
+  // would add `line=1` and the newline would start a second command that stops command processing.
+  const evil = annotation({ ...f, file: 'x.php,line=1::forged\n::stop-commands::tok' });
+  const props = (evil.match(/^::error (.*?)::/) || [])[1] || '';
+  check('a hostile path stays ONE line', !/[\r\n]/.test(evil));
+  check('a hostile path cannot add or rewrite a property', props.split(',').map((p) => p.split('=')[0]).join(',') === 'file,line,title', props);
+  check('a hostile path is carried escaped, not dropped', props.startsWith('file=x.php%2Cline=1%3A%3Aforged%0A%3A%3Astop-commands%3A%3Atok,line=3,'), props);
+  const many = Array.from({ length: 12 }, (_, i) => ({ ...f, line: i + 1 }));
+  const warnOnly = { ...f, checkId: 'sca-high', rule: 'GHSA-x', sev: SEV.WARN };
+  const out = annotations([...many, warnOnly]);
+  check('annotations: 10 CRITICALs (GitHub\'s per-step cap) + one overflow line', out.length === 11 && out.slice(0, 10).every((l) => l.startsWith('::error ')) && /^security-baseline: 2 more critical/.test(out[10]), `got ${out.length}`);
+  check('annotations: a WARN finding is never annotated', !out.some((l) => l.includes('sca-high')) && annotations([warnOnly]).length === 0);
+}
+
+console.log('\n# scan.mjs end to end — the job log carries the report; secret values reach neither output');
+{
+  // scan.mjs runs a top-level IIFE, so it is exercised as a PROCESS: stub scanners on disk, a
+  // two-commit git repo, the real CLI. Nothing needs semgrep/gitleaks/trufflehog installed, and no
+  // real scanner can run (every *_BIN points at a stub), so nothing leaves the machine.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-e2e-'));
+  try {
+    // Planted values are minted at run time: a secret-shaped literal in this file would trip the
+    // very scan it tests (luxairportlu 739c623 was blocked by exactly such a canary constant).
+    const mint = (tag) => `${tag}${crypto.randomBytes(15).toString('hex').toUpperCase()}`;
+    const planted = { diff: mint('GLDIFF'), hist: mint('GLHIST'), live: mint('THLIVE') };
+    // A leak is any 8-char run of a planted value: redact() keeps first4…last4 around an ellipsis, so
+    // no 8 contiguous characters of a value can reach an output through it.
+    const leaked = (text) => Object.values(planted).some((v) => {
+      for (let i = 0; i + 8 <= v.length; i++) if (text.includes(v.slice(i, i + 8))) return true;
+      return false;
+    });
+
+    const bin = path.join(tmp, 'bin');
+    fs.mkdirSync(bin);
+    const stub = (name, body) => {
+      const p = path.join(bin, name);
+      fs.writeFileSync(p, `#!/bin/sh\n[ "$1" = "--version" ] && { echo 0.0.0-stub; exit 0; }\n${body}\n`);
+      fs.chmodSync(p, 0o755);
+      return p;
+    };
+    const argvLog = path.join(tmp, 'gitleaks-argv.log');
+    // Worst case: a gitleaks that IGNORED --redact, so Secret/Match/Line carry the raw value; the
+    // diff range (--log-opts) and the full-history pass answer with different findings.
+    const glFinding = (file, line, rule, value) => ({
+      RuleID: rule, Description: 'stub', File: file, StartLine: line, EndLine: line,
+      Secret: value, Match: `key = "${value}"`, Line: `$key = '${value}';`, Commit: '0'.repeat(40),
+    });
+    // Vendored rules arrive with semgrep's config-path prefix on check_id, as they do on a runner.
+    const vendored = (id) => `home.runner.work._actions.mvalasis.ci-actions.v1.security-baseline.rules.${id}`;
+    const stubs = {
+      SEMGREP_BIN: stub('semgrep', [
+        'case "$*" in',
+        `  *--severity*) cat <<'JSON'\n${JSON.stringify({ results: [{ check_id: 'php.lang.security.stub-rule', path: 'app/login.php', start: { line: 7 }, extra: { message: 'stub finding', metadata: { cwe: ['CWE-89'] } } }] })}\nJSON`,
+        '  ;;',
+        `  *wp-php.yaml*) cat <<'JSON'\n${JSON.stringify({ results: [
+          { check_id: vendored('wp-rest-exception-detail'), path: 'app/login.php', start: { line: 12 }, extra: { message: 'exception detail in a REST body', metadata: { checkId: 'wp-rest-error-detail', cwe: ['CWE-209'] } } },
+          { check_id: vendored('wp-nonce-missing'), path: 'app/login.php', start: { line: 20 }, extra: { message: 'no nonce check', metadata: { checkId: 'wp-nonce-missing' } } },
+        ] })}\nJSON`,
+        '  ;;',
+        `  *) echo '{"results":[]}' ;;`,
+        'esac',
+      ].join('\n')),
+      GITLEAKS_BIN: stub('gitleaks', [
+        `printf '%s\\n' "$*" >> '${argvLog}'`,
+        'case "$*" in *--log-opts*) which=diff ;; *) which=hist ;; esac',
+        'out=""',
+        'while [ $# -gt 0 ]; do [ "$1" = "--report-path" ] && { shift; out="$1"; }; shift; done',
+        `if [ "$which" = diff ]; then cat > "$out" <<'JSON'\n${JSON.stringify([glFinding('app/config.php', 3, 'generic-api-key', planted.diff)])}\nJSON`,
+        `else cat > "$out" <<'JSON'\n${JSON.stringify([glFinding('old/legacy.php', 9, 'aws-access-token', planted.hist)])}\nJSON`,
+        'fi',
+      ].join('\n')),
+      // trufflehog's JSON always carries the raw credential (Raw/RawV2) — it has no --redact.
+      TRUFFLEHOG_BIN: stub('trufflehog', `cat <<'JSON'\n${JSON.stringify({ SourceMetadata: { Data: { Git: { file: 'app/config.php', line: 3 } } }, DetectorName: 'Github', Verified: true, Raw: planted.live, RawV2: planted.live, Redacted: planted.live })}\nJSON`),
+      OSV_BIN: stub('osv-scanner', `echo '{"results":[]}'`),
+      HADOLINT_BIN: stub('hadolint', 'echo "[]"'),
+    };
+
+    const repo = path.join(tmp, 'repo');
+    fs.mkdirSync(repo);
+    const base = { PATH: process.env.PATH, HOME: tmp, TMPDIR: tmp, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    const git = (...a) => spawnSync('git', ['-c', 'user.name=selftest', '-c', 'user.email=selftest@example.invalid', '-c', 'commit.gpgsign=false', ...a], { cwd: repo, env: base, encoding: 'utf8' });
+    const put = (rel, text) => { fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true }); fs.writeFileSync(path.join(repo, rel), text); };
+    git('init', '-q');
+    put('README.md', 'base\n');
+    git('add', '.'); git('commit', '-q', '-m', 'base');
+    put('app/config.php', '<?php // fixture\n');
+    put('app/login.php', '<?php // fixture\n');
+    git('add', '.'); git('commit', '-q', '-m', 'change');
+    check('fixture repo has two commits (else every assertion below is vacuous)', (git('rev-list', '--count', 'HEAD').stdout || '').trim() === '2');
+
+    const summaryPath = path.join(tmp, 'summary.md');
+    const scan = (extra) => {
+      try { fs.rmSync(summaryPath, { force: true }); } catch { /* fresh file per run */ }
+      const r = spawnSync(process.execPath, [fileURLToPath(new URL('./scan.mjs', import.meta.url))], {
+        cwd: repo, encoding: 'utf8', timeout: 60000,
+        env: {
+          ...base, ...stubs, GITHUB_ACTION_PATH: fileURLToPath(new URL('..', import.meta.url)),
+          SCAN_SCOPE: 'diff', BASE_REF: 'HEAD~1', VERIFIED_SECRETS: 'on', ENABLE_SECRETS_HISTORY: 'true', ENABLE_SCA: 'false',
+          ...extra,
+        },
+      });
+      const summary = fs.existsSync(summaryPath) ? fs.readFileSync(summaryPath, 'utf8') : '';
+      return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '', summary };
+    };
+    const commands = (text) => text.split('\n').filter((l) => /^\s*::/.test(l));
+    const expected = (level, promoted = false) => [
+      `::${level} file=app/login.php,line=7,title=security-baseline sast-critical::sast-critical php.lang.security.stub-rule at app/login.php:7`,
+      ...(promoted ? [`::${level} file=app/login.php,line=12,title=security-baseline wp-rest-error-detail::wp-rest-error-detail wp-rest-exception-detail at app/login.php:12`] : []),
+      `::${level} file=app/config.php,line=3,title=security-baseline secret-pattern::secret-pattern generic-api-key at app/config.php:3`,
+      `::${level} file=app/config.php,line=3,title=security-baseline secret-verified::secret-verified Github at app/config.php:3`,
+    ];
+
+    // (A) On Actions, lux-shaped (one T1 promoted): summary + job log + annotations.
+    const a = scan({ GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', CRITICAL_CHECKS: 'wp-rest-error-detail' });
+    check('Actions run: three T0 + one promoted T1 BLOCK (exit 1)', a.status === 1, `exit ${a.status}`);
+    check('the step summary is the report, verdict included', a.summary.startsWith('## 🔒 security-baseline') && a.summary.includes('\nBLOCKED — 4 critical finding(s).'));
+    check('the job log carries the WHOLE report, byte for byte', a.summary.length > 0 && a.stdout.includes(a.summary));
+    check('the report reaches the log once, not twice', a.stdout.split('## 🔒 security-baseline').length === 2);
+    check('the fixtures reached the report (rule + file:line of each secret finding)',
+      /app\/config\.php:3 — generic-api-key/.test(a.stdout) && /old\/legacy\.php:9 — aws-access-token/.test(a.stdout) && /app\/config\.php:3 — 🔴 VERIFIED-LIVE Github/.test(a.stdout));
+    check('one ::error per CRITICAL (the promoted T1 by its bare rule id), none for a WARN, nothing else command-shaped',
+      JSON.stringify(commands(a.stdout)) === JSON.stringify(expected('error', true)), JSON.stringify(commands(a.stdout)));
+    check('annotations stay out of the step summary', commands(a.summary).length === 0);
+    check('NO planted secret value in the job log, the step summary or stderr', !leaked(a.stdout) && !leaked(a.summary) && !leaked(a.stderr));
+    const argv = fs.existsSync(argvLog) ? fs.readFileSync(argvLog, 'utf8').trim().split('\n') : [];
+    check('gitleaks ran twice (diff + history), both times with --redact', argv.length === 2 && argv.every((l) => /(^| )--redact( |$)/.test(l)), `${argv.length} call(s)`);
+
+    // (B) Off Actions (a local run): the summary IS stdout — the report prints once, with no commands.
+    const b = scan({});
+    check('local run: same verdict (exit 1)', b.status === 1, `exit ${b.status}`);
+    check('local run: the report prints exactly once', b.stdout.split('## 🔒 security-baseline').length === 2 && b.stdout.includes('\nBLOCKED — 3 critical finding(s).'));
+    check('local run: no workflow commands', commands(b.stdout).length === 0);
+    check('local run: NO planted secret value', !leaked(b.stdout) && !leaked(b.stderr));
+
+    // (C) report-mode: the same criticals annotate as ::warning, and nothing blocks.
+    const c = scan({ GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', REPORT_MODE: 'true' });
+    check('report-mode: exit 0', c.status === 0, `exit ${c.status}`);
+    check('report-mode: the criticals annotate as ::warning, never ::error', JSON.stringify(commands(c.stdout)) === JSON.stringify(expected('warning')), JSON.stringify(commands(c.stdout)));
+    check('report-mode: the log still carries the whole report', c.summary.length > 0 && c.stdout.includes(c.summary));
+
+    // (D) The summary sink itself fails: the report is already in the log (it is echoed first), the
+    // fault is named there, and the exit is the caller's setting — our fault never blocks report-mode.
+    const sinkDir = path.join(tmp, 'summary-is-a-dir');
+    fs.mkdirSync(sinkDir);
+    const d = scan({ GITHUB_STEP_SUMMARY: sinkDir, GITHUB_ACTIONS: 'true', REPORT_MODE: 'true' });
+    check('unwritable summary: the report still reaches the job log', d.stdout.includes('## 🔒 security-baseline') && d.stdout.includes('⚠️ REPORT-MODE — 3 critical finding(s) would BLOCK'));
+    check('unwritable summary: the fault is named in the log', /security-baseline crashed: .*EISDIR/.test(d.stdout));
+    check('unwritable summary: the crash re-flush echoes only the new line, not the report again', d.stdout.split('## 🔒 security-baseline').length === 2);
+    check('unwritable summary under report-mode: exit 0, not an unhandled throw', d.status === 0, `exit ${d.status}`);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 console.log(failed === 0 ? '\n✅ all engine self-tests passed\n' : `\n❌ ${failed} self-test(s) failed\n`);

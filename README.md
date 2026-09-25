@@ -49,6 +49,32 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.16.0** — `security-baseline` prints its report to the **job log** as well as the step
+summary, and annotates every CRITICAL. The report went only to `$GITHUB_STEP_SUMMARY`, so
+`gh run view --log-failed` showed `Process completed with exit code 1` and nothing else, the
+check-run API's `output` was empty, and a private repo's summary needs a signed-in browser. On
+luxairportlu 739c623 (2026-09-23) a headless session learned that the gate blocked, never why,
+and rebuilt gitleaks' `generic-api-key` rule by hand to find the two lookalikes. Now
+`scan.mjs` echoes the same report lines to stdout through `fs.writeSync`, byte-identical to the
+summary (which is unchanged; off Actions the summary already is stdout, so nothing doubles),
+then emits one `::error file=…,line=…,title=security-baseline <check>::<check> <rule> at
+<file>:<line>` per CRITICAL: a T0, or a T1 the caller promoted. It emits `::warning` when the
+run does not enforce (`report-mode`, `fail-on-critical: false`), and at most 10 per step,
+GitHub's cap, with one line counting the rest. `gh run view <id>` and
+`gh api repos/<o>/<r>/check-runs/<job-id>/annotations` both list them. No secret value reaches
+either: the log carries the summary's own lines (gitleaks runs with `--redact`, and trufflehog's
+raw credential is never read), and an annotation names a secret by rule id only. Annotation
+values are escaped (`%`, CR, LF, and `:`/`,` in properties), so a hostile path cannot rewrite
+or stop commands. A crash in the summary write itself now still reaches the log and exits under
+the caller's setting, not as an unhandled throw. `scripts/selftest.mjs` gains an end-to-end leg
+that runs the real `scan.mjs` against stub scanners planting secret values (a gitleaks that
+ignores `--redact`, trufflehog's `Raw`). It asserts the whole report in the log, one annotation
+per CRITICAL and none for a WARN, no planted value in any output, `--redact` on every gitleaks
+call, a local run printing once, and `::warning` under report-mode; each of 18 targeted mutants
+turns it red. **Caller-visible:** more log output, and annotations on a run with CRITICAL
+findings. No input and no verdict changed; the one exit-code change is that crash path, which
+now follows `report-mode` like every other fault. The `v1` move newly-blocks nobody.
+
 **v1.15.3** — `a11y-audit` strips the sitemap's `<loc>` tags under BSD sed too. `audit.sh`
 extracted each sitemap URL with `sed 's#</\?loc>##g'`, and `\?` is a GNU BRE extension:
 BSD sed (macOS) reads it as a literal `?`, so neither tag matched and the pa11y-ci config
@@ -571,8 +597,8 @@ it was deleted in v1.15.0), and why the behavioural self-tests — not this lint
 are the load-bearing layer.
 
 The seven `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
-`console.log(…)` then `process.exit(…)`, but emit 1375–4117 bytes, an order of
-magnitude under the pipe buffer, so they cannot truncate. Don't "fix" them.
+`console.log(…)` then `process.exit(…)`, but emit 1375–7415 bytes, at least eight
+times under the pipe buffer, so they cannot truncate. Don't "fix" them.
 
 Repo-internal only: no caller consumes this lint, so changing it needs **no
 version bump and no `v1` tag move**.
