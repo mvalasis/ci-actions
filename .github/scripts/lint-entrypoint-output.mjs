@@ -58,10 +58,11 @@
 //
 // The seven `*/scripts/selftest.mjs` files legitimately end in `console.log(...)`
 // then `process.exit(...)`. They are exempt because they CANNOT hit the bug:
-// measured output is 2184–17124 bytes (contract-check 5907, seo-aeo 5387,
+// measured output is 4117–17124 bytes (contract-check 5907, seo-aeo 5387,
 // form-protection 5660, deps-currency 9910 since v1.18.1's issue-lifecycle cases,
 // security-baseline 17124 since v1.19.0's could-not-look legs, test-suite 4117,
-// verify-homepage 2184) — at least three times under the 65,536-byte pipe buffer.
+// verify-homepage 4296 since v1.19.1's report-routing legs) — at least three times
+// under the 65,536-byte pipe buffer.
 // Do not "fix" them; the exemption is the finding, not an oversight.
 //
 // ALLOWANCES (both deliberate, both narrow)
@@ -508,8 +509,12 @@ const REMEDY = [
   '  const say    = (s = \'\') => { try { fs.writeSync(1, `${s}\\n`); } catch { console.log(s); } };',
   '  const sayErr = (s = \'\') => { try { fs.writeSync(2, `${s}\\n`); } catch { console.error(s); } };',
   '',
-  '  …or append to the step summary, which is already synchronous:',
-  '  fs.appendFileSync(env.GITHUB_STEP_SUMMARY || \'/dev/stdout\', text);',
+  '  …or append to the step summary, which is already synchronous, when there is one.',
+  '  Never fall back to /dev/stdout: it is the job log again, so a report echoed',
+  '  through fd 1 prints twice, and on Linux its open fails (ENXIO) when stdout is',
+  '  a socket:',
+  '  const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== \'/dev/stdout\' ? env.GITHUB_STEP_SUMMARY : \'\';',
+  '  if (summaryFile) fs.appendFileSync(summaryFile, text);',
   '',
   'Genuinely need the raw call? Annotate it (a reason is required):',
   '  // lint-allow-raw-output: <why this cannot truncate>',

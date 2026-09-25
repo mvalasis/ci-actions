@@ -49,6 +49,31 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.19.1** *(tag not yet cut; lands with the next `v1` move)* — `verify-homepage` prints its
+report once on a local run. `render-check.mjs` echoes the report to the job log through fd 1 on
+every run, and with no `GITHUB_STEP_SUMMARY` it also appended it to its fallback sink,
+`/dev/stdout`, which is the log again. Measured on macOS, a run from a terminal, into a pipe, into
+a file (`>` or `>>`) and under node's `child_process` each printed the report twice, and so did
+`GITHUB_STEP_SUMMARY=/dev/stdout`. Only Linux with a socket stdout printed it once: opening
+`/dev/stdout` fails there with ENXIO, and a `catch` swallowed it. The comment beside that `catch`
+said the report printed once, which was true only in that case. The crash handler had the same
+fallback, so a local crash printed its note twice on a terminal, once through `/dev/stdout` and
+once on stderr. Both now follow the v1.16.0/v1.18.0 rule: `/dev/stdout` as the summary means
+none, and the fd-1 echo (fd 2 for a crash note) is the only copy. On Actions nothing changes.
+Over 72 fixture env combinations with a real summary file, the old and new `render-check.mjs`
+write byte-identical summaries and logs with the same exit codes; the crash note differs only in
+its stack's line number. `scripts/selftest.mjs` gains legs that run the entrypoint with no summary
+and with `/dev/stdout`, with stdout both a socket and an `O_APPEND` file, and assert that the
+report, and a crash note, print exactly once with no crash. The file stdout is there because the
+old code double-printed into it on Linux too; with only a socket stdout, the legs would pass on
+the ubuntu runner against the bug. Each of 12 targeted mutants turns the self-test red, and under
+the two that emulate Linux's ENXIO only the file-stdout legs do. The entrypoint lint's remedy
+text, which suggested `appendFileSync(env.GITHUB_STEP_SUMMARY || '/dev/stdout', …)`, now shows
+the same rule. Annotating FAIL rows like the v1.18.0 gates was considered and not adopted:
+[`verify-homepage/README.md`](verify-homepage/README.md) → "No annotations" records why and when
+to revisit. **Caller-visible:** nothing on Actions. A local run prints the report once. No input,
+verdict or exit code changed. The `v1` move newly-blocks nobody.
+
 **v1.19.0** *(tag not yet cut; lands with the next `v1` move)* — `security-baseline` no longer
 reads a scanner that could not look as one that found nothing. Every adapter did: semgrep's exit
 status and `errors[]` went unread, a gitleaks run that died before writing its report parsed as
@@ -744,7 +769,7 @@ it was deleted in v1.15.0), and why the behavioural self-tests — not this lint
 are the load-bearing layer.
 
 The seven `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
-`console.log(…)` then `process.exit(…)`, but emit 2184–10017 bytes, at least six
+`console.log(…)` then `process.exit(…)`, but emit 4117–17124 bytes, at least three
 times under the pipe buffer, so they cannot truncate. Don't "fix" them.
 
 Repo-internal only: no caller consumes this lint, so changing it needs **no

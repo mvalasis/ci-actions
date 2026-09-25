@@ -18,6 +18,9 @@
 //      false FAIL, not merely a mis-attributed one)
 //   5. the diagnostics are report-only: identical markup + a scoped selector =
 //      clean PASS with no advisory, and FAIL_ON_STRUCTURE still decides the exit code
+//   6. the report reaches the job log exactly once, and the step summary only when
+//      there is one — with a summary, with none (a local run), and with
+//      GITHUB_STEP_SUMMARY=/dev/stdout; a local crash note prints once too
 //
 // Run: node scripts/selftest.mjs (also runs in CI, before the live smoke).
 // Requires: npm ci && npx playwright install chromium.
@@ -37,6 +40,7 @@ function check(name, cond, detail = '') {
   if (cond) console.log(`  ✅ ${name}`);
   else { console.log(`  ❌ ${name}${detail ? ` — ${detail}` : ''}`); failed++; }
 }
+const count = (text, s) => text.split(s).length - 1;
 
 // Run the real entrypoint with a captured step summary; assert against the
 // job-log mirror (stdout), which is the sink a human actually reads.
@@ -61,6 +65,31 @@ function run(env) {
   const summary = fs.readFileSync(summaryPath, 'utf8');
   try { fs.unlinkSync(summaryPath); } catch { /* ignore */ }
   return { exit: r.status, summary, stdout: r.stdout || '', stderr: r.stderr || '' };
+}
+
+// Run an entrypoint the way a LOCAL run does. The runner's own GITHUB_STEP_SUMMARY
+// is dropped (else this is the CI shape again, writing into this self-test's own
+// summary); a case that wants one names it. stdout is either what spawnSync hands
+// a child — a socket — or an O_APPEND file; the "where the report goes" block
+// below says why both.
+function spawnLocal(file, env, stdout, cwd) {
+  const inherited = { ...process.env };
+  delete inherited.GITHUB_STEP_SUMMARY;
+  const opts = { encoding: 'utf8', cwd, env: { ...inherited, ...env } };
+  if (stdout === 'socket') {
+    const r = spawnSync(process.execPath, [file], opts);
+    return { exit: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vh-stdout-'));
+  const outPath = path.join(dir, 'stdout.txt');
+  const fd = fs.openSync(outPath, 'a');
+  try {
+    const r = spawnSync(process.execPath, [file], { ...opts, stdio: ['ignore', fd, 'pipe'] });
+    return { exit: r.status, stdout: fs.readFileSync(outPath, 'utf8'), stderr: r.stderr || '' };
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +199,45 @@ check('unscoped + ENFORCING still exits 1 on the collapse',
   `exit=${enforcing.exit} :: ${enforcing.stdout.slice(-400)}`);
 
 // ---------------------------------------------------------------------------
+console.log('\n# where the report goes — the job log exactly once, the step summary when there is one');
+//
+// Every run echoes the report to the job log through fd 1. Before v1.19.1 a run with
+// no GITHUB_STEP_SUMMARY (a local run), or with GITHUB_STEP_SUMMARY=/dev/stdout, also
+// appended it to /dev/stdout — the log a second time. That printed it twice on a
+// terminal, a pipe or a file, and under macOS child_process (opening /dev/stdout dups
+// fd 1). Linux with a SOCKET stdout, which is what spawnSync hands a child, printed it
+// once: the open fails with ENXIO and a catch swallowed it. So each case also runs
+// with an O_APPEND FILE as stdout, which the old code double-printed into on Linux
+// too — without it, these legs pass on the ubuntu runner against the bug.
+const HEADER = '## verify-homepage · structure + cross-viewport render';
+check('CI shape: the job log carries the whole report, byte for byte',
+  enforcing.summary.length > 0 && enforcing.stdout.includes(enforcing.summary), enforcing.stdout.slice(0, 200));
+check('CI shape: the report is in the log once and in the step summary once',
+  count(enforcing.stdout, HEADER) === 1 && count(enforcing.summary, HEADER) === 1,
+  `log ×${count(enforcing.stdout, HEADER)}, summary ×${count(enforcing.summary, HEADER)}`);
+
+for (const [label, sink] of [['local run (no GITHUB_STEP_SUMMARY)', undefined], ['GITHUB_STEP_SUMMARY=/dev/stdout (the local idiom)', '/dev/stdout']]) {
+  for (const stdout of ['socket', 'file']) {
+    const r = spawnLocal(RUN, {
+      FORCE_COLOR: '0',
+      CHECKS: 'render,nav',
+      WAIT_MS: '0',
+      URLS: fixture('collapsed-drawer-footer.html'),
+      VIEWPORTS: 'desktop:1200x800',
+      FAIL_ON_STRUCTURE: 'true',
+      NAV_FILE: '',
+      GITHUB_STEP_SUMMARY: sink,
+    }, stdout, path.dirname(HERE));
+    check(`${label}, stdout a ${stdout}: the report prints exactly once, verdict included, no crash`,
+      r.exit === 1 && count(r.stdout, HEADER) === 1 && count(r.stdout, '❌ **FAIL**') === 1 &&
+        !/verify-homepage crashed/.test(r.stdout + r.stderr),
+      `exit=${r.exit}, report ×${count(r.stdout, HEADER)}, stderr ${JSON.stringify(r.stderr.slice(0, 200))}`);
+    check(`${label}, stdout a ${stdout}: it is the report the step summary gets`,
+      enforcing.summary.length > 0 && r.stdout.includes(enforcing.summary), r.stdout.slice(0, 200));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CRASH GUARD — asserted BEHAVIOURALLY, by crashing the real entrypoint.
 //
 // Never by grepping render-check.mjs for `process.on(` or for a line position: a
@@ -264,6 +332,24 @@ console.log('\n# crash guard (real render-check.mjs, injected fault)');
         // this is what stops an operator triaging a scanner bug as a layout bug.
         check(`[${variant}] the report disclaims being a verdict on the page`,
           /not a verdict on the page/.test(report.summary), report.summary.slice(0, 200));
+
+        const NOTE = 'verify-homepage crashed';
+        check(`[${variant}] the crash note is in the step summary once and the job log (stderr) once`,
+          count(report.summary, NOTE) === 1 && count(report.stderr, NOTE) === 1,
+          `summary ×${count(report.summary, NOTE)}, stderr ×${count(report.stderr, NOTE)}`);
+        // A LOCAL crash — no step summary, or GITHUB_STEP_SUMMARY=/dev/stdout: the fd-2
+        // mirror is the only copy, so the note prints once, on stderr. Before v1.19.1 the
+        // handler appended it to /dev/stdout as well, printing it twice on a terminal.
+        // Both stdout shapes, for the reason the "where the report goes" block gives.
+        for (const [label, sink] of [['local run', undefined], ['GITHUB_STEP_SUMMARY=/dev/stdout', '/dev/stdout']]) {
+          for (const stdout of ['socket', 'file']) {
+            const r = spawnLocal(path.join(tmp, `render-${variant}.mjs`),
+              { FAIL_ON_STRUCTURE: 'false', URLS: 'https://example.invalid/', GITHUB_STEP_SUMMARY: sink }, stdout, tmp);
+            check(`[${variant}] ${label}, stdout a ${stdout}: the crash note prints once, on stderr, exit 0`,
+              count(r.stdout + r.stderr, NOTE) === 1 && count(r.stderr, NOTE) === 1 && r.exit === 0,
+              `stdout ×${count(r.stdout, NOTE)}, stderr ×${count(r.stderr, NOTE)}, exit ${r.exit}`);
+          }
+        }
       }
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });

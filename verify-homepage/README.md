@@ -177,6 +177,44 @@ Corollary for markup: don't use landmark elements for non-landmark chrome. A
 drawer header/footer is a `<div>` (lampakia commit e2ff769). A citation `<footer>`
 is legitimate — scope the selector instead.
 
+## Where the report goes
+
+The report goes to the **job log** (stdout) on every run, and to the **step
+summary** when there is one. A run with no `GITHUB_STEP_SUMMARY` (a local run), or
+with `GITHUB_STEP_SUMMARY=/dev/stdout`, prints it once, to stdout. Before v1.19.1
+it printed twice there: the old fallback appended the report to `/dev/stdout`,
+which is the log again. A crash note goes to the step summary and to stderr; on a
+local run, stderr is the only copy.
+
+### No annotations (decision, 2026-09-25)
+
+`verify-homepage` does not emit `::error` / `::warning` annotations for its FAIL
+rows, unlike the gates that gained them in v1.16.0 and v1.18.0. Decided while
+fixing v1.19.1:
+
+- **The gap they closed is not here.** Those gates wrote their report only to the
+  step summary, so a blocked run's log said `Process completed with exit code 1`
+  and nothing else. v1.18.0 ported annotations to exactly the gates in that state.
+  This one has printed its whole report to the job log since v1.7.1, so
+  `gh run view --log-failed` already names the page, the viewport and the problem.
+- **A FAIL row is not one finding with an id.** It is a page × viewport bundle of
+  problems whose detail comes from the page (class names, element identifiers),
+  and page text never goes into an annotation. What would be left is
+  `render at <url> @ <viewport>`: the report line with its content removed.
+- **The rows fan out.** One stylesheet or template regression fails every URL at
+  every viewport. epn-astro's 7 URLs × 4 viewports are 28 render rows, so the 10
+  annotations per level that GitHub keeps for a step would repeat one cause.
+- **No surface for them.** All six callers (measured 2026-09-25) run it on a weekly
+  cron plus manual dispatch, never on a pull request, so there is no checks tab
+  for annotations to appear in, and the run page already shows the step summary.
+
+Revisit if the gate is wired to pull requests or pushes, or if something that
+reads only annotations becomes how failures get triaged. The shape then: one
+annotation per failing page × viewport, titled by problem kind (`overflow`,
+`collapsed-landmark`, `missing-landmark`, `overlap`, `load-error`,
+`nav-inventory`), `::error` when enforcing and `::warning` in report-only, at
+most 10 per step.
+
 ## Self-test
 
 `node scripts/selftest.mjs` (CI: `verify-homepage-selftest.yml`, ahead of the live
@@ -186,15 +224,24 @@ shapes above, at a desktop width (drawer hidden → collapse) and a mobile width
 (drawer visible → overlap), and assert that scoped selectors stay silent on the
 *identical* markup. Requires `npm ci && npx playwright install chromium`.
 
+It also runs the entrypoint the way a local run does, with no step summary and
+with `GITHUB_STEP_SUMMARY=/dev/stdout`, and asserts the report prints exactly
+once. Each of those cases runs with stdout as a socket (what `spawnSync` hands a
+child) and as an `O_APPEND` file. The file is the load-bearing one: on Linux,
+opening `/dev/stdout` fails (ENXIO) when stdout is a socket, so a socket-only leg
+would pass against the pre-v1.19.1 double print on the CI runner.
+
 The crash-guard block at the end of the same file needs **neither** — it stubs
-`playwright` in a temp dir, so it runs on a bare checkout.
+`playwright` in a temp dir, so it runs on a bare checkout. It asserts the same
+exactly-once rule for a local crash note.
 
 ## A gate fault is not a page verdict
 
 If `render-check.mjs` itself faults — Chromium failing to launch, a malformed
 `verify-nav.json`, a driver timeout escaping an await — it reports
-**`verify-homepage crashed`** into the step summary and the job log, says in as
-many words that this is *not a verdict on the page*, and exits
+**`verify-homepage crashed`** into the step summary and the job log (stderr; on a
+local run, the only copy), says in as many words that this is *not a verdict on
+the page*, and exits
 `fail-on-structure ? 1 : 0`. A report-mode caller is therefore never newly-BLOCKED
 by a bug in this action. Before v1.12.0 any throw exited 1 regardless, with a bare
 stack and nothing in the summary.

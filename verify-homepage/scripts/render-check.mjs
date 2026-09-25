@@ -73,9 +73,15 @@ const onCrash = (kind) => (err) => {
       : '`fail-on-structure: false` → exiting **0** — a tool fault must not newly-block a report-mode caller.',
     '',
   ].join('\n');
-  try {
-    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY || '/dev/stdout', `${msg}\n`);
-  } catch { /* summary sink unwritable — the job-log mirror below still lands */ }
+  // The `summaryFile` rule below, restated from `process.env` for the TDZ reason
+  // above: no summary, or `/dev/stdout`, means the fd-2 mirror is the only copy.
+  // Appending to /dev/stdout as well printed the note twice on a terminal.
+  const sink = process.env.GITHUB_STEP_SUMMARY;
+  if (sink && sink !== '/dev/stdout') {
+    try {
+      fs.appendFileSync(sink, `${msg}\n`);
+    } catch { /* summary sink unwritable — the job-log mirror below still lands */ }
+  }
   try { fs.writeSync(2, `${msg}\n`); } catch { console.error(msg); }
   process.exit(failing ? 1 : 0);
 };
@@ -99,7 +105,13 @@ const DESKTOP_UA =
 const MOBILE_UA =
   'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 
-const summaryFile = env.GITHUB_STEP_SUMMARY || '/dev/stdout';
+// The report goes to the job LOG always (say(), below) and to the step summary
+// when there is one. `/dev/stdout` as the summary (the old fallback, and a local
+// idiom) means none: it is the log again, so appending there printed the report
+// twice — on a terminal, a pipe, a file, and under macOS child_process, where
+// opening /dev/stdout dups fd 1. Only a Linux socket stdout printed it once, as
+// that open fails (ENXIO) and the catch swallowed it. Same rule as v1.16.0/v1.18.0.
+const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';
 const out = [];
 const note = (s = '') => out.push(s);
 // Job-log output goes through fs.writeSync, never console.log/console.error:
@@ -601,12 +613,13 @@ if (failed.length === 0) {
   note(`${FAIL ? '❌ **FAIL**' : '⚠️ **WARN (report-only)**'} — ${failed.length}/${rows.length} checks broke.`);
 }
 
-try {
-  fs.appendFileSync(summaryFile, out.join('\n') + '\n');
-} catch {
-  // Summary sink unwritable (no GITHUB_STEP_SUMMARY and /dev/stdout not
-  // openable) — nothing to do here: the job-log mirror below is unconditional,
-  // so the report still reaches stdout exactly once.
+if (summaryFile) {
+  try {
+    fs.appendFileSync(summaryFile, out.join('\n') + '\n');
+  } catch {
+    // Summary sink unwritable — nothing to do here: the job-log mirror below is
+    // unconditional, so the report still reaches stdout, once.
+  }
 }
 say(out.join('\n'));
 
