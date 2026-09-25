@@ -49,6 +49,23 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.15.2** — `linkcheck` keeps `verify-token` out of curl's argv and environment, the
+same class v1.15.1 closed in `a11y-audit`. `linkcheck.py` and `sitemap-urls.py` handed
+every internal fetch `-H "X-Verify-Source: <token>"` (thousands of curl processes per
+run, each readable by `ps` from any process on the runner), and every curl inherited
+`VERIFY_HOMEPAGE_TOKEN`. Each script now writes the header once to a mode-600 file in a
+private `tempfile.mkdtemp` dir (0700, under `$TMPDIR`) that `atexit` removes, passes
+curl `-H @file`, and runs curl with the variable removed from its environment.
+`linkcheck.py` makes the file under a lock, because its worker threads race for it.
+Host scoping is untouched: the file goes only where the token went before (internal
+hops, re-scoped per redirect). `scripts/selftest.py` now puts an argv-logging `curl`
+first on `PATH` for the whole run and asserts, over every call, that the token is never
+in argv, that no curl inherits it, and that internal hops get a 0600 file in a 0700 dir.
+Two end-to-end legs through `main()` prove the dir is gone after exit. The unfixed
+scripts fail 8 of those 13 checks, and each of 11 targeted mutants turns its own check
+red. **Caller-visible:** nothing. No input changed, and the six callers that pass a
+token (hlek, lampakia, prevedourou, epn-astro, epn.one, lux) need no edit.
+
 **v1.15.1** — `a11y-audit` keeps `verify-token` out of argv, out of its children's
 environment and out of world-readable files. The sitemap `curl` took the token as
 `-H "X-Verify-Source: <token>"`, so it sat in curl's argv, which `ps` shows to every

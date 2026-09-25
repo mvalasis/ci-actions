@@ -20,7 +20,8 @@ Configure via environment:
                      line); defaults to linkcheck-allow.txt beside this
                      script. Set it to the caller's own list in CI.
   VERIFY_HOMEPAGE_TOKEN  WAF-bypass token, sent as X-Verify-Source ONLY to
-                     the internal host, never to third parties.
+                     the internal host, never to third parties. curl reads
+                     it from a mode-600 file, never from its argv or env.
 
 Exit status:
   0  no fatal breakage
@@ -43,12 +44,15 @@ the Cloudflare /cdn-cgi/ email-obfuscation shim, Woo action URLs
 (add-to-cart / cart / checkout / logout), and bot-hostile social domains
 that 403/429/999 crawlers.
 """
+import atexit
 import concurrent.futures
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from urllib.parse import urldefrag, urljoin, urlsplit
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -140,10 +144,41 @@ def is_internal(url):
 # never leaves our host, exactly as the seo-aeo gate scopes it.
 MAX_HOPS = 10
 
+# The token on the RUNNER. curl reads the header from a mode-600 file (`-H @file`)
+# in a private dir removed at exit, never as `-H "X-Verify-Source: <token>"`: argv
+# is world-readable (`ps`, /proc) to every process on the runner, and an
+# argv-logging wrapper on PATH records it. Each curl also runs without
+# VERIFY_HOMEPAGE_TOKEN in its environment; this process is its only reader.
+# Made lazily, once, under a lock: the worker threads race for it, and
+# selftest.py calls status()/fetch_html() without going through main().
+_HDR_LOCK = threading.Lock()
+_HDR_PATH = ""
+
+
+def _token_header():
+    """Path of the mode-600 `X-Verify-Source: <token>` file ('' with no token)."""
+    global _HDR_PATH
+    if not TOKEN:
+        return ""
+    with _HDR_LOCK:
+        if not _HDR_PATH:
+            d = tempfile.mkdtemp(prefix="linkcheck.")   # 0700
+            atexit.register(shutil.rmtree, d, True)
+            p = os.path.join(d, "token-header")
+            with os.fdopen(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+                f.write(f"X-Verify-Source: {TOKEN}\n")
+            _HDR_PATH = p
+    return _HDR_PATH
+
+
+def _curl_env():
+    """The environment each curl runs with: this one, minus the token."""
+    return {k: v for k, v in os.environ.items() if k != "VERIFY_HOMEPAGE_TOKEN"}
+
 
 def _token_args(url):
-    """['-H', 'X-Verify-Source: …'] only when url is on our host, else []."""
-    return ["-H", f"X-Verify-Source: {TOKEN}"] if (TOKEN and is_internal(url)) else []
+    """['-H', '@<header file>'] only when url is on our host, else []."""
+    return ["-H", "@" + _token_header()] if (TOKEN and is_internal(url)) else []
 
 
 def _hop(url, method, body_path=None):
@@ -159,7 +194,7 @@ def _hop(url, method, body_path=None):
     if body_path is not None:
         cmd.append("--compressed")   # decode Content-Encoding for the body we keep (fetch_html)
     cmd += _token_args(url) + method + [url]
-    out_s = subprocess.run(cmd, capture_output=True).stdout.decode("utf-8", "ignore")
+    out_s = subprocess.run(cmd, capture_output=True, env=_curl_env()).stdout.decode("utf-8", "ignore")
     m = re.search(r"__LC__(\d{3}) (\S*)\s*$", out_s)
     return (int(m.group(1)) if m else 0), (m.group(2) if (m and m.group(2)) else ""), out_s
 

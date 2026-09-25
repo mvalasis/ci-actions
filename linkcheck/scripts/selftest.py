@@ -12,12 +12,21 @@ a custom `-H` header to a cross-host redirect target (it strips only Cookie /
 Authorization), so following with `-L` would disclose the secret. The fix follows
 redirects manually and re-scopes the token per hop. Mirrors seo-aeo/selftest.mjs.
 
+It also guards where the token may sit on the RUNNER (v1.15.2): an argv-logging
+`curl` stands first on PATH for the whole run and records each call's argv, its
+environment and the mode of any `-H @file` it is handed.
+
 Run: `python3 linkcheck/scripts/selftest.py`  (exit 0 = pass, 1 = a leak/regression)
 """
 import http.server
 import importlib.util
 import os
 import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
 import textwrap
 import threading
 from urllib.parse import urlsplit
@@ -81,6 +90,13 @@ def _make_handler(label):
                 self._ok(b"<html>EXTERNAL-LANDING</html>")
             elif p == "/int-landing":
                 self._ok(b"<html>INTERNAL-LANDING</html>")
+            elif p == "/sitemap.xml":    # end to end: one page on the internal host
+                self._ok(('<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/'
+                          'schemas/sitemap/0.9"><url><loc>http://localhost:'
+                          f'{INT_PORT}/page-a</loc></url></urlset>').encode())
+            elif p == "/page-a":         # end to end: one internal and one external link
+                self._ok((f'<html><a href="http://a.localhost:{INT_PORT}/int-landing">i</a>'
+                          f'<a href="http://127.0.0.1:{EXT_PORT}/ext-landing">e</a></html>').encode())
             else:
                 self._ok(b"<html>DIRECT</html>")
 
@@ -108,6 +124,94 @@ def _load(name, filename):
 
 def _tokens(server):
     return {r["token"] for r in REC if r["server"] == server}
+
+
+SHIM_LOG = ""
+
+
+def _install_curl_shim():
+    """Put an argv-logging `curl` first on PATH and return its dir. Each call
+    appends ONE line (a single write, so worker threads never interleave): its
+    argv, ENV-VAR / ENV-VALUE when the token's variable or value is in its
+    environment, and for a `-H @file` the file's mode, its dir's mode and the dir.
+    Then it execs the real curl."""
+    global SHIM_LOG
+    real = shutil.which("curl")
+    d = tempfile.mkdtemp(prefix="lc-selftest-shim.")
+    SHIM_LOG = os.path.join(d, "curl.log")
+    with open(os.path.join(d, "curl"), "w") as f:
+        f.write(textwrap.dedent(f"""\
+            #!/usr/bin/env bash
+            line="argv"
+            for a in "$@"; do line="$line [$a]"; done
+            case "$(env)" in *VERIFY_HOMEPAGE_TOKEN=*) line="$line ENV-VAR" ;; esac
+            case "$(env)" in *{TOKEN}*) line="$line ENV-VALUE" ;; esac
+            prev=""
+            for a in "$@"; do
+              if [ "$prev" = "-H" ]; then
+                case "$a" in
+                  @*) f="${{a#@}}"; dir=$(dirname "$f")
+                      line="$line HDRFILE $(ls -l "$f" | cut -c1-10) $(ls -ld "$dir" | cut -c1-10) $dir" ;;
+                esac
+              fi
+              prev="$a"
+            done
+            printf '%s\\n' "$line" >> {shlex.quote(SHIM_LOG)}
+            exec {shlex.quote(real)} "$@"
+            """))
+    os.chmod(os.path.join(d, "curl"), 0o755)
+    os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+    return d
+
+
+def _shim_lines():
+    try:
+        with open(SHIM_LOG, encoding="utf-8") as f:
+            return f.read().splitlines()
+    except OSError:
+        return []
+
+
+def runner_checks():
+    """Where the token sits on the RUNNER, as distinct from which host receives it.
+
+    Before v1.15.2 both scripts handed curl `-H "X-Verify-Source: <token>"`, so the
+    token was in the argv of every internal fetch — thousands per run, each one
+    readable by `ps` from any process on the runner and recorded verbatim by any
+    argv-logging wrapper on PATH — and every curl inherited VERIFY_HOMEPAGE_TOKEN.
+    Both halves are asserted over every curl this run makes, the direct calls
+    above included. The end-to-end legs go through main(), which the direct calls
+    never reach, and prove the private dir is gone once each script exits."""
+    print("the token on the runner — curl's argv, its environment, the header file")
+    runs = _shim_lines()
+    check("curl ran through the argv-logging stand-in", len(runs) > 0)
+    check("the token is never in curl's argv (what ps, or a wrapper on PATH, sees)",
+          not any(TOKEN in r for r in runs))
+    hdr = [r for r in runs if " HDRFILE " in r]
+    check("…internal hops were handed the header as a file (-H @…)", len(hdr) > 0)
+    check("…mode 600, inside a 0700 dir",
+          bool(hdr) and all(" HDRFILE -rw------- drwx------ " in r for r in hdr))
+    check("no curl inherits VERIFY_HOMEPAGE_TOKEN, by name or by value",
+          not any(" ENV-VAR" in r or " ENV-VALUE" in r for r in runs))
+
+    base = f"http://localhost:{INT_PORT}"
+    for label, argv, stdin, want in (
+            ("sitemap-urls.py", [sys.executable, os.path.join(HERE, "sitemap-urls.py"),
+                                 f"{base}/sitemap.xml"], None, f"{base}/page-a"),
+            ("linkcheck.py", [sys.executable, os.path.join(HERE, "linkcheck.py"), "-"],
+             f"{base}/page-a\n", "link check: PASS")):
+        tmp = tempfile.mkdtemp(prefix="lc-selftest-tmp.")
+        before = len(_shim_lines())
+        r = subprocess.run(argv, input=stdin, capture_output=True, text=True, cwd=tmp,
+                           env=dict(os.environ, TMPDIR=tmp))
+        new = _shim_lines()[before:]
+        check(f"{label} end to end: ran to its verdict", r.returncode == 0 and want in r.stdout)
+        check(f"{label} end to end: the token never reached curl's argv",
+              bool(new) and not any(TOKEN in n for n in new))
+        check(f"{label} end to end: the header file sat under $TMPDIR",
+              any(" HDRFILE " in n and (" " + tmp + os.sep) in n for n in new))
+        check(f"{label} end to end: the private dir is gone after exit", os.listdir(tmp) == [])
+        shutil.rmtree(tmp, True)
 
 
 FAILS = []
@@ -196,6 +300,8 @@ def main():
     int_srv, INT_PORT = _start("INT")
     ext_srv, EXT_PORT = _start("EXT")
 
+    shim_dir = _install_curl_shim()   # before any curl runs, so runner_checks sees every call
+
     # Env must be set BEFORE importing the scripts — they read it at module load.
     os.environ["LINKCHECK_HOST"] = "localhost"
     os.environ["VERIFY_HOMEPAGE_TOKEN"] = TOKEN
@@ -281,11 +387,14 @@ def main():
     check("is_allowed(localhost.evil.com) is False",
           not sitemap.is_allowed("http://localhost.evil.com/"))
 
+    runner_checks()
+
     int_srv.shutdown()
     ext_srv.shutdown()
 
     crash_guard_checks()
     crawl_floor_checks()
+    shutil.rmtree(shim_dir, True)
 
     print()
     if FAILS:

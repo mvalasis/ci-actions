@@ -3,7 +3,8 @@ name: linkcheck engine self-test
 # Two guards, and the split is the point.
 #
 # engine-selftest  — offline, no writes. Token scoping across a redirect chain, plus the
-#                    static verdict-token class checks added 2026-09-04.
+#                    static verdict-token class checks added 2026-09-04, and (v1.15.2)
+#                    the token kept out of every curl's argv and environment.
 # issue-lifecycle  — the LIVE half. Runs the real composite against a loopback site and
 #                    lets GitHub's OWN `if:` evaluator decide the issue steps.
 #

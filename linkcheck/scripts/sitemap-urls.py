@@ -10,7 +10,8 @@ Prints one page URL per line (deduped, sorted). Recurses into a
 gzipped sitemaps. Sends the X-Verify-Source header (CF Bot-Fight-Mode
 bypass) ONLY to the internal host (LINKCHECK_HOST, or the seed sitemap
 hosts) and its subdomains, re-scoped per redirect hop — never to a
-cross-host child-sitemap <loc> or redirect target. Uses a real-browser
+cross-host child-sitemap <loc> or redirect target. curl reads the header
+from a mode-600 file, never from its argv or env. Uses a real-browser
 UA so the fetch isn't challenged on cloud-runner IPs.
 
 # lint-allow-no-crash-guard: this is a PIPELINE STAGE, not a gate, and it has no
@@ -26,8 +27,10 @@ UA so the fetch isn't challenged on cloud-runner IPs.
 # no report mode, because its wrapper DID misattribute (it filed a false
 # "broken links found" issue on a crawler crash).
 """
+import atexit
 import gzip
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -63,6 +66,26 @@ def is_allowed(url):
     return bool(h) and any(h == a or h.endswith("." + a) for a in ALLOWED)
 
 
+# The token on the RUNNER, as in linkcheck.py: curl reads the header from a
+# mode-600 file in a private dir removed at exit, never as an argv string (`ps`
+# shows argv to every process on the runner), and runs without
+# VERIFY_HOMEPAGE_TOKEN in its environment. Made lazily, once; single-threaded.
+_HDR_PATH = ""
+
+
+def _token_header():
+    """Path of the mode-600 `X-Verify-Source: <token>` file ('' with no token)."""
+    global _HDR_PATH
+    if TOKEN and not _HDR_PATH:
+        d = tempfile.mkdtemp(prefix="sitemap-urls.")   # 0700
+        atexit.register(shutil.rmtree, d, True)
+        p = os.path.join(d, "token-header")
+        with os.fdopen(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+            f.write(f"X-Verify-Source: {TOKEN}\n")
+        _HDR_PATH = p
+    return _HDR_PATH
+
+
 def fetch(url):
     # Shell out to curl rather than urllib: the WP edge can enforce a hardened
     # TLS floor that macOS's bundled LibreSSL-Python fails to negotiate; curl
@@ -75,9 +98,10 @@ def fetch(url):
             cmd = ["curl", "-sS", "--compressed", "--max-time", "30", "-A", UA,
                    "-o", tf.name, "-w", "%{http_code} %{redirect_url}"]
             if TOKEN and is_allowed(cur):
-                cmd += ["-H", f"X-Verify-Source: {TOKEN}"]
-            wo = subprocess.run(cmd + [cur], capture_output=True,
-                                check=True).stdout.decode("utf-8", "ignore").split()
+                cmd += ["-H", "@" + _token_header()]
+            env = {k: v for k, v in os.environ.items() if k != "VERIFY_HOMEPAGE_TOKEN"}
+            wo = subprocess.run(cmd + [cur], capture_output=True, check=True,
+                                env=env).stdout.decode("utf-8", "ignore").split()
             data = open(tf.name, "rb").read()
         code = int(wo[0]) if wo and wo[0].isdigit() else 0
         nxt = wo[1] if len(wo) > 1 else ""
