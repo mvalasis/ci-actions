@@ -56,7 +56,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.19.7** *(tag not yet cut; lands with the next `v1` move)* — `security-baseline`'s verified
+**v1.19.7** — `security-baseline`'s verified
 probe walks every commit of a range that holds a merge. trufflehog walks `git log` newest commit
 date first and stops at `--since-commit`, and past a merge one walk takes the newer parent first, so
 it stopped before the other side's older commits: those of a PR that merged its base in, dated
