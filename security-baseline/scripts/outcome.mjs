@@ -22,7 +22,8 @@ export const LEGS = {
   gha: { name: 'semgrep GitHub-Actions rule pack', checks: ids(/^gha-/) },
   gitleaks: { name: 'gitleaks secret scan', checks: ['secret-pattern'] },
   gitleaksHistory: { name: 'gitleaks full-history baseline', checks: ['secrets-history'] },
-  trufflehog: { name: 'trufflehog verified-live secrets', checks: ['secret-verified'] },
+  // secrets-history: what a diff-scoped walk found in a commit the base holds (v1.19.7).
+  trufflehog: { name: 'trufflehog verified-live secrets', checks: ['secret-verified', 'secrets-history'] },
   trufflehogHistory: { name: 'trufflehog verified-live secrets, full history', checks: ['secrets-history'] },
   osv: { name: 'osv-scanner dependency audit', checks: ids(/^sca-/) },
   hadolint: { name: 'hadolint Dockerfile lint', checks: ['dockerfile-lint'] },

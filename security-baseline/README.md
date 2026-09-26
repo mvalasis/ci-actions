@@ -138,7 +138,7 @@ it looked and found nothing, or it **could not look**:
 | any | not installed; killed or timed out; output over the 64 MB cap; its collector crashed. A run of 10 s or more says how long it took: a registry stall leaves no other trace. |
 | semgrep | exit 2 or higher, or 1 with no results (without `--error`, which this gate never passes, 1 is not "findings"); no JSON report; an `errors[]` entry at `level: "error"`: a rule or config that did not load, or semgrep's engine failing on a file (an AST builder or fatal error, which semgrep itself exits 2 for). A per-file `warn` (a file it could not fully parse or finish) is listed under scanner notes and is not a fault. |
 | gitleaks | exit other than 0 (it runs with `--exit-code 0`); exit 0 with no report written; a report that is not a JSON array; no git history to read, checked before it runs, because outside a repository gitleaks exits 0 with `[]` |
-| trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short; on the diff, no commit to stop its walk at (`git merge-base` of the base and the walk's head failed), checked before it runs |
+| trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short; on the diff, no commit to stop a walk at (`git merge-base` of the base and a walk's tip failed, timed out or was killed; for a second tip, only a clean "they share no commit" walks it to its root instead), a range git cannot list (`git rev-list`), or a checkout it cannot clone, each checked before trufflehog runs; a finding whose commit's ancestry git cannot tell (the key blocks as new). With several walks the reason names the first that failed and its tip (v1.19.7) |
 | osv-scanner | exit other than 0, 1 or 128; exit 1 with no results; 128 with `Error during extraction` on stderr (a lockfile it could not parse), or with a tracked npm/composer lockfile and no `Scanned … found N packages` line (one it did not read, such as a `bun.lockb`). Otherwise 128 is nothing to audit: no lockfile, or every lockfile read and empty (v1.19.5; measured on v2.4.0) |
 | hadolint | no JSON array; exit other than 0 or 1 (1 = a rule fired) |
 | git | the diff that lists the changed files failed: a `base-ref` or PR base that does not resolve, which gitleaks would read as an empty range and exit 0 on; `git ls-files` failed |
@@ -180,22 +180,65 @@ run until **v1.19.6**:
 
 - **A ref name resolves in trufflehog's clone, not in the checkout.** actions/checkout leaves a
   pull_request run detached on GitHub's test merge (`refs/remotes/pull/N/merge`) with no local
-  branch, and a clone copies only local branches (as `origin/*`), tags and HEAD. The PR base,
-  `origin/main`, never resolved: `unable to resolve ref: no base refs succeeded for base:
-  "origin/main"`. Without `--fail-on-scan-errors` that exits 0, so every PR run's verified probe
-  scanned nothing from v1.3.0 to v1.18.x; with it (v1.19.0) every PR run FAULTed.
+  branch, and trufflehog's clone files every ref of the checkout under `refs/remotes/origin/`
+  (`git clone -c remote.origin.fetch=+refs/*:refs/remotes/origin/*`), so `origin/main` arrives as
+  `refs/remotes/origin/remotes/origin/main`. The PR base, `origin/main`, never resolved: `unable to
+  resolve ref: no base refs succeeded for base: "origin/main"`. Without `--fail-on-scan-errors` that
+  exits 0, so every PR run's verified probe scanned nothing from v1.3.0 to v1.18.x; with it
+  (v1.19.0) every PR run FAULTed.
 - **Walked from the test merge, it stops too early.** The base branch's tip comes before every PR
   commit dated earlier than it, so the walk never reached the commits of a PR behind its base.
 
-So the probe gets two commit ids: `--branch` is the PR's own head
+So the probe gets commit ids (v1.19.6): `--branch` is the PR's own head
 (`github.event.pull_request.head.sha`, used only when the checkout holds it; else HEAD) and
-`--since-commit` is where that head left the base (`git merge-base <base> <head>`). Both are
-ancestors of HEAD, so both are in trufflehog's clone. For a linear PR branch the walk is exactly its
-commits: not the test merge, not base commits newer than the fork. Off a pull_request the walk is
-HEAD back to the base, as before. **Still not walked:** a PR branch that merged its base in stops at
-the newest base commit it merged, so its commits dated before that one are skipped; so are a merged
-branch's commits dated before `event.before` on a push. gitleaks' `<base>..HEAD` range, the T0
-pattern floor, walks both.
+`--since-commit` is where that head left the base (`git merge-base <base> <head>`). For a linear
+range the walk is exactly its commits: not the test merge, not base commits newer than the fork.
+Off a pull_request the walk is HEAD back to the base.
+
+**A range that holds a merge is walked from every segment tip (v1.19.7).** One walk holds both
+parents of a merge and takes the newer first, so it reaches its stop before the other side's
+commits dated earlier. It skipped the commits of a PR branch that merged its base in, dated before
+the newest base commit it merged, and on a push a merged branch's commits dated before
+`event.before`: a `--no-ff` merge, or a branch that merged main in and was then pushed onto it.
+Replayed from GitHub's activity log and run history on the 11 callers, from each one's first run of
+the gate to 2026-09-25 (652 pushes, 541 `pull_request` runs), 19 runs skipped commits: 19 of the 56
+whose range held a merge, 85 skipped commits summed over those runs. Five commits that landed were
+walked by no run at all (luxairport-frontend 1, epn-astro 2, lampakia-astro 2), and 18 more on
+luxairportlu, where the 2026-09-02 history rewrite hides whether their earlier versions were.
+
+The range is `git rev-list --parents <base>..<head>`, and its segment tips are the head plus every
+in-range parent of an in-range merge, an octopus merge's included. Each tip is walked back to where
+it left the base, `git merge-base <base> <tip>`, and a tip that shares no commit with the base (an
+unrelated history merged in) to its root. A walk holds one commit, and so cannot stop, until it
+reaches its first merge or leaves the range, and every commit of the range sits on such a run below
+some tip: together the walks cover the range whatever the commit dates. A linear range is still one
+walk. Replayed on the same runs, the walks skipped no commit and walked none outside the range; they
+numbered 1.10 a push and 1.03 a PR run, and at most 6 on any of the 1,407 recorded pushes still in
+history (all of them, not only since adoption: 1,343 need one walk, 54 two, 7 three, 3 six).
+gitleaks' `<base>..HEAD` range, the T0 pattern floor, is the same range, date cutoff included
+(§Honest limits).
+
+- **One clone.** Every walk runs on one clone of the checkout, the clone trufflehog would make of
+  `file://.` on each run (same refspec), made once, without a worktree, and named with
+  `--trust-local-git-config`, under which trufflehog scans the repository it is given in place.
+  Nothing of the checkout's git config reaches a clone, so trusting it trusts only what `git clone`
+  wrote. With no index, trufflehog's staged-changes pass reads nothing. A CI checkout has nothing
+  staged; v1.19.6's per-run clone copied the checkout's index, so on a local run it also read
+  staged changes, and v1.19.7 does not. The clone is named `sb-trufflehog-*`: after a scan
+  trufflehog deletes a repository it read whose path starts with `$TMPDIR/trufflehog` (measured).
+- **Once, and never pre-existing.** Walks that meet report the commits they share twice, so findings
+  are deduplicated by commit, file, line and detector. A walk stops at a commit the base holds, but
+  only once it gets there: a commit dated before its own parent, or a second merge base, can take it
+  through older base commits first. Whether the base holds a finding's commit is asked of git by
+  ancestry (`git merge-base --is-ancestor <commit> <base>`), not read off the range list: past a
+  clock skew `git rev-list <base>..<head>` lists base commits too, since it stops walking the base's
+  side once that side is dated older than everything left (measured on git 2.54: seven base commits
+  dated before the fork put the fork in the list). A live key in a commit the base holds is
+  `secrets-history` (WARN), never `secret-verified`; v1.19.6 would have blocked on it. One whose
+  ancestry git cannot tell blocks as new, and the leg could not look.
+- **Not read by either scanner:** what only a merge commit adds. `git log -p` shows no patch for a
+  merge, so a key typed into a conflict resolution passes both gitleaks' range and every walk
+  (measured on gitleaks 8.30.1 and trufflehog 3.95.6, beside a control commit both reported).
 
 ## Sovereignty — honest egress enumeration
 
@@ -306,6 +349,13 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
 
 ## Honest limits
 
+- **gitleaks' range trusts git's date cutoff.** `--log-opts <base>..HEAD` is `git log`'s range, and
+  past a clock skew git lists base commits in it (seven base commits dated before everything on the
+  head's side end its walk of the base early). gitleaks reads them, so a pattern secret already in
+  one would block as `secret-pattern`: measured on gitleaks 8.30.1, whose range reported a
+  pre-existing token in the fork beside the PR's own. trufflehog's findings are judged by ancestry
+  instead (§What the verified probe walks); the gitleaks leg is not yet. No caller's history has shown
+  such a skew (no replayed run walked outside its range).
 - **No reachability.** OSS semgrep + osv-scanner are syntactic / present-in-tree; there is no
   dataflow-reachability (a Pro/cloud feature, air-gap-forbidden). A dep CVE means "present", not
   "exploitable" — the report says so.
@@ -402,27 +452,58 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   out of the list; read and empty, it is nothing to audit. 17 targeted mutants each turn it red.
   Its **pull_request** leg (v1.19.6) builds the checkout actions/checkout leaves a PR on: detached
   on a test merge, no local branch, a PR commit dated before main's tip, and origin/main moved on
-  after the merge. Its trufflehog stub behaves as 3.95.6 does (clone, resolve in the clone, walk
-  `git log` and stop at the base). Controls first: v1.19.5's `--since-commit origin/main` exits 1,
-  origin/main's tip as a sha exits 1, and a walk from the test merge looks but never reaches the PR
-  commit. Then the run, with the env of the faulting runs: PASS, and the walk is exactly the PR's
-  commit, handed over as `--branch <PR head> --since-commit <fork point>`. A PR head the checkout
-  lacks is a scanner note and a walk from HEAD, an unresolvable base is could-not-look before
-  trufflehog runs, and `action.yml` must wire `PR_HEAD_SHA`. 9 targeted mutants each turn it red.
+  after the merge. Its trufflehog stub behaves as 3.95.6 does: it clones the repository it is given
+  with trufflehog's refspec, or under `--trust-local-git-config` reads it in place, resolves there,
+  walks `git log` and stops at the base. Controls first: v1.19.5's `--since-commit origin/main`
+  exits 1; origin/main's tip as a sha resolves (the clone carries every ref) and stops the walk
+  before any commit; a walk from the test merge looks but never reaches the PR commit. Then the run,
+  with the env of the faulting runs: PASS, and the walk is exactly the PR's commit, handed over as
+  `--branch <PR head> --since-commit <fork point>`. A PR head the checkout lacks is a scanner note
+  and a walk from HEAD, an unresolvable base is could-not-look before trufflehog runs, and
+  `action.yml` must wire `PR_HEAD_SHA`. 9 targeted mutants each turn it red.
+  Since v1.19.7 it also asserts one walk and no note for a linear range, on a clone named with
+  `--trust-local-git-config` and gone afterwards, and adds seven ranges that hold a merge, each behind
+  a control that reproduces v1.19.6's walk (or git's own behaviour) on the stub. They are: a PR that
+  merged its base in (one PR commit older than the base commit it merged, one newer, so two walks
+  meet); a push of a `--no-ff` merge whose branch commit is older than `event.before`; a commit dated
+  before its own parent, which takes a walk through a base commit; an unrelated history merged in;
+  a key on the file and line of a pre-existing one a walk meets first; a pushed octopus merge whose
+  branch commit adds two keys; and seven base commits dated before the fork, which make git's own
+  `rev-list <base>..<head>` list the fork. Each commit adds a `.live` file the stub reports as a
+  verified key. It asserts the walks cover exactly the range; every walk's argv; one finding for a
+  commit two walks share and two for two keys in one commit; a base commit's key a WARN never a
+  block, judged by ancestry; the unrelated side walked to its root; the note; full scope's verified
+  key a WARN. Could-not-look is asserted for a range git cannot list, a clone it cannot make, a
+  second tip whose base git cannot find or whose git is killed, a head sharing no commit with the
+  base, an ancestry check git cannot answer (the key blocks as new) and one walk of several (named;
+  a failed walk keeps its findings, and the walks after it run). The stub also deletes a repository
+  it read under `$TMPDIR/trufflehog*`, as trufflehog does. An independent test-critic's 14 mutants
+  of the first draft left 10 surviving, and its fixtures broke two of the claims: a killed `git
+  merge-base` read as "no common commit", and the range list taken as the test of "pre-existing".
+  Both are fixed, and each survivor now has a test. 40 of 42 targeted mutants of `scan.mjs`, the
+  stub and the fixtures, the reviewer's included, turn it red. The other two are equivalent: a clone
+  with a worktree, and a clone without trufflehog's refspec (every walk's tip and stop is an
+  ancestor of HEAD).
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
-- `bash scripts/selftest-pr-shape.sh` — the pull_request checkout again, scanned with the REAL
-  trufflehog: `--only-verified` is swapped for an offline pass that prints unverified results, and
-  per-run minted tokens in a PR commit and in a newer main commit show what it walked. It fails
-  unless the walk reaches the PR's and none of main's. It pins the walk on every
-  `trufflehog-version` bump; v1.19.5's `scan.mjs` fails it, and so do the two near-misses (a walk
-  from the test merge, and a walk without `--branch`).
+- `bash scripts/selftest-pr-shape.sh` — the shapes this repo's own pushes never produce, scanned
+  with the REAL trufflehog: `--only-verified` is swapped for an offline pass that prints unverified
+  results, and per-run minted tokens in every commit show what it walked. Four shapes: the
+  pull_request checkout; a PR that merged its base in, with one commit dated before the base commit
+  it merged (v1.19.7); a push of a merge whose branch commit is dated before `event.before`
+  (v1.19.7); a push of an octopus merge of three such branches (v1.19.7). Each fails unless the
+  walks reach every commit of the range and none of the base's, and every failure is reported
+  before it exits. It pins the walk on every `trufflehog-version` bump. v1.19.5's `scan.mjs` fails
+  it, and so do the two near-misses (a walk from the test merge, and a walk without `--branch`).
+  v1.19.6's fails the three merge shapes. So do the mutants that walk from the head alone, skip the
+  head's walk, keep two parents of an octopus, walk a tip to its root, drop `--since-commit`, name
+  the clone `trufflehog-*` or drop the note.
 
 All three run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a report-mode self-scan,
 after which the same job runs `scan.mjs` over this repo with the real scanners the action just
 installed, in both scopes, and fails if any leg could not look: the one place real scanner output,
-not a stub's, goes through `outcome.mjs` before a release. Both of those runs are a push; the
-pull_request shape is `selftest-pr-shape.sh`'s.
+not a stub's, goes through `outcome.mjs` before a release. Both of those runs are a push of this
+repo's linear history; the pull_request and merge shapes are `selftest-pr-shape.sh`'s.
 
 The self-scan (`scan-scope: full`) covers this repo's whole tree, the rule fixtures included,
 and should report **critical: 0**. The fixtures' T1/T2 findings are expected: they are the

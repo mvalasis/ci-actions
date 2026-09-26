@@ -56,6 +56,54 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.19.7** *(tag not yet cut; lands with the next `v1` move)* — `security-baseline`'s verified
+probe walks every commit of a range that holds a merge. trufflehog walks `git log` newest commit
+date first and stops at `--since-commit`, and past a merge one walk takes the newer parent first, so
+it stopped before the other side's older commits: those of a PR that merged its base in, dated
+before the newest base commit it merged, and on a push a merged branch's dated before
+`event.before`. v1.19.6 documented the gap. **Measured:** every push (GitHub's activity log, before
+and after) and every `pull_request` run (its head, the base tip at run time) of the 11 callers, from
+each one's first run of the gate to 2026-09-25, replayed through the walk: 19 of 1,193 runs skipped
+commits, 19 of the 56 whose range held a merge, 85 skipped commits summed over them. Five commits
+that landed were walked by no run (luxairport-frontend 1, epn-astro 2, lampakia-astro 2); 18 more
+on luxairportlu cannot be judged, since its 2026-09-02 history rewrite hides the earlier runs. Now
+the range (`git rev-list --parents <base>..<head>`) is walked from every segment tip, the head and
+each in-range parent of an in-range merge (an octopus's too), each back to `git merge-base <base>
+<tip>`. A tip sharing no commit with the base (an unrelated history merged in) is walked to its
+root. A linear range is still one walk; the 1,407 recorded pushes still in history need at most 6.
+Every walk runs on ONE `--no-checkout` clone of the checkout, made with trufflehog's own refspec
+and named with `--trust-local-git-config`, so cost does not scale with clones. It is named
+`sb-trufflehog-*` because trufflehog deletes a repository it scanned under `$TMPDIR/trufflehog*`
+(measured). Findings are deduplicated by commit, file, line and detector. Whether the base holds a
+finding's commit is asked of git by ancestry, not read off the range list: past a clock skew `git
+rev-list <base>..<head>` lists base commits too (git's date cutoff; measured on git 2.54). A key in
+a commit the base holds, which a skewed date or a second merge base can walk through, is
+`secrets-history` (WARN), never `secret-verified`. could-not-look now covers a range git cannot list,
+a clone it cannot make, a `git merge-base` that fails, times out or is killed (only a clean "they
+share no commit" walks a second tip to its root), an ancestry check git cannot answer (the key
+blocks as new) and each walk that cannot look (the first named); a failed walk keeps its findings.
+Without an index, the clone no longer reads staged changes on a local run; a CI checkout has none.
+The selftest's trufflehog stub now clones with trufflehog's refspec. Its control "origin/main's tip
+as a sha is not in the clone, exit 1" was false: the real binary resolves it and exits 0 having
+walked nothing. It is rewritten. The (T) leg gains seven merged ranges with controls, 33 new
+assertions and 1 rewritten. An independent test-critic's 14 mutants of the first draft left 10
+surviving, and its fixtures broke two claims (a killed `merge-base` read as "no common commit", and
+the range list as the test of "pre-existing"). Both are fixed, and each survivor has a test: 40 of
+42 targeted mutants turn it red, the other two proved equivalent. `selftest-pr-shape.sh` gains three
+merge shapes on the REAL trufflehog (base merged into a PR, a pushed merge, a pushed octopus) and
+reports every failure. v1.19.6's `scan.mjs` fails it, as do 7 targeted mutants. **Measured before
+release** with the real trufflehog 3.95.6 `--only-verified` and gitleaks 8.30.1, v1.19.6's and this
+`scan.mjs`, on the push shape of all 11 callers' `main` and luxairportlu's `dev`, and on the 4 open
+PRs: every verdict matches (PASS). The walks match except prevedourougr #37 and #38, where v1.19.6
+skips one PR commit each and this walks it (two walks). On the 19 recorded runs that skipped,
+replayed offline on the real binary, v1.19.6 skips exactly the 85 predicted commits and this none,
+walking nothing outside the range, with verdicts unchanged. Still not read by either scanner: what
+only a merge commit adds (a conflict resolution), since `git log -p` shows no patch for a merge.
+Also not fixed here: gitleaks' `<base>..HEAD` range has the same date cutoff, so past a heavy skew a
+pre-existing pattern secret would block (security-baseline §Honest limits). **Caller-visible:** a
+range holding a merge takes one trufflehog run per segment tip, and the report notes it. No input
+changed. On the measured state the `v1` move newly-blocks nobody.
+
 **v1.19.6** — `security-baseline`'s verified
 probe looks on a `pull_request` run again, and walks the PR's own commits. Since the v1.19.1 move
 every PR run FAULTed (`trufflehog verified-live secrets — trufflehog exit 1`) while every push

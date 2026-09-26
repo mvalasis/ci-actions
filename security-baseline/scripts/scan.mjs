@@ -227,21 +227,28 @@ function collectGitleaks() {
 
 // ---------- trufflehog (verified-live secrets) ----------
 const isSha = (s) => /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(s);
-// The commits the verified probe walks, handed over as two commit ids, never as ref names.
+// The commits the verified probe walks, handed over as commit ids, never as ref names.
 // trufflehog does not scan a range. It clones `file://.` (it does not trust this checkout's git
 // config), walks `git log` in that clone from --branch (from every ref without it), newest commit
 // date first, and stops at --since-commit. Both halves failed every pull_request run (v1.19.6):
 //   - A ref NAME resolves in trufflehog's clone, not here. actions/checkout leaves a PR detached on
-//     refs/remotes/pull/N/merge with no local branch, and a clone copies only local branches (as
-//     origin/*), tags and HEAD. So `origin/main`, the PR base, never resolved: exit 0 having
-//     scanned nothing until v1.19.0, a FAULT on every PR run since.
+//     refs/remotes/pull/N/merge with no local branch, and the clone files every ref of the checkout
+//     under refs/remotes/origin/ (origin/main arrives as refs/remotes/origin/remotes/origin/main).
+//     So `origin/main`, the PR base, never resolved: exit 0 having scanned nothing until v1.19.0, a
+//     FAULT on every PR run since.
 //   - Walked from that test merge, the base branch's tip comes before every PR commit dated earlier
 //     than it, so a PR behind its base would scan nothing and pass. Walked from the PR's own head,
 //     the stop is where the PR left its base: exactly the PR's commits when its branch is linear.
-//     A branch that merged its base in stops at the newest base commit it merged, and its commits
-//     older than that are not walked. gitleaks' `BASE..HEAD` range, the T0 pattern floor, has no
-//     such gap.
 // Off a pull_request (a push, a dispatch, a local run) the walk starts at HEAD.
+// One walk covers the range only while it is linear (v1.19.7). Past a merge it holds both parents
+// and takes the newer first, so it reaches its stop before the other side's commits dated earlier:
+// the commits of a PR branch that merged its base in, and on a push those of a branch merged onto
+// the base. Measured on the fleet's runs since each caller adopted the gate, 19 of the 56 whose
+// range held a merge skipped commits. So the range is walked from every segment tip: the head, and
+// each in-range parent of an in-range merge, each back to where it left the base. A walk holds one
+// commit, and so cannot stop, until it reaches its first merge or leaves the range, and every
+// commit of the range sits on such a run below some tip: together the walks cover the range
+// whatever the dates. gitleaks' `BASE..HEAD` range, the T0 pattern floor, is the same range.
 function trufflehogRange() {
   let head = '';
   const pr = String(env.PR_HEAD_SHA || '').trim().toLowerCase();
@@ -251,12 +258,79 @@ function trufflehogRange() {
   }
   if (!head) head = sh(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
   if (!isSha(head)) return { reason: 'no commit checked out to walk from' };
-  const r = run('git', ['merge-base', BASE, head], { timeout: 30000 });
-  const since = r.status === 0 ? r.stdout.trim() : '';
-  if (isSha(since)) return { head, since };
-  const err = errorLine(r.stderr);
-  const why = err ? `exit ${r.status}: ${scrub(err)}` : r.status === 1 ? 'they share no commit' : `exit ${r.status}`;
-  return { reason: `no commit to stop the walk at: git merge-base ${safe(BASE, 60)} ${head.slice(0, 7)} failed, ${why}` };
+  const stopFor = (tip) => {
+    const r = run('git', ['merge-base', BASE, tip], { timeout: 30000 });
+    const since = r.status === 0 ? r.stdout.trim() : '';
+    if (isSha(since)) return { since };
+    const err = errorLine(r.stderr);
+    // A git that timed out or was killed never answered, which is not "no common commit" (run()
+    // reports its exit as 1, with nothing on stderr).
+    const died = r.error === 'ETIMEDOUT' ? 'timed out' : r.signal ? `killed by ${r.signal}` : r.error ? safe(r.error, 40) : '';
+    const why = died || (err ? `exit ${r.status}: ${scrub(err)}` : r.status === 1 ? 'they share no commit' : `exit ${r.status}`);
+    return { disjoint: !died && r.status === 1 && !err, reason: `no commit to stop the walk at: git merge-base ${safe(BASE, 60)} ${tip.slice(0, 7)} failed, ${why}` };
+  };
+  const first = stopFor(head);
+  if (first.reason) return first;
+  // The range, each commit with its parents. Past a clock skew this lists some base commits too
+  // (see baseHolds below), which only adds walks that stop at once.
+  const r = run('git', ['rev-list', '--parents', `${BASE}..${head}`], { timeout: 60000 });
+  if (r.status !== 0 || r.error || r.signal) return { reason: `git rev-list ${safe(BASE, 60)}..${head.slice(0, 7)} failed, exit ${r.status}${errorLine(r.stderr) ? `: ${scrub(errorLine(r.stderr))}` : ''}` };
+  const parents = new Map(r.stdout.split('\n').filter(Boolean).map((l) => { const [c, ...ps] = l.trim().split(/\s+/); return [c, ps]; }));
+  const tips = new Set([head]);
+  for (const ps of parents.values()) if (ps.length > 1) for (const p of ps) if (parents.has(p)) tips.add(p);
+  const walks = [{ tip: head, since: first.since }];
+  for (const tip of [...tips].slice(1)) {
+    // A tip that shares no commit with the base (an unrelated history merged in) has all of its
+    // history in the range: it is walked to its root, with no --since-commit.
+    const s = stopFor(tip);
+    if (s.reason && !s.disjoint) return s;
+    walks.push({ tip, since: s.since || '' });
+  }
+  const merges = [...parents.values()].filter((ps) => ps.length > 1).length;
+  return { walks, merges };
+}
+// Whether the base already holds a commit, asked of git by ancestry, once per commit. The range
+// list is no test for it: `git rev-list BASE..head` stops walking the base's side once that side's
+// commits are dated older than everything left on the other, so past a clock skew it lists base
+// commits as new (measured on git 2.54: seven base commits dated before the fork put the fork in the
+// range). true or false, or the reason git could not answer.
+const held = new Map();
+const baseHolds = (c) => {
+  if (!held.has(c)) {
+    const r = run('git', ['merge-base', '--is-ancestor', c, BASE], { timeout: 30000 });
+    const answered = !r.signal && !r.error && (r.status === 0 || r.status === 1);
+    held.set(c, answered ? r.status === 0
+      : { reason: `git merge-base --is-ancestor ${c.slice(0, 7)} ${safe(BASE, 60)} failed, ${r.signal ? `killed by ${r.signal}` : r.error ? safe(r.error, 40) : `exit ${r.status}`}${errorLine(r.stderr) ? `: ${scrub(errorLine(r.stderr))}` : ''} — so its key counts as new` });
+  }
+  return held.get(c);
+};
+// ONE clone serves every walk: the clone trufflehog makes of `file://.` on each run (same refspec),
+// made once and without a worktree, then named with --trust-local-git-config, under which
+// trufflehog scans the repository it is given in place. Nothing of the checkout's git config
+// reaches a clone, so trusting it trusts only what `git clone` wrote. With no index, trufflehog's
+// staged-changes pass reads nothing, as on a clean checkout. The directory's name must not start
+// with `trufflehog`: after a scan trufflehog deletes the repository it read when its path starts
+// with $TMPDIR/trufflehog (its own clones' prefix; measured on 3.95.6), which would take the clone
+// away from every walk after the first.
+function walkRange(leg, walks, flags) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-trufflehog-'));
+  try {
+    const clone = path.join(dir, 'repo');
+    const c = run('git', ['clone', '--quiet', '--no-checkout', '-c', 'remote.origin.fetch=+refs/*:refs/remotes/origin/*', `file://${process.cwd()}`, clone], { timeout: 300000 });
+    if (c.status !== 0 || c.error || c.signal) {
+      couldNotLook(leg, `git clone of the checkout for trufflehog failed, exit ${c.status}${errorLine(c.stderr) ? `: ${scrub(errorLine(c.stderr))}` : ''}`);
+      return [];
+    }
+    const results = [];
+    walks.forEach((w, i) => {
+      const o = trufflehogOutcome(run(BIN.trufflehog, ['git', `file://${clone}`, '--trust-local-git-config', ...flags, '--branch', w.tip, ...(w.since ? ['--since-commit', w.since] : [])], { timeout: 300000 }));
+      if (!o.looked) couldNotLook(leg, `trufflehog${walks.length > 1 ? ` walk ${i + 1} of ${walks.length}, from ${w.tip.slice(0, 7)},` : ''} ${o.reason}`);
+      results.push(...o.results);
+    });
+    return results;
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
 }
 function collectTrufflehog() {
   const out = [];
@@ -264,7 +338,7 @@ function collectTrufflehog() {
   const scoped = DIFF && !!BASE;
   const leg = scoped ? LEGS.trufflehog : LEGS.trufflehogHistory;
   if (!have(BIN.trufflehog)) { couldNotLook(leg, 'trufflehog not installed — verified-secrets: off runs without it, on the gitleaks pattern floor'); return out; }
-  // CRITICAL `secret-verified` is the DIFF-scoped check: the walk (trufflehogRange) covers the NEW
+  // CRITICAL `secret-verified` is the DIFF-scoped check: the walks (trufflehogRange) cover the NEW
   // commits, so it can only fire on a just-added live key (never pre-existing state). When there
   // is no diff range (scan-scope:full, or an unresolved base), the verified probe widens to full
   // history — a pre-existing live key must NOT block, so those are emitted as WARN `secrets-history`
@@ -272,19 +346,39 @@ function collectTrufflehog() {
   // NEVER printed (not even redacted) — detector + file:line is enough.
   // --fail-on-scan-errors: without it, a scan that failed inside (a --since-commit it cannot
   // resolve) exits 0, having scanned nothing.
-  const range = scoped ? trufflehogRange() : null;
-  if (range && range.reason) { couldNotLook(leg, range.reason); return out; }
-  const args = ['git', 'file://.', '--only-verified', '--no-update', '--json', '--fail-on-scan-errors'];
-  if (range) args.push('--branch', range.head, '--since-commit', range.since);
-  const o = trufflehogOutcome(run(BIN.trufflehog, args, { timeout: 300000 }));
-  if (!o.looked) couldNotLook(leg, `trufflehog ${o.reason}`);
-  for (const obj of o.results) {
+  const flags = ['--only-verified', '--no-update', '--json', '--fail-on-scan-errors'];
+  let range = null, results;
+  if (scoped) {
+    range = trufflehogRange();
+    if (range.reason) { couldNotLook(leg, range.reason); return out; }
+    if (range.walks.length > 1) infra.push(`trufflehog: the range holds ${range.merges} merge${range.merges === 1 ? '' : 's'}, so it was walked from ${range.walks.length} segment tips, each back to where it left the base${range.walks.some((w) => !w.since) ? ', or to its root where it shares no commit with the base' : ''}`);
+    results = walkRange(leg, range.walks, flags);
+  } else {
+    const o = trufflehogOutcome(run(BIN.trufflehog, ['git', 'file://.', ...flags], { timeout: 300000 }));
+    if (!o.looked) couldNotLook(leg, `trufflehog ${o.reason}`);
+    results = o.results;
+  }
+  const seen = new Set();
+  for (const obj of results) {
     if (obj.Verified !== true) continue;
     const g = (obj.SourceMetadata && obj.SourceMetadata.Data && obj.SourceMetadata.Data.Git) || {};
+    // Two walks that meet report the commits they share twice.
+    const key = [g.commit, g.file, g.line, obj.DetectorName].join('\n');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    // A walk stops at a commit the base holds, but only once it gets there: a skewed commit date, or
+    // a second merge base, can take it through older base commits first. What it found in a commit
+    // the base holds is pre-existing, so it warns and never blocks. A finding without a commit id
+    // counts as the change's own (trufflehog names staged content `Staged`; a clone with no index has
+    // none), and so does one whose ancestry git could not tell: that blocks, and the leg could not look.
+    const id = String(g.commit || '').toLowerCase();
+    const holds = scoped && isSha(id) ? baseHolds(id) : false;
+    if (holds && holds.reason) couldNotLook(leg, holds.reason);
+    const fresh = scoped && holds !== true;
     out.push({
-      checkId: scoped ? 'secret-verified' : 'secrets-history', tool: 'trufflehog', rule: obj.DetectorName || 'secret',
+      checkId: fresh ? 'secret-verified' : 'secrets-history', tool: 'trufflehog', rule: obj.DetectorName || 'secret',
       file: g.file || '(history)', line: g.line || 0, commit: g.commit, cwe: 'CWE-798',
-      msg: `🔴 VERIFIED-LIVE ${obj.DetectorName || 'secret'}${shortSha(g.commit) ? ` in commit ${shortSha(g.commit)}` : ''} — ROTATE NOW${scoped ? '' : ' (pre-existing in history — WARN, not a block; rotate then scrub history)'}`,
+      msg: `🔴 VERIFIED-LIVE ${obj.DetectorName || 'secret'}${shortSha(g.commit) ? ` in commit ${shortSha(g.commit)}` : ''} — ROTATE NOW${fresh ? '' : ' (pre-existing in history — WARN, not a block; rotate then scrub history)'}`,
     });
   }
   return out;

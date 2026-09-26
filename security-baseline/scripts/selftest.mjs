@@ -737,6 +737,10 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('full scope: argv-secret grades the untouched script too', f.stdout.includes('### ⚠️ `argv-secret` · T1 · 3 finding(s)')
       && f.stdout.includes('- ⚠️ scripts/untouched.sh:2 — -H X-Api-Key expands OLD_API_KEY'), f.stdout.split('\n').filter((l) => l.includes('argv')).join(' | '));
     check('full scope: a selftest fixture is still never graded', f.stdout.length > 0 && !f.stdout.includes('scripts/selftest.sh'));
+    // Under full scope trufflehog reads all history: a verified key there is pre-existing, a WARN.
+    check('full scope: a verified live key is secrets-history, a WARN — never secret-verified',
+      f.stdout.includes('- ⚠️ app/config.php:3 — 🔴 VERIFIED-LIVE Github — ROTATE NOW pre-existing in history — WARN, not a block; rotate then scrub history')
+      && !f.stdout.includes('`secret-verified`'), f.stdout.split('\n').filter((l) => l.includes('VERIFIED-LIVE') || l.includes('secret-verified')).join(' | '));
 
     // ---- a scanner that could not look: FAULT under fail-on-critical, never PASS (v1.19.0) ----
     // A CLEAN stub set: every scanner runs and finds nothing (hadolint's one rule firing exits 1, as
@@ -933,25 +937,41 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     // GITHUB_BASE_REF → origin/<base>, BASE_REF empty, which is the env of every PR run that faulted.
     // Here the PR is one commit off main, older than main's tip, and main moved again after GitHub
     // computed the merge, so origin/main's tip is not in HEAD's history either. The stub is trufflehog
-    // 3.95.6 as measured and as its source reads: it clones file://., resolves --branch and
-    // --since-commit IN THE CLONE (as given, then under refs/heads/ and refs/remotes/origin/), takes
-    // their merge base when given both, walks `git log` from --branch (every ref without it) and
-    // stops at the base. It logs the commits it walked.
+    // 3.95.6 as measured and as its source reads: it clones the file:// repository it is given as
+    // trufflehog does (every ref, under refs/remotes/origin/), or with --trust-local-git-config scans
+    // that repository in place; resolves --branch and --since-commit THERE (as given, then under
+    // refs/heads/ and refs/remotes/origin/), takes their merge base when given both, walks `git log`
+    // from --branch (every ref without it) and stops at the base. It appends each commit it walks to
+    // the walk log, and under TH_EMIT reports a verified finding for every `.live` file a walked
+    // commit adds (none for a merge, which `git log -p` shows no patch for).
     const walkLog = path.join(tmp, 'trufflehog-walk.log');
     const realArgv = path.join(tmp, 'trufflehog-as-measured-argv.log');
     const thAsMeasured = stub('trufflehog-as-measured', [
       `printf '%s\\n' "$*" >> '${realArgv}'`,
-      'branch=""; since=""',
-      'while [ $# -gt 0 ]; do case "$1" in --branch) shift; branch="$1" ;; --since-commit) shift; since="$1" ;; esac; shift; done',
-      'd=$(mktemp -d "$TMPDIR/th-clone.XXXXXX") || exit 1',
-      'trap \'rm -rf "$d"\' EXIT',
-      'git clone -q "file://$PWD" "$d/c" 2>/dev/null || exit 1',
-      'resolve() { for p in "" refs/heads/ refs/remotes/origin/; do git -C "$d/c" rev-parse -q --verify "$p$1^{commit}" && return 0; done; return 1; }',
+      `: >> '${walkLog}'`,
+      'uri=""; branch=""; since=""; trust=""',
+      'while [ $# -gt 0 ]; do case "$1" in file://*) uri="${1#file://}" ;; --branch) shift; branch="$1" ;; --since-commit) shift; since="$1" ;; --trust-local-git-config) trust=1 ;; esac; shift; done',
+      'if [ -n "$trust" ]; then c="$uri"; else',
+      '  d=$(mktemp -d "$TMPDIR/th-clone.XXXXXX") || exit 1',
+      '  trap \'rm -rf "$d"\' EXIT',
+      '  src=$(cd "$uri" && pwd) || exit 1',
+      '  git clone -q -c \'remote.origin.fetch=+refs/*:refs/remotes/origin/*\' "file://$src" "$d/c" 2>/dev/null || exit 1',
+      '  c="$d/c"',
+      'fi',
+      'resolve() { for p in "" refs/heads/ refs/remotes/origin/; do git -C "$c" rev-parse -q --verify "$p$1^{commit}" && return 0; done; return 1; }',
       'base=""; head="--all"',
       'if [ -n "$since" ]; then base=$(resolve "$since") || { echo "unable to resolve ref: no base refs succeeded for base: \\"$since\\"" >&2; exit 1; }; fi',
-      'if [ -n "$branch" ]; then head=$(resolve "$branch") || exit 1; if [ -n "$base" ]; then base=$(git -C "$d/c" merge-base "$head" "$base") || exit 1; fi; fi',
-      `: > '${walkLog}'`,
-      `git -C "$d/c" log --format=%H $head | while read -r c; do [ "$c" = "$base" ] && break; echo "$c" >> '${walkLog}'; done`,
+      'if [ -n "$branch" ]; then head=$(resolve "$branch") || exit 1; if [ -n "$base" ]; then base=$(git -C "$c" merge-base "$head" "$base") || exit 1; fi; fi',
+      `git -C "$c" log --format=%H $head | while read -r x; do`,
+      '  [ "$x" = "$base" ] && break',
+      `  echo "$x" >> '${walkLog}'`,
+      '  [ -z "$TH_EMIT" ] || git -C "$c" diff-tree --no-commit-id --name-only -r --root "$x" | grep \'\\.live$\' | while read -r f; do',
+      '    printf \'{"SourceMetadata":{"Data":{"Git":{"commit":"%s","file":"%s","line":1}}},"DetectorName":"Github","Verified":true}\\n\' "$x" "$f"',
+      '  done',
+      'done',
+      // …and, as 3.95.6 does, deletes a repository it read in place whose path starts with
+      // $TMPDIR/trufflehog, the prefix of its own clones.
+      'if [ -n "$trust" ]; then case "$c" in "${TMPDIR%/}/trufflehog"*) rm -rf "$c" ;; esac; fi',
     ].join('\n'));
     const walked = () => (fs.existsSync(walkLog) ? fs.readFileSync(walkLog, 'utf8').split('\n').filter(Boolean) : null);
     const gitAt = (dir, iso) => (...a) => spawnSync('git', ['-c', 'user.name=selftest', '-c', 'user.email=selftest@example.invalid', '-c', 'commit.gpgsign=false', ...a],
@@ -994,34 +1014,317 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     };
     const asV1195 = thBy('--since-commit', 'origin/main');
     check("(T) control: v1.19.5's argv (--since-commit origin/main) does not resolve in trufflehog's clone — exit 1", asV1195.status === 1, JSON.stringify(asV1195));
+    // trufflehog's clone carries every ref of the checkout (origin/main as refs/remotes/origin/remotes/
+    // origin/main), so the tip's sha resolves; with no --branch the walk starts from every ref, and
+    // that tip is the newest commit there: it stops before walking anything. Measured on 3.95.6.
     const asTipSha = thBy('--since-commit', mainLater);
-    check("(T) control: origin/main's tip as a sha is not in the clone either — exit 1", asTipSha.status === 1, JSON.stringify(asTipSha));
+    check("(T) control: origin/main's tip as a sha resolves in the clone, and the walk stops on it before any commit — exit 0, nothing walked",
+      asTipSha.status === 0 && Array.isArray(asTipSha.walked) && asTipSha.walked.length === 0, JSON.stringify(asTipSha));
     const fromMerge = thBy('--since-commit', mainTip);   // merge-base(origin/main, HEAD): resolves, and walks the wrong commits
     check('(T) control: walked from the test merge back to the base tip it looks, and never reaches the PR commit',
       fromMerge.status === 0 && Array.isArray(fromMerge.walked) && fromMerge.walked.length > 0 && !fromMerge.walked.includes(prCommit), JSON.stringify(fromMerge));
     // The run, with the env of the faulting runs plus the PR head action.yml now passes.
     const prEnv = { BASE_REF: '', GITHUB_BASE_REF: 'main', GITHUB_EVENT_BEFORE: '', PR_HEAD_SHA: prCommit };
-    fs.rmSync(walkLog, { force: true });
-    const tpr = broken({ TRUFFLEHOG_BIN: thAsMeasured }, prEnv, prRepo);
+    // One scan through the as-measured stub: what it walked (every walk, in order) and each argv.
+    const walkScan = (cwd, env, extra = {}, bin = thAsMeasured) => {
+      fs.rmSync(walkLog, { force: true });
+      fs.rmSync(realArgv, { force: true });
+      const res = broken({ TRUFFLEHOG_BIN: bin }, { ...env, ...extra }, cwd);
+      const argvs = fs.existsSync(realArgv) ? fs.readFileSync(realArgv, 'utf8').split('\n').filter(Boolean) : [];
+      return { ...res, walked: walked() || [], argvs };
+    };
+    const tpr = walkScan(prRepo, prEnv);
     check('(T) a pull_request checkout: trufflehog looks — PASS, exit 0, no leg that could not look',
       tpr.status === 0 && tpr.stdout.includes('\nPASS — no critical findings.\n') && !tpr.stdout.includes('could not look'), verdict(tpr));
     check("(T) it walks exactly the PR's commit: not main's newer tip, not the test merge, nothing before the fork",
-      JSON.stringify(walked()) === JSON.stringify([prCommit]), JSON.stringify({ walked: walked(), prCommit }));
-    const prArgv = fs.existsSync(realArgv) ? fs.readFileSync(realArgv, 'utf8').split('\n').filter(Boolean).pop() : '';
+      JSON.stringify(tpr.walked) === JSON.stringify([prCommit]), JSON.stringify({ walked: tpr.walked, prCommit }));
+    const prArgv = tpr.argvs[tpr.argvs.length - 1] || '';
     check('(T) handed over as shas: --branch the PR head, --since-commit where it left origin/main',
       new RegExp(`(^| )--branch ${prCommit} --since-commit ${forkPoint}( |$)`).test(prArgv), prArgv);
-    // A PR head the checkout does not hold (a caller checking out something else): noted, walked from HEAD.
+    // v1.19.7: scan.mjs clones the checkout once and names that clone, never file://.
+    const cloneOf = (argv) => ((argv.match(/(?:^| )file:\/\/(\S+)/) || [])[1] || '');
+    const prClone = cloneOf(prArgv);
+    check('(T) a linear range is one walk, on a clone of the checkout named with --trust-local-git-config, and no note',
+      tpr.argvs.length === 1 && / --trust-local-git-config /.test(prArgv) && path.basename(prClone) === 'repo'
+      && path.basename(path.dirname(prClone)).startsWith('sb-trufflehog-') && !tpr.stdout.includes('segment tips'), JSON.stringify(tpr.argvs));
+    check('(T) and that clone is gone once the walks are done', prClone !== '' && !fs.existsSync(path.dirname(prClone)), prClone);
+    // A PR head the checkout does not hold (a caller checking out something else): noted, walked from
+    // HEAD, the test merge. The PR head is that merge's in-range parent, so it gets a walk of its own.
     const noSuchHead = shaOf('a PR head this checkout never fetched');
-    const tnh = broken({ TRUFFLEHOG_BIN: thAsMeasured }, { ...prEnv, PR_HEAD_SHA: noSuchHead }, prRepo);
+    const tnh = walkScan(prRepo, { ...prEnv, PR_HEAD_SHA: noSuchHead });
     check('(T) a PR head not in the checkout: a scanner note, the walk starts at HEAD, and it still looks',
       tnh.status === 0 && tnh.stdout.includes(`- trufflehog: the PR head ${noSuchHead.slice(0, 7)} is not in this checkout, so the walk starts at HEAD`)
       && !tnh.stdout.includes('could not look'), verdict(tnh));
+    check("(T) walked from the test merge, the PR's commit is walked still, and nothing of main's",
+      tnh.walked.includes(prCommit) && ![mainTip, mainLater, forkPoint].some((c) => tnh.walked.includes(c)), JSON.stringify(tnh.walked));
     const actYml = fs.readFileSync(new URL('../action.yml', import.meta.url), 'utf8');
     check('(T) action.yml wires the pull_request head into the Scan step as PR_HEAD_SHA',
       /^\s+PR_HEAD_SHA:\s*\$\{\{\s*github\.event\.pull_request\.head\.sha\s*\}\}\s*$/m.test(actYml));
 
+    // ---- (T) a range that holds a merge (v1.19.7) ----
+    // One walk holds both parents of a merge and takes the newer first, so it stops before the other
+    // side's commits dated earlier: a PR that merged its base in, and on a push a branch merged onto
+    // the base. Every commit below that matters adds a `.live` file, and TH_EMIT makes the stub report
+    // each as a verified finding: the report shows what was walked, and a base commit's never blocks.
+    const upstream = (name) => {
+      const dir = path.join(tmp, name);
+      fs.mkdirSync(dir);
+      gitAt(dir)('init', '-q', '-b', 'main');
+      return {
+        dir,
+        on: (...a) => gitAt(dir)('checkout', '-q', ...a),
+        commit: (iso, file, text = `${file}\n`) => { fs.writeFileSync(path.join(dir, file), text); gitAt(dir)('add', file); gitAt(dir, iso)('commit', '-q', '-m', file); return shaIn(dir, 'HEAD'); },
+        merge: (iso, ...a) => { gitAt(dir, iso)('merge', '-q', '--no-ff', '--no-edit', ...a); return shaIn(dir, 'HEAD'); },
+      };
+    };
+    // What actions/checkout leaves a pull_request run on, as above: feature into main, detached.
+    const prCheckout = (up, name) => {
+      const dir = path.join(tmp, name);
+      fs.mkdirSync(dir);
+      gitAt(dir)('init', '-q');
+      gitAt(dir)('fetch', '-q', '--no-tags', up.dir, '+refs/heads/*:refs/remotes/origin/*');
+      gitAt(dir)('checkout', '-q', '--detach', 'refs/remotes/origin/main');
+      gitAt(dir, '2026-09-10T00:00:00Z')('merge', '-q', '--no-ff', '--no-edit', 'refs/remotes/origin/feature');
+      gitAt(dir)('update-ref', 'refs/remotes/pull/1/merge', 'HEAD');
+      gitAt(dir)('checkout', '-q', '--detach', 'refs/remotes/pull/1/merge');
+      return dir;
+    };
+    const thIn = (cwd, ...args) => {
+      fs.rmSync(walkLog, { force: true });
+      const res = spawnSync(thAsMeasured, ['git', 'file://.', '--only-verified', '--no-update', '--json', '--fail-on-scan-errors', ...args], { cwd, env: base, encoding: 'utf8' });
+      return { status: res.status, walked: walked() || [] };
+    };
+    const sameSet = (a, b) => JSON.stringify([...new Set(a)].sort()) === JSON.stringify([...new Set(b)].sort());
+    const live = (r, file, sha) => r.stdout.includes(`- ❌ ${file}:1 — 🔴 VERIFIED-LIVE Github in commit ${sha.slice(0, 7)} — ROTATE NOW`);
+
+    // (T-a) A PR that merged its base in: one PR commit older than the base commit it merged, one newer
+    // (the head's walk reaches that one too, so two walks meet in it).
+    const ua = upstream('merged-base-up');
+    const aFork = ua.commit('2026-09-02T10:00:00Z', 'fork.live');
+    ua.on('-b', 'feature');
+    const aOld = ua.commit('2026-09-02T10:30:00Z', 'pr-old.live');
+    const aMid = ua.commit('2026-09-02T12:30:00Z', 'pr-mid.live');
+    ua.on('main');
+    const aBase = ua.commit('2026-09-02T12:00:00Z', 'base-merged.live');
+    ua.on('feature');
+    const aMerge = ua.merge('2026-09-02T13:00:00Z', 'main');
+    const aHead = ua.commit('2026-09-02T14:00:00Z', 'pr-new.live');
+    ua.on('main');
+    ua.commit('2026-09-02T15:00:00Z', 'main-after.live');
+    const pa = prCheckout(ua, 'merged-base-pr');
+    const aCtl = thIn(pa, '--branch', aHead, '--since-commit', aBase);
+    check("(T-a) control: v1.19.6's one walk from the PR head stops at the base commit it merged, before the PR's older commit",
+      aCtl.status === 0 && sameSet(aCtl.walked, [aHead, aMerge, aMid]), JSON.stringify(aCtl));
+    const ta = walkScan(pa, { ...prEnv, PR_HEAD_SHA: aHead }, { TH_EMIT: '1' });
+    check("(T-a) the walks cover exactly the PR's commits, the older one too: never the base commit it merged, main's later one or the fork",
+      sameSet(ta.walked, [aHead, aMerge, aMid, aOld]), JSON.stringify({ walked: ta.walked, want: [aHead, aMerge, aMid, aOld] }));
+    check('(T-a) two walks: the PR head back to the base commit it merged, the in-range parent of its merge back to the fork',
+      ta.argvs.length === 2 && new RegExp(` --branch ${aHead} --since-commit ${aBase}$`).test(ta.argvs[0])
+      && new RegExp(` --branch ${aMid} --since-commit ${aFork}$`).test(ta.argvs[1]), JSON.stringify(ta.argvs));
+    check('(T-a) both walks on ONE clone, named with --trust-local-git-config: one clone a scan, however many walks',
+      ta.argvs.every((l) => / --trust-local-git-config /.test(l)) && new Set(ta.argvs.map(cloneOf)).size === 1
+      && path.basename(path.dirname(cloneOf(ta.argvs[0]))).startsWith('sb-trufflehog-'), JSON.stringify(ta.argvs));
+    check("(T-a) the PR's three live keys BLOCK, each named with its commit; the one both walks met in is reported once",
+      ta.status === 1 && ta.stdout.includes('\nBLOCKED — 3 critical finding(s). ') && ta.stdout.includes('### ❌ `secret-verified` · T0 · 3 finding(s)')
+      && live(ta, 'pr-old.live', aOld) && live(ta, 'pr-mid.live', aMid) && live(ta, 'pr-new.live', aHead)
+      && ta.walked.filter((c) => c === aMid).length === 2, verdict(ta));
+    check('(T-a) no base commit reaches the report: not the one merged in, not main after it, not the fork',
+      ta.stdout.length > 0 && !/base-merged\.live|main-after\.live|fork\.live/.test(ta.stdout), verdict(ta));
+    check('(T-a) the report says why there were two walks',
+      ta.stdout.includes('- trufflehog: the range holds 1 merge, so it was walked from 2 segment tips, each back to where it left the base'), verdict(ta));
+
+    // (T-b) A push: a branch merged onto main with a merge commit, its commit older than event.before.
+    const ub = upstream('merged-branch-push');
+    const bFork = ub.commit('2026-09-03T10:00:00Z', 'fork.live');
+    ub.on('-b', 'topic');
+    const bTopic = ub.commit('2026-09-03T11:00:00Z', 'topic.live');
+    ub.on('main');
+    const bBefore = ub.commit('2026-09-03T12:00:00Z', 'before.live');
+    const bAfter = ub.merge('2026-09-03T13:00:00Z', 'topic');
+    const bCtl = thIn(ub.dir, '--branch', bAfter, '--since-commit', bBefore);
+    check("(T-b) control: v1.19.6's walk from the pushed merge stops at event.before, before the merged branch's older commit",
+      bCtl.status === 0 && sameSet(bCtl.walked, [bAfter]), JSON.stringify(bCtl));
+    const tb = walkScan(ub.dir, { BASE_REF: '', GITHUB_BASE_REF: '', GITHUB_EVENT_BEFORE: bBefore, PR_HEAD_SHA: '' }, { TH_EMIT: '1' });
+    check("(T-b) a push: the walks cover exactly the pushed range, the merge and the merged branch's commit, from a walk each",
+      sameSet(tb.walked, [bAfter, bTopic]) && tb.argvs.length === 2 && new RegExp(` --branch ${bAfter} --since-commit ${bBefore}$`).test(tb.argvs[0])
+      && new RegExp(` --branch ${bTopic} --since-commit ${bFork}$`).test(tb.argvs[1]), JSON.stringify({ walked: tb.walked, argvs: tb.argvs }));
+    check("(T-b) the merged branch's live key BLOCKS; event.before's and the fork's never reach the report",
+      tb.status === 1 && tb.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && live(tb, 'topic.live', bTopic)
+      && !/before\.live|fork\.live/.test(tb.stdout), verdict(tb));
+
+    // (T-c) A skewed commit date: main's commit is dated before its own parent, the fork, so the head's
+    // walk takes the fork before it reaches its stop. The fork is pre-existing: a live key the walk
+    // meets there warns, and never blocks (v1.19.6 blocked on it).
+    const uc = upstream('skewed-up');
+    uc.commit('2026-09-04T09:00:00Z', 'root.txt');
+    const cFork = uc.commit('2026-09-04T10:00:00Z', 'fork.live');
+    uc.on('-b', 'feature');
+    const cPr = uc.commit('2026-09-04T11:00:00Z', 'pr.txt');
+    uc.on('main');
+    const cSkew = uc.commit('2026-09-04T09:30:00Z', 'skewed.txt');
+    uc.on('feature');
+    const cHead = uc.merge('2026-09-04T12:00:00Z', 'main');
+    const pc = prCheckout(uc, 'skewed-pr');
+    const cCtl = thIn(pc, '--branch', cHead, '--since-commit', cSkew);
+    check('(T-c) control: the walk from the PR head passes through the fork, a base commit, on its way to its stop',
+      cCtl.status === 0 && cCtl.walked.includes(cFork) && cCtl.walked.includes(cPr), JSON.stringify(cCtl));
+    const tc = walkScan(pc, { ...prEnv, PR_HEAD_SHA: cHead }, { TH_EMIT: '1' });
+    check('(T-c) a live key a walk met outside the range is pre-existing: a secrets-history WARN, never a block — PASS, exit 0',
+      tc.status === 0 && tc.stdout.includes('\nPASS — no critical findings.\n') && !tc.stdout.includes('`secret-verified`')
+      && tc.stdout.includes(`- ⚠️ fork.live:1 — 🔴 VERIFIED-LIVE Github in commit ${cFork.slice(0, 7)} — ROTATE NOW pre-existing in history — WARN, not a block; rotate then scrub history`), verdict(tc));
+
+    // (T-d) A PR that merged an unrelated history in (another repository imported): that side shares
+    // no commit with the base, so all of it is in the range, and its tip is walked to its root.
+    const ud = upstream('unrelated-up');
+    const dFork = ud.commit('2026-09-05T10:00:00Z', 'fork.live');
+    ud.on('--orphan', 'imported');
+    gitAt(ud.dir)('rm', '-rfq', '.');
+    const dImp = ud.commit('2026-09-05T09:00:00Z', 'imported.live');
+    ud.on('-b', 'feature', 'main');
+    const dPr = ud.commit('2026-09-05T11:00:00Z', 'pr.txt');
+    const dHead = ud.merge('2026-09-05T12:00:00Z', '--allow-unrelated-histories', 'imported');
+    const pd = prCheckout(ud, 'unrelated-pr');
+    const dCtl = thIn(pd, '--branch', dHead, '--since-commit', dFork);
+    check("(T-d) control: v1.19.6's walk stops at the fork before the imported root, dated earlier",
+      dCtl.status === 0 && sameSet(dCtl.walked, [dHead, dPr]), JSON.stringify(dCtl));
+    const td = walkScan(pd, { ...prEnv, PR_HEAD_SHA: dHead }, { TH_EMIT: '1' });
+    check('(T-d) an unrelated history merged in is walked from its tip to its root, no --since-commit, and its live key BLOCKS',
+      td.status === 1 && sameSet(td.walked, [dHead, dPr, dImp]) && td.argvs.length === 3 && new RegExp(` --branch ${dImp}$`).test(td.argvs[2])
+      && live(td, 'imported.live', dImp) && !td.stdout.includes('fork.live') && !td.stdout.includes('could not look'),
+      JSON.stringify({ walked: td.walked, argvs: td.argvs, verdict: verdict(td) }));
+    check('(T-d) the note says that tip went to its root',
+      td.stdout.includes('- trufflehog: the range holds 1 merge, so it was walked from 3 segment tips, each back to where it left the base, or to its root where it shares no commit with the base'), verdict(td));
+
+    // (T-e) A key the change adds on the file and line of a pre-existing one that a walk met FIRST
+    // (through a skewed base commit, as in T-c). The two are told apart by commit, so it blocks.
+    const ue = upstream('same-line-up');
+    ue.commit('2026-09-06T09:00:00Z', 'root.txt');
+    const eFork = ue.commit('2026-09-06T10:00:00Z', 'shared.live');
+    ue.on('-b', 'side');
+    const eSide = ue.commit('2026-09-06T09:50:00Z', 'shared.live', 'shared.live, as the change leaves it\n');
+    ue.on('-b', 'feature', eFork);
+    ue.commit('2026-09-06T11:00:00Z', 'pr.txt');
+    ue.merge('2026-09-06T11:30:00Z', 'side');
+    ue.on('main');
+    ue.commit('2026-09-06T09:30:00Z', 'skewed.txt');
+    ue.on('feature');
+    const eHead = ue.merge('2026-09-06T12:00:00Z', 'main');
+    const te = walkScan(prCheckout(ue, 'same-line-pr'), { ...prEnv, PR_HEAD_SHA: eHead }, { TH_EMIT: '1' });
+    const metFirst = te.walked.includes(eFork) && te.walked.indexOf(eFork) < te.walked.indexOf(eSide);
+    check('(T-e) a key the change adds on the file and line of a pre-existing one met before it: BLOCKS, and the old one warns',
+      metFirst && te.status === 1 && te.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && live(te, 'shared.live', eSide)
+      && te.stdout.includes(`- ⚠️ shared.live:1 — 🔴 VERIFIED-LIVE Github in commit ${eFork.slice(0, 7)} — ROTATE NOW pre-existing in history`),
+      JSON.stringify({ walked: te.walked, verdict: verdict(te) }));
+
+    // (T-f) A push of an octopus merge: three branches at once, each dated before event.before, and
+    // one branch commit that adds two keys (two findings, not one).
+    const uf = upstream('octopus-push');
+    const fFork = uf.commit('2026-09-07T10:00:00Z', 'fork.live');
+    const fx = {};
+    for (const [b, t] of [['a', '10:10'], ['b', '10:20'], ['c', '10:30']]) {
+      uf.on('-b', b, fFork);
+      if (b === 'a') { fs.writeFileSync(path.join(uf.dir, 'a2.live'), 'a2.live\n'); gitAt(uf.dir)('add', 'a2.live'); }
+      fx[b] = uf.commit(`2026-09-07T${t}:00Z`, `${b}.live`);
+    }
+    uf.on('main');
+    const fBefore = uf.commit('2026-09-07T12:00:00Z', 'before.live');
+    const fAfter = uf.merge('2026-09-07T13:00:00Z', 'a', 'b', 'c');
+    const fCtl = thIn(uf.dir, '--branch', fAfter, '--since-commit', fBefore);
+    check("(T-f) control: v1.19.6's walk from a pushed octopus merge stops at event.before, before every branch",
+      fCtl.status === 0 && sameSet(fCtl.walked, [fAfter]), JSON.stringify(fCtl));
+    const tf = walkScan(uf.dir, { BASE_REF: '', GITHUB_BASE_REF: '', GITHUB_EVENT_BEFORE: fBefore, PR_HEAD_SHA: '' }, { TH_EMIT: '1' });
+    check('(T-f) an octopus merge: one walk per merged branch, every key reported, both of the commit that added two',
+      tf.status === 1 && sameSet(tf.walked, [fAfter, fx.a, fx.b, fx.c]) && tf.argvs.length === 4 && tf.stdout.includes('\nBLOCKED — 4 critical finding(s). ')
+      && live(tf, 'a.live', fx.a) && live(tf, 'a2.live', fx.a) && live(tf, 'b.live', fx.b) && live(tf, 'c.live', fx.c)
+      && !/before\.live|fork\.live/.test(tf.stdout), JSON.stringify({ walked: tf.walked, argvs: tf.argvs, verdict: verdict(tf) }));
+
+    // (T-g) Past a clock skew `git rev-list BASE..head` lists base commits as new: seven base commits
+    // dated before everything on the head's side end its walk early. The fork, which the base holds,
+    // is judged by ancestry instead, so the key a walk met there only warns.
+    const ug = upstream('cutoff-up');
+    ug.commit('2026-09-08T09:00:00Z', 'root.txt');
+    const gFork = ug.commit('2026-09-08T10:00:00Z', 'fork.live');
+    ug.on('-b', 'feature');
+    ug.commit('2026-09-08T11:00:00Z', 'pr.txt');
+    ug.on('main');
+    for (let i = 1; i <= 7; i++) ug.commit(`2026-09-08T08:0${8 - i}:00Z`, `x${i}.txt`);
+    ug.on('feature');
+    const gHead = ug.merge('2026-09-08T12:00:00Z', 'main');
+    const pg = prCheckout(ug, 'cutoff-pr');
+    const listed = (gitAt(pg)('rev-list', `refs/remotes/origin/main..${gHead}`).stdout || '').split('\n');
+    check("(T-g) control: git's own rev-list of the range lists the fork, which the base holds",
+      listed.includes(gFork) && gitAt(pg)('merge-base', '--is-ancestor', gFork, 'refs/remotes/origin/main').status === 0, JSON.stringify(listed));
+    const tg = walkScan(pg, { ...prEnv, PR_HEAD_SHA: gHead }, { TH_EMIT: '1' });
+    check('(T-g) the key a walk met in that fork is judged by ancestry: a secrets-history WARN, never a block — PASS',
+      tg.walked.includes(gFork) && tg.status === 0 && tg.stdout.includes('\nPASS — no critical findings.\n')
+      && tg.stdout.includes(`- ⚠️ fork.live:1 — 🔴 VERIFIED-LIVE Github in commit ${gFork.slice(0, 7)} — ROTATE NOW pre-existing in history`), verdict(tg));
+
+    // What could not look: planning the walks, the clone, one walk of several. Each FAULTs.
+    // A git on PATH that runs `action` when its argv holds every one of `words`, and is the real git
+    // otherwise (an ancestry check, --is-ancestor, always goes through).
+    const realGit = (spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout || '').trim();
+    let shims = 0;
+    const gitShim = (words, action, passAncestry = true) => {
+      const dir = path.join(tmp, `git-shim-${++shims}`);
+      fs.mkdirSync(dir);
+      const pass = `exec '${realGit}' "$@"`;
+      const guards = [...(passAncestry ? [`case " $* " in *" --is-ancestor "*) ${pass} ;; esac`] : []), ...words.map((w) => `case " $* " in *" ${w} "*) ;; *) ${pass} ;; esac`)];
+      fs.writeFileSync(path.join(dir, 'git'), `#!/bin/sh\n${guards.join('\n')}\n${action}\n`);
+      fs.chmodSync(path.join(dir, 'git'), 0o755);
+      return { PATH: `${dir}:${process.env.PATH}` };
+    };
+    const gitRefusing = (...words) => gitShim(words, `echo "fatal: ${words[0]} refused by the selftest" >&2; exit 128`);
+    const trl = walkScan(pa, { ...prEnv, PR_HEAD_SHA: aHead }, gitRefusing('rev-list'));
+    check('(T) a range git cannot list: FAULT before trufflehog runs, naming the git call',
+      trl.status === 1 && trl.argvs.length === 0
+      && trl.stdout.includes(`- ❌ trufflehog verified-live secrets — git rev-list origin/main..${aHead.slice(0, 7)} failed, exit 128: fatal: rev-list refused by the selftest`), verdict(trl));
+    const tcl = walkScan(pa, { ...prEnv, PR_HEAD_SHA: aHead }, gitRefusing('clone'));
+    check('(T) a checkout git cannot clone: FAULT before trufflehog runs, naming the clone',
+      tcl.status === 1 && tcl.argvs.length === 0
+      && tcl.stdout.includes('- ❌ trufflehog verified-live secrets — git clone of the checkout for trufflehog failed, exit 128: fatal: clone refused by the selftest'), verdict(tcl));
+    const thFailsOnOne = stub('trufflehog-fails-on-one-walk', `case " $* " in *" --branch ${aMid} "*) exit 1 ;; esac\nexec '${thAsMeasured}' "$@"`);
+    const tw = walkScan(pa, { ...prEnv, PR_HEAD_SHA: aHead }, {}, thFailsOnOne);
+    check('(T) one walk of several that cannot look: FAULT, naming that walk and its tip',
+      tw.status === 1
+      && tw.stdout.includes(`- ❌ trufflehog verified-live secrets — trufflehog walk 2 of 2, from ${aMid.slice(0, 7)}, exit 1 — its log is not quoted here, rerun trufflehog to read it`), verdict(tw));
+    // The first walk fails after reporting: what it found stands, and the walk after it still runs.
+    const thFailsAfterFirst = stub('trufflehog-fails-after-walk-1', `case " $* " in *" --branch ${aHead} "*) '${thAsMeasured}' "$@"; exit 1 ;; esac\nexec '${thAsMeasured}' "$@"`);
+    const tw1 = walkScan(pa, { ...prEnv, PR_HEAD_SHA: aHead }, { TH_EMIT: '1' }, thFailsAfterFirst);
+    check('(T) a walk that fails keeps what it reported, and the walks after it run: BLOCKED on all three keys, the fault named',
+      tw1.status === 1 && tw1.stdout.includes('\nBLOCKED — 3 critical finding(s). ') && live(tw1, 'pr-new.live', aHead) && live(tw1, 'pr-old.live', aOld)
+      && tw1.stdout.includes(`- ❌ trufflehog verified-live secrets — trufflehog walk 1 of 2, from ${aHead.slice(0, 7)}, exit 1 — its log is not quoted here, rerun trufflehog to read it`), verdict(tw1));
+    // A second tip whose base git cannot find, or a git killed while finding it: never a walk to the
+    // root, which is kept for a tip that truly shares no commit with the base (T-d).
+    const tmb = walkScan(pa, { ...prEnv, PR_HEAD_SHA: aHead }, gitRefusing('merge-base', aMid));
+    check("(T) a second tip git cannot find the base of: FAULT before trufflehog runs, naming that tip",
+      tmb.status === 1 && tmb.argvs.length === 0
+      && tmb.stdout.includes(`- ❌ trufflehog verified-live secrets — no commit to stop the walk at: git merge-base origin/main ${aMid.slice(0, 7)} failed, exit 128: fatal: merge-base refused by the selftest`), verdict(tmb));
+    const tkill = walkScan(pa, { ...prEnv, PR_HEAD_SHA: aHead }, gitShim(['merge-base', aMid], 'kill -9 $$'));
+    check('(T) a git killed while finding a tip\'s base never answered: FAULT, not "they share no commit"',
+      tkill.status === 1 && tkill.argvs.length === 0
+      && tkill.stdout.includes(`- ❌ trufflehog verified-live secrets — no commit to stop the walk at: git merge-base origin/main ${aMid.slice(0, 7)} failed, killed by SIGKILL`), verdict(tkill));
+    // Whether the base holds a finding's commit is asked of git; a git that cannot answer decides
+    // nothing: the key blocks as new, and the leg could not look.
+    const tanc = walkScan(ub.dir, { BASE_REF: '', GITHUB_BASE_REF: '', GITHUB_EVENT_BEFORE: bBefore, PR_HEAD_SHA: '' },
+      { TH_EMIT: '1', ...gitShim(['--is-ancestor'], 'echo "fatal: ancestry refused by the selftest" >&2; exit 128', false) });
+    check("(T) a key whose commit's ancestry git cannot tell: BLOCKS as new, and the leg could not look, naming the check",
+      tanc.status === 1 && tanc.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && live(tanc, 'topic.live', bTopic)
+      && tanc.stdout.includes(`- ❌ trufflehog verified-live secrets — git merge-base --is-ancestor ${bTopic.slice(0, 7)} ${bBefore} failed, exit 128: fatal: ancestry refused by the selftest — so its key counts as new`), verdict(tanc));
+    // A base that shares no commit with the head at all: the walk is not planned. Walked to its root,
+    // all of history would sit under the blocking check.
+    ud.on('--orphan', 'lonely');
+    gitAt(ud.dir)('rm', '-rfq', '.');
+    const lonely = ud.commit('2026-09-05T13:00:00Z', 'lonely.txt');
+    ud.on('feature');
+    const tdj = walkScan(ud.dir, { BASE_REF: lonely, GITHUB_BASE_REF: '', GITHUB_EVENT_BEFORE: '', PR_HEAD_SHA: '' });
+    check('(T) a base that shares no commit with the head: FAULT before trufflehog runs, never all of history',
+      tdj.status === 1 && tdj.argvs.length === 0
+      && tdj.stdout.includes(`- ❌ trufflehog verified-live secrets — no commit to stop the walk at: git merge-base ${lonely} ${dHead.slice(0, 7)} failed, they share no commit`), verdict(tdj));
+
     // Each gitleaks run reports into a directory made for it, removed after — none may be left behind.
     check('every gitleaks report directory is removed afterwards', fs.readdirSync(tmp).filter((d) => d.startsWith('sb-gitleaks-')).length === 0,
+      fs.readdirSync(tmp).join(','));
+    check('every trufflehog clone directory is removed afterwards, the failed clone\'s too', fs.readdirSync(tmp).filter((d) => d.startsWith('sb-trufflehog-')).length === 0,
       fs.readdirSync(tmp).join(','));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
