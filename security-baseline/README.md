@@ -18,7 +18,7 @@ silently un-enforce every repo.
 |---|---|---|
 | **T0 — CRITICAL** | always blocks (when `fail-on-critical`, the default) | `sast-critical` (semgrep community ERROR on the diff — *today's block, unchanged*); `secret-pattern` (gitleaks pattern on the diff — *today's block, unchanged*); `secret-verified` (trufflehog `--only-verified` on the **diff range** — NEW; a provider just authenticated it → ~zero FP) |
 | **T1 — promotable WARN** | reports; a caller ELEVATES any id to CRITICAL via `critical-checks` | `sca-critical`, `sca-high` (osv-scanner); the custom **WP/PHP** rules (`wp-nonce-missing`, `wp-cap-missing`, `wp-sql-unprepared`, `wp-unserialize`, `wp-file-include`, `wp-rest-error-detail`, `wp-rest-error-detail-laundered`, `wp-weak-crypto`, `turnstile-test-key`); the custom **Astro/TS/RN** rules (`ts-dangerous-html`, `ts-eval`, `ts-child-process`, `ts-public-secret-leak`, `ts-ssrf`, `ts-open-redirect`, `ts-secret-in-log`, `rn-insecure-storage`, `rn-cleartext-http`); the **GitHub-Actions** rules (`gha-unpinned-action`, `gha-script-injection`, `gha-pr-target`); `dockerfile-lint`; `argv-secret` (a secret spelled into a child's argv — §argv-secret) |
-| **T2 — advisory** | reports (WARN/INFO); never promotable | `sca-moderate`/`sca-low` (INFO); `wp-unescaped-output` (syntactic XSS — too FP-heavy to promote); `wp-rest-wp-error-detail` (`WP_Error::get_error_message()` in a REST/AJAX body — usually the *intended* client message, so advisory-only); `ts-cors-wildcard`; `secrets-history` (full-history baseline — clearing needs a history rewrite, so it can **never** be a merge precondition) |
+| **T2 — advisory** | reports (WARN/INFO); never promotable | `sca-moderate`/`sca-low` (INFO); `wp-unescaped-output` (syntactic XSS — too FP-heavy to promote); `wp-rest-wp-error-detail` (`WP_Error::get_error_message()` in a REST/AJAX body — usually the *intended* client message, so advisory-only); `ts-cors-wildcard`; `secrets-history` (full-history baseline — clearing needs a history rewrite, so it can **never** be a merge precondition — and what the diff's secret legs find in a commit the base already holds: trufflehog since v1.19.7, gitleaks since v1.19.8) |
 
 The CRITICAL core is exactly what a clean repo always passes; **a failure there is always a real
 defect.** Everything else is real signal but site-/dependency-/editorial-variable, so it
@@ -137,7 +137,7 @@ it looked and found nothing, or it **could not look**:
 |---|---|
 | any | not installed; killed or timed out; output over the 64 MB cap; its collector crashed. A run of 10 s or more says how long it took: a registry stall leaves no other trace. |
 | semgrep | exit 2 or higher, or 1 with no results (without `--error`, which this gate never passes, 1 is not "findings"); no JSON report; an `errors[]` entry at `level: "error"`: a rule or config that did not load, or semgrep's engine failing on a file (an AST builder or fatal error, which semgrep itself exits 2 for). A per-file `warn` (a file it could not fully parse or finish) is listed under scanner notes and is not a fault. |
-| gitleaks | exit other than 0 (it runs with `--exit-code 0`); exit 0 with no report written; a report that is not a JSON array; no git history to read, checked before it runs, because outside a repository gitleaks exits 0 with `[]` |
+| gitleaks | exit other than 0 (it runs with `--exit-code 0`); exit 0 with no report written; a report that is not a JSON array; no git history to read, checked before it runs, because outside a repository gitleaks exits 0 with `[]`; on the diff, a finding whose commit's ancestry git cannot tell (the key blocks as new; v1.19.8) |
 | trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short; on the diff, no commit to stop a walk at (`git merge-base` of the base and a walk's tip failed, timed out or was killed; for a second tip, only a clean "they share no commit" walks it to its root instead), a range git cannot list (`git rev-list`), or a checkout it cannot clone, each checked before trufflehog runs; a finding whose commit's ancestry git cannot tell (the key blocks as new). With several walks the reason names the first that failed and its tip (v1.19.7) |
 | osv-scanner | exit other than 0, 1 or 128; exit 1 with no results; 128 with `Error during extraction` on stderr (a lockfile it could not parse), or with a tracked npm/composer lockfile and no `Scanned … found N packages` line (one it did not read, such as a `bun.lockb`). Otherwise 128 is nothing to audit: no lockfile, or every lockfile read and empty (v1.19.5; measured on v2.4.0) |
 | hadolint | no JSON array; exit other than 0 or 1 (1 = a rule fired) |
@@ -215,8 +215,8 @@ some tip: together the walks cover the range whatever the commit dates. A linear
 walk. Replayed on the same runs, the walks skipped no commit and walked none outside the range; they
 numbered 1.10 a push and 1.03 a PR run, and at most 6 on any of the 1,407 recorded pushes still in
 history (all of them, not only since adoption: 1,343 need one walk, 54 two, 7 three, 3 six).
-gitleaks' `<base>..HEAD` range, the T0 pattern floor, is the same range, date cutoff included
-(§Honest limits).
+gitleaks' `<base>..HEAD` range, the T0 pattern floor, is the same range, date cutoff included, and
+since v1.19.8 its findings are judged by the same ancestry test (§Honest limits).
 
 - **One clone.** Every walk runs on one clone of the checkout, the clone trufflehog would make of
   `file://.` on each run (same refspec), made once, without a worktree, and named with
@@ -349,13 +349,22 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
 
 ## Honest limits
 
-- **gitleaks' range trusts git's date cutoff.** `--log-opts <base>..HEAD` is `git log`'s range, and
-  past a clock skew git lists base commits in it (seven base commits dated before everything on the
-  head's side end its walk of the base early). gitleaks reads them, so a pattern secret already in
-  one would block as `secret-pattern`: measured on gitleaks 8.30.1, whose range reported a
-  pre-existing token in the fork beside the PR's own. trufflehog's findings are judged by ancestry
-  instead (§What the verified probe walks); the gitleaks leg is not yet. No caller's history has shown
-  such a skew (no replayed run walked outside its range).
+- **gitleaks' range lists base commits past a clock skew; what it finds there is history (v1.19.8).**
+  `--log-opts <base>..HEAD` is `git log`'s range, and git stops walking the base's side once that
+  side is dated older than everything left on the head's, so it can list commits the base holds.
+  Measured on git 2.54: seven main commits dated before the fork put the fork and the root in the
+  range (six do not, and a commit-graph changes nothing), and gitleaks 8.30.1 reported a token
+  already in the fork beside the PR's own, which blocked as `secret-pattern` until v1.19.8. Now each
+  finding's commit is asked of git, `git merge-base --is-ancestor <commit> <base>`, the test the
+  verified probe uses (§What the verified probe walks): one the base holds is `secrets-history`
+  (WARN), and a scanner note says why; one git cannot answer for blocks as new, and the leg could
+  not look; one with no commit counts as new. The range is unchanged, so gitleaks still reads those
+  base commits, and `scan-scope: full`, which has no base, grades as before. The changed-file list
+  that every other diff-scoped leg grades is `git diff <base>...HEAD`, trees compared at the merge
+  base, which git finds whatever the dates (on the same fixture it lists the PR's file alone).
+  Replayed over every range the callers recorded to 2026-09-26 (1,757 branch updates in GitHub's
+  activity log and 85 `pull_request` ranges, 1,490 of them still in history), git's list held no
+  base commit: the cutoff has not yet reached a caller.
 - **No reachability.** OSS semgrep + osv-scanner are syntactic / present-in-tree; there is no
   dataflow-reachability (a Pro/cloud feature, air-gap-forbidden). A dep CVE means "present", not
   "exploitable" — the report says so.
@@ -484,26 +493,45 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   stub and the fixtures, the reviewer's included, turn it red. The other two are equivalent: a clone
   with a worktree, and a clone without trufflehog's refspec (every walk's tip and stop is an
   ancestor of HEAD).
+  Its **clock-skew** leg (v1.19.8) runs the gitleaks leg through a stub that is 8.30.1 as its source
+  reads: `git log -p -U0` over `--log-opts` split on spaces, each added line holding a minted key
+  reported with its commit, file and line. The fixture is the measured shape: a fork that adds a
+  key, a PR commit with or without one, seven main commits dated before the fork, the PR merging main
+  in. Controls first: `git rev-list <base>..<head>` lists the fork and the root, which the base holds,
+  and the stub's range reads the fork's key beside the PR's. Then, on a push and on a pull_request
+  checkout: the PR's key blocks with one annotation and the fork's is `secrets-history` with the
+  note; a range whose only key the base holds is PASS; with the history baseline on, the fork's key
+  is reported once; a git that cannot answer the ancestry check leaves both keys blocking and the
+  leg could not look, naming the check; `--log-opts` is still `<base>..HEAD`; and `scan-scope: full`
+  asks nothing and grades as before. The end-to-end fixture's gitleaks finding now names HEAD, since
+  git cannot place a minted commit. 13 new assertions; 13 targeted mutants each turn it red, and
+  every new assertion goes red under at least one.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
 - `bash scripts/selftest-pr-shape.sh` — the shapes this repo's own pushes never produce, scanned
-  with the REAL trufflehog: `--only-verified` is swapped for an offline pass that prints unverified
-  results, and per-run minted tokens in every commit show what it walked. Four shapes: the
+  with the REAL trufflehog and gitleaks: `--only-verified` is swapped for an offline pass that prints
+  unverified results, and per-run minted tokens in every commit show what was read. Five shapes: the
   pull_request checkout; a PR that merged its base in, with one commit dated before the base commit
   it merged (v1.19.7); a push of a merge whose branch commit is dated before `event.before`
-  (v1.19.7); a push of an octopus merge of three such branches (v1.19.7). Each fails unless the
-  walks reach every commit of the range and none of the base's, and every failure is reported
-  before it exits. It pins the walk on every `trufflehog-version` bump. v1.19.5's `scan.mjs` fails
-  it, and so do the two near-misses (a walk from the test merge, and a walk without `--branch`).
-  v1.19.6's fails the three merge shapes. So do the mutants that walk from the head alone, skip the
-  head's walk, keep two parents of an octopus, walk a tip to its root, drop `--since-commit`, name
-  the clone `trufflehog-*` or drop the note.
+  (v1.19.7); a push of an octopus merge of three such branches (v1.19.7); gitleaks' range past a
+  clock skew, as a push and as a pull_request (v1.19.8). Each walk shape fails unless the walks
+  reach every commit of the range and none of the base's, and every failure is reported before it
+  exits. It pins the walk on every `trufflehog-version` bump. v1.19.5's `scan.mjs` fails it, and so
+  do the two near-misses (a walk from the test merge, and a walk without `--branch`). v1.19.6's
+  fails the three merge shapes. So do the mutants that walk from the head alone, skip the head's
+  walk, keep two parents of an octopus, walk a tip to its root, drop `--since-commit`, name the
+  clone `trufflehog-*` or drop the note. The skew shape fails unless the PR's key is
+  `secret-pattern` and the fork's `secrets-history` with the note, and its controls fail when git or
+  gitleaks stop reading the fork into the range, since the shape would then test nothing: it pins
+  the range on every `gitleaks-version` bump. v1.19.7's `scan.mjs` fails it, and so do the mutants
+  that drop the note, ask ancestry of HEAD or read every finding as held; a fixture without the
+  skew fails its controls.
 
 All three run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a report-mode self-scan,
 after which the same job runs `scan.mjs` over this repo with the real scanners the action just
 installed, in both scopes, and fails if any leg could not look: the one place real scanner output,
 not a stub's, goes through `outcome.mjs` before a release. Both of those runs are a push of this
-repo's linear history; the pull_request and merge shapes are `selftest-pr-shape.sh`'s.
+repo's linear history; the pull_request, merge and clock-skew shapes are `selftest-pr-shape.sh`'s.
 
 The self-scan (`scan-scope: full`) covers this repo's whole tree, the rule fixtures included,
 and should report **critical: 0**. The fixtures' T1/T2 findings are expected: they are the

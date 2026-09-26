@@ -56,6 +56,42 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.19.8** *(tag not yet cut; lands with the next `v1` move)* —
+`security-baseline`'s gitleaks pattern floor no longer blocks on a key the base already holds when
+git lists base commits in its range. The range is `git log <base>..HEAD`, and git stops walking the
+base's side once that side is dated older than everything left on the head's, so past a clock skew
+it lists base commits as new. v1.19.7 documented the gap under §Honest limits and judged
+trufflehog's findings by ancestry instead (`baseHolds`); gitleaks' still trusted the range.
+**Measured** on git 2.54 and gitleaks 8.30.1: main's root (09:00), a fork (10:00) that adds a token,
+seven main commits dated 08:07 down to 08:01, a PR commit (11:00) that adds a token and merges main
+in (12:00). `git rev-list <base>..HEAD` lists the fork and the root although `git merge-base
+--is-ancestor` says main holds both (six skewed commits do not trip it; a commit-graph changes
+nothing), and gitleaks' range reports the fork's token beside the PR's: a pre-existing secret
+blocked as `secret-pattern`, against the "never pre-existing state" contract of a blocking check.
+Now each gitleaks finding on the diff goes through the same test, `git merge-base --is-ancestor
+<commit> <base>`: a commit the base holds makes it `secrets-history` (WARN), and a scanner note says
+why; a check git cannot answer blocks the key as new and the leg could not look; a finding with no
+commit counts as new. The range gitleaks reads is unchanged, `scan-scope: full`, which has no base,
+grades as before, and the gitleaks leg now claims `secrets-history`. Nothing else lists commits: the
+changed-file list every other diff-scoped leg grades is `git diff <base>...HEAD`, trees at the merge
+base, which git finds whatever the dates (on the fixture it lists the PR's file alone), and
+`pull-tier`'s `git diff <base> <head>` compares two trees. The selftest gains a clock-skew leg
+through a gitleaks stub that reads `git log -p` over the range as 8.30.1 does, on a push and a
+pull_request, with controls that the range lists the fork and the stub reads its key: 13 new
+assertions, 13 targeted mutants that each turn it red, every new assertion red under at least one.
+Its end-to-end fixture's diff finding now names HEAD, since git cannot place a minted commit.
+`selftest-pr-shape.sh` gains the shape on the REAL gitleaks, as a push and a pull_request, with
+controls that fail when git or gitleaks stop reading the fork into the range; v1.19.7's `scan.mjs`
+fails it, as do 3 targeted mutants and a fixture without the skew. **Measured before release** with
+gitleaks 8.30.1 (trufflehog off: its code is v1.19.7's) and v1.19.6's, v1.19.7's and this
+`scan.mjs`, on the latest update of all 12 callers' `main` and luxairportlu's `dev`, and on the 4
+open PRs (prevedourougr #37 and #38, luxairport-frontend #24 and #95): every verdict PASS, every
+report the same lines in all three. Replayed over every range the callers recorded to 2026-09-26
+(1,757 branch updates and 85 `pull_request` ranges, 1,490 still in history), git's list held no base
+commit, so the cutoff has not yet reached a caller. **Caller-visible:** only past a clock skew, where
+a key the base already holds warns instead of blocking and the report says why. No input changed. On
+the measured state the `v1` move newly-blocks nobody.
+
 **v1.19.7** — `security-baseline`'s verified
 probe walks every commit of a range that holds a merge. trufflehog walks `git log` newest commit
 date first and stops at `--since-commit`, and past a merge one walk takes the newer parent first, so

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The shapes the selftest workflow's own runs never produce, scanned by scan.mjs with the REAL
-# trufflehog (v1.19.6, v1.19.7). The workflow's other real-scanner runs are pushes of this repo's
+# trufflehog (v1.19.6, v1.19.7) and gitleaks (v1.19.8). The workflow's other real-scanner runs are pushes of this repo's
 # linear history: a sha for a base (event.before), a checkout on a branch.
 # 1. A pull_request checkout. actions/checkout leaves it DETACHED on GitHub's test merge with no local
 #    branch, and its base arrives as a ref NAME (origin/<base_ref>), which trufflehog resolves in its
@@ -13,10 +13,15 @@
 # 3. A push of a merge commit whose merged branch holds a commit dated before event.before.
 # 4. A push of an octopus merge: three branches at once, each dated before event.before.
 # Each fails unless the walk reaches every commit of the range and none of the base's.
+# 5. gitleaks' range past a clock skew (v1.19.8), as a push and as a pull_request: main's seven commits
+#    after the fork are dated before it, so `git log <base>..HEAD` lists the fork, which main holds,
+#    and the REAL gitleaks reads its key. It fails unless the PR's key is secret-pattern and the
+#    fork's secrets-history, never secret-pattern; its controls fail when git or gitleaks stop
+#    reading the fork into the range, since the shape would then test nothing.
 # --only-verified is swapped for an offline pass that prints unverified results, so planted tokens
 # (minted per run, never live) show what was walked; it pins the walk on every trufflehog-version
-# bump. Needs git, node, openssl, trufflehog (or $REAL_TRUFFLEHOG) and gitleaks (or $GITLEAKS_BIN);
-# semgrep has nothing in scope here.
+# bump, and shape 5 pins gitleaks' range on every gitleaks-version bump. Needs git, node, openssl,
+# trufflehog (or $REAL_TRUFFLEHOG) and gitleaks (or $GITLEAKS_BIN); semgrep has nothing in scope here.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 work="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/sb-pr-shape.XXXXXX")"
@@ -161,4 +166,49 @@ for f in before.txt fork.txt; do
   ! hit octo "$f" || fail "a push of an octopus merge: trufflehog walked $f, which main held before the push"
 done
 passed "$n" "a push of an octopus merge: trufflehog walked all three branches and none of main's"
+
+# ---- 5. gitleaks' range past a clock skew: main's seven commits after the fork dated before it ----
+n=$(fails)
+g init -q skew
+(
+  cd skew
+  commit 2026-09-08T09:00:00Z root.txt root "main's root"
+  commit 2026-09-08T10:00:00Z fork.txt "fork_token = \"$(tok)\"" 'where the PR leaves main: a key that predates the PR'
+  g checkout -qb feature
+  commit 2026-09-08T11:00:00Z pr.txt "pr_token = \"$(tok)\"" "the PR's own key"
+  g checkout -q main
+  for i in 1 2 3 4 5 6 7; do commit "2026-09-08T08:0$((8 - i)):00Z" "x$i.txt" "x$i" 'main moves on, dated before its parent'; done
+  g checkout -q feature
+  GIT_AUTHOR_DATE=2026-09-08T12:00:00Z GIT_COMMITTER_DATE=2026-09-08T12:00:00Z g merge -q --no-ff --no-edit main
+)
+x7=$(git -C "$work/skew" rev-parse main)
+fork=$(git -C "$work/skew" rev-parse main~7)
+# Lists are read whole before grep sees them: under pipefail, a `grep -q` that stops reading early can
+# fail the pipeline it matched in.
+listed() { local l; l=$(git -C "$1" rev-list "$2"); grep -qx "$3" <<< "$l"; }   # <repo> <range> <commit>
+git -C "$work/skew" merge-base --is-ancestor "$fork" "$x7" && listed "$work/skew" "$x7..HEAD" "$fork" \
+  || fail "gitleaks' range past a clock skew: git's rev-list no longer lists the fork, which main holds, so this shape tests nothing"
+"${GITLEAKS_BIN:-gitleaks}" detect --redact --no-banner --report-format json --report-path "$work/skew-range.json" --exit-code 0 \
+  --source "$work/skew" --log-opts "$x7..HEAD" > /dev/null 2>&1 || true
+node -e 'const a = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8") || "[]"); process.exit(a.some((f) => f.File === "fork.txt") ? 0 : 1)' "$work/skew-range.json" \
+  || fail "gitleaks' range past a clock skew: gitleaks no longer reads the fork's key from <base>..HEAD, so this shape tests nothing"
+# group <log> <check id>: that check's findings in the report.
+group() { awk -v id="\`$2\`" 'index($0, "### ") == 1 { p = index($0, id) > 0; next } p' "$work/$1.log"; }
+graded() { # <log> <shape>
+  local sp sh
+  sp=$(group "$1" secret-pattern)
+  sh=$(group "$1" secrets-history)
+  grep -q '^- ❌ pr\.txt:1 — ' <<< "$sp" || fail "$2: the PR's key is not secret-pattern"
+  ! grep -q 'fork\.txt' <<< "$sp" || fail "$2: the fork's key, which the base holds, is secret-pattern: pre-existing state would block"
+  grep -q '^- ⚠️ fork\.txt:1 — ' <<< "$sh" || fail "$2: the fork's key is not secrets-history"
+  grep -q '^- gitleaks: its range listed a commit the base already holds' "$work/$1.log" || fail "$2: the report does not say why the fork's key is history"
+}
+scan "$work/skew" skew-push BASE_REF='' GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE="$x7" PR_HEAD_SHA=''
+graded skew-push "gitleaks' range past a clock skew, on a push"
+pr_checkout "$work/skew" "$work/skew-pr" 2026-09-08T13:00:00Z
+listed "$work/skew-pr" refs/remotes/origin/main..HEAD "$fork" \
+  || fail "gitleaks' range past a clock skew: the pull_request checkout's range does not list the fork, so that shape tests nothing"
+scan "$work/skew-pr" skew-pr BASE_REF='' GITHUB_BASE_REF=main GITHUB_EVENT_BEFORE='' PR_HEAD_SHA="$(git -C "$work/skew-pr" rev-parse HEAD^2)"
+graded skew-pr "gitleaks' range past a clock skew, on a pull_request"
+passed "$n" "gitleaks' range past a clock skew: the fork's key, which main holds, warns as history; the PR's is secret-pattern, on a push and a pull_request"
 [ "$(fails)" -eq 0 ] || { echo "❌ $(fails) check(s) failed"; exit 1; }

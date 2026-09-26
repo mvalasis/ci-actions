@@ -20,7 +20,8 @@ export const LEGS = {
   community: { name: 'semgrep community SAST', checks: ['sast-critical'] },
   custom: { name: 'semgrep WP/PHP + Astro/TS rule packs', checks: ids(/^(wp|ts|rn)-|^turnstile-test-key$/) },
   gha: { name: 'semgrep GitHub-Actions rule pack', checks: ids(/^gha-/) },
-  gitleaks: { name: 'gitleaks secret scan', checks: ['secret-pattern'] },
+  // secrets-history: what the diff range found in a commit the base already holds (v1.19.8).
+  gitleaks: { name: 'gitleaks secret scan', checks: ['secret-pattern', 'secrets-history'] },
   gitleaksHistory: { name: 'gitleaks full-history baseline', checks: ['secrets-history'] },
   // secrets-history: what a diff-scoped walk found in a commit the base holds (v1.19.7).
   trufflehog: { name: 'trufflehog verified-live secrets', checks: ['secret-verified', 'secrets-history'] },

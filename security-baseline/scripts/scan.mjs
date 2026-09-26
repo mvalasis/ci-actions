@@ -210,16 +210,30 @@ function collectGitleaks() {
     for (const leg of legs) couldNotLook(leg, 'no git history here — not a git repository, or no commit — so gitleaks would read nothing');
     return out;
   }
-  // T0 — diff range (today's block).
-  const diffArgs = DIFF && BASE ? ['--log-opts', `${BASE}..HEAD`] : [];
-  const diff = gitleaksRun(LEGS.gitleaks, diffArgs);
-  for (const f of diff) out.push({ checkId: 'secret-pattern', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, commit: f.Commit, msg: `${f.RuleID || 'secret'} (${redact(f.Secret)})${inCommit(f)}`, cwe: 'CWE-798' });
+  const inHistory = (f) => ({ checkId: 'secrets-history', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, commit: f.Commit, msg: `${f.RuleID || 'secret'} in history (${redact(f.Secret)})${inCommit(f)} — rotate at the provider, then scrub history`, cwe: 'CWE-798' });
+  // T0 — diff range (today's block). `--log-opts BASE..HEAD` is `git log`'s range, and past a clock
+  // skew git lists commits the base already holds in it (baseHolds, below). What gitleaks found in one
+  // of those is pre-existing, so it is secrets-history and never blocks (v1.19.8). A finding with no
+  // commit counts as the change's own, and so does one whose ancestry git cannot tell: that blocks,
+  // and the leg could not look.
+  const scoped = DIFF && BASE;
+  const diff = gitleaksRun(LEGS.gitleaks, scoped ? ['--log-opts', `${BASE}..HEAD`] : []);
+  const past = new Set();
+  let pastFindings = 0;
+  for (const f of diff) {
+    const id = String(f.Commit || '').toLowerCase();
+    const holds = scoped && isSha(id) ? baseHolds(id) : false;
+    if (holds && holds.reason) couldNotLook(LEGS.gitleaks, holds.reason);
+    if (holds === true) { past.add(id); pastFindings++; out.push(inHistory(f)); continue; }
+    out.push({ checkId: 'secret-pattern', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, commit: f.Commit, msg: `${f.RuleID || 'secret'} (${redact(f.Secret)})${inCommit(f)}`, cwe: 'CWE-798' });
+  }
+  if (past.size) infra.push(`gitleaks: its range listed ${past.size === 1 ? 'a commit' : `${past.size} commits`} the base already holds, as git does past a clock skew, so the ${pastFindings === 1 ? 'finding there is' : `${pastFindings} findings there are`} pre-existing: secrets-history, not secret-pattern`);
   // T2 — full-history baseline (WARN; never blocks). Dedup against the diff hits by file+rule.
   if (ENABLE_HISTORY) {
     const seen = new Set(diff.map((f) => `${f.File}:${f.RuleID}`));
     for (const f of gitleaksRun(LEGS.gitleaksHistory, [])) {
       const k = `${f.File}:${f.RuleID}`; if (seen.has(k)) continue; seen.add(k);
-      out.push({ checkId: 'secrets-history', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, commit: f.Commit, msg: `${f.RuleID || 'secret'} in history (${redact(f.Secret)})${inCommit(f)} — rotate at the provider, then scrub history`, cwe: 'CWE-798' });
+      out.push(inHistory(f));
     }
   }
   return out;

@@ -453,6 +453,8 @@ console.log('\n# which legs can take the verdict away (canBeCritical + LEGS)');
   check('a T2 leg can never block, not even "promoted" (the history baselines)',
     !canBeCritical(LEGS.gitleaksHistory.checks, ['secrets-history']) && !canBeCritical(LEGS.trufflehogHistory.checks, ['secrets-history']));
   check('the changed-file list can always block (it feeds sast-critical)', canBeCritical(LEGS.diff.checks));
+  check('the diff-scoped secret legs claim secrets-history too: what they find in a commit the base already holds',
+    LEGS.gitleaks.checks.includes('secrets-history') && LEGS.trufflehog.checks.includes('secrets-history'));
   // A checkId a leg emits but does not claim would turn that leg's failure into a silent PASS for a
   // caller who promoted it. Every rule pack's metadata.checkId, read live, must belong to its leg.
   const packIds = (f) => [...fs.readFileSync(new URL(`../rules/${f}`, import.meta.url), 'utf8').matchAll(/checkId:\s*([\w-]+)/g)].map((m) => m[1]);
@@ -586,9 +588,11 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     const argvLog = path.join(tmp, 'gitleaks-argv.log');
     // Worst case: a gitleaks that IGNORED --redact, so Secret/Match/Line carry the raw value; the
     // diff range (--log-opts) and the full-history pass answer with different findings.
-    // Each finding names the commit that introduced it, as gitleaks' does (a full sha, minted here).
+    // Each finding names the commit that introduced it, as gitleaks' does (a full sha). The diff's is
+    // the range's own commit, HEAD, read when the stub runs: whether the base holds it is asked of git
+    // (v1.19.8), which knows no minted sha. The history pass's is minted here.
     const shaOf = (s) => crypto.createHash('sha1').update(s).digest('hex');
-    const SHA = { diff: shaOf('the commit in the pushed range'), hist: shaOf('a commit long ago') };
+    const SHA = { diff: '', hist: shaOf('a commit long ago') };   // diff: HEAD, once the fixture repo has it
     const glFinding = (file, line, rule, value, commit) => ({
       RuleID: rule, Description: 'stub', File: file, StartLine: line, EndLine: line,
       Secret: value, Match: `key = "${value}"`, Line: `$key = '${value}';`, Commit: commit,
@@ -613,7 +617,7 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
         'case "$*" in *--log-opts*) which=diff ;; *) which=hist ;; esac',
         'out=""',
         'while [ $# -gt 0 ]; do [ "$1" = "--report-path" ] && { shift; out="$1"; }; shift; done',
-        `if [ "$which" = diff ]; then cat > "$out" <<'JSON'\n${JSON.stringify([glFinding('app/config.php', 3, 'generic-api-key', planted.diff, SHA.diff)])}\nJSON`,
+        `if [ "$which" = diff ]; then sed "s/@HEAD@/$(git rev-parse HEAD)/" > "$out" <<'JSON'\n${JSON.stringify([glFinding('app/config.php', 3, 'generic-api-key', planted.diff, '@HEAD@')])}\nJSON`,
         `else cat > "$out" <<'JSON'\n${JSON.stringify([glFinding('old/legacy.php', 9, 'aws-access-token', planted.hist, SHA.hist)])}\nJSON`,
         'fi',
       ].join('\n')),
@@ -646,6 +650,7 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     put('Dockerfile', 'FROM alpine:latest\n');   // puts hadolint in scope (its stub above finds nothing)
     git('add', '.'); git('commit', '-q', '-m', 'change');
     check('fixture repo has two commits (else every assertion below is vacuous)', (git('rev-list', '--count', 'HEAD').stdout || '').trim() === '2');
+    SHA.diff = (git('rev-parse', 'HEAD').stdout || '').trim();
 
     const summaryPath = path.join(tmp, 'summary.md');
     const scan = (extra, cwd = repo) => {
@@ -1320,6 +1325,142 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('(T) a base that shares no commit with the head: FAULT before trufflehog runs, never all of history',
       tdj.status === 1 && tdj.argvs.length === 0
       && tdj.stdout.includes(`- ❌ trufflehog verified-live secrets — no commit to stop the walk at: git merge-base ${lonely} ${dHead.slice(0, 7)} failed, they share no commit`), verdict(tdj));
+
+    // ---- (V) gitleaks' range past a clock skew (v1.19.8) ----
+    // gitleaks reads `git log -p` over `<base>..HEAD`, and past a clock skew git lists base commits in
+    // that range (T-g): seven main commits dated before everything on the head's side end git's walk of
+    // the base early, so the fork and the root, which the base holds, are listed as new. Until v1.19.8
+    // a key already in the fork blocked as the change's own. Now whether the base holds a finding's
+    // commit is asked of git (baseHolds), as for trufflehog's, and that key only warns. The gitleaks
+    // stub is 8.30.1 as measured and as its source reads (sources/git.go, detect/detect.go): it runs
+    // `git log -p -U0` with --log-opts split on spaces (with none, `--full-history --all
+    // --diff-filter=tuxdb`), reports each added line holding a GLKEY with the file and line it has in
+    // that commit, skips a finding an ignore file lists (--gitleaks-ignore-path, and the source's
+    // .gitleaksignore; `<commit>:<file>:<rule>:<line>` or `<file>:<rule>:<line>`), and when its `git
+    // log` dies it still exits 0 with `[]`.
+    const glArgv = path.join(tmp, 'gitleaks-as-measured-argv.log');
+    const glJs = path.join(tmp, 'gitleaks-as-measured.mjs');
+    fs.writeFileSync(glJs, [
+      "import { spawnSync } from 'node:child_process';",
+      "import fs from 'node:fs';",
+      'const argv = process.argv.slice(2);',
+      "const opt = (n) => { const i = argv.indexOf(n); return i < 0 ? '' : argv[i + 1]; };",
+      "if (process.env.GL_ARGV) fs.appendFileSync(process.env.GL_ARGV, JSON.stringify(argv) + '\\n');",
+      "const logOpts = opt('--log-opts');",
+      "const r = spawnSync('git', ['log', '-p', '-U0', ...(logOpts ? logOpts.split(' ') : ['--full-history', '--all', '--diff-filter=tuxdb'])], { encoding: 'utf8', maxBuffer: 1 << 26 });",
+      'const found = [];',
+      "let commit = '', file = '', line = 0;",
+      "for (const l of r.status === 0 ? r.stdout.split('\\n') : []) {",
+      '  let m;',
+      '  if ((m = /^commit ([0-9a-f]{40})/.exec(l))) commit = m[1];',
+      "  else if ((m = /^\\+\\+\\+ (?:b\\/(.*)|\\/dev\\/null)$/.exec(l))) file = m[1] || '';",
+      '  else if ((m = /^@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@/.exec(l))) line = +m[1];',
+      "  else if (l[0] === '+') { for (const k of l.match(/GLKEY[0-9A-F]{30}/g) || []) found.push({ RuleID: 'generic-api-key', File: file, StartLine: line, EndLine: line, Commit: commit, Secret: k, Match: k, Line: l.slice(1) }); line++; }",
+      '}',
+      'const ignore = new Set();',
+      "for (const f of [opt('--gitleaks-ignore-path'), '.gitleaksignore']) {",
+      "  let t = ''; try { t = fs.readFileSync(f, 'utf8'); } catch { continue; }",
+      "  for (const raw of t.split('\\n')) { const e = raw.trim(); if (e && !e.startsWith('#')) ignore.add(e); }",
+      '}',
+      "fs.writeFileSync(opt('--report-path'), JSON.stringify(found.filter((f) => !ignore.has([f.File, f.RuleID, f.StartLine].join(':')) && !ignore.has([f.Commit, f.File, f.RuleID, f.StartLine].join(':')))));",
+    ].join('\n'));
+    const glAsMeasured = stub('gitleaks-as-measured', `exec '${process.execPath}' '${glJs}' "$@"`);
+    const keyFor = (tag) => (planted[tag] = mint('GLKEY'));   // a leak check covers each one
+    const glOnce = (cwd, logOpts) => {
+      const rep = path.join(tmp, 'gitleaks-once.json');
+      fs.rmSync(rep, { force: true });
+      spawnSync(glAsMeasured, ['detect', '--report-path', rep, '--log-opts', logOpts], { cwd, env: base, encoding: 'utf8' });
+      return JSON.parse(fs.readFileSync(rep, 'utf8'));
+    };
+    const pushEnv = (before) => ({ BASE_REF: '', GITHUB_BASE_REF: '', GITHUB_EVENT_BEFORE: before, PR_HEAD_SHA: '' });
+    // The shape measured on git 2.54: main's root (09:00), then the fork (10:00), which adds a key; the
+    // PR leaves main there with a commit of its own (11:00), with a key or without; main goes on with
+    // seven commits dated 08:07 down to 08:01, each older than its parent; the PR merges main in (12:00).
+    const cutoff = (name, prKey) => {
+      const u = upstream(name);
+      const k = { fork: keyFor(`${name}:fork`), pr: prKey ? keyFor(`${name}:pr`) : '' };
+      const root = u.commit('2026-09-09T09:00:00Z', 'root.txt');
+      const fork = u.commit('2026-09-09T10:00:00Z', 'fork.conf', `token=${k.fork}\n`);
+      u.on('-b', 'feature');
+      const pr = u.commit('2026-09-09T11:00:00Z', 'pr.conf', prKey ? `token=${k.pr}\n` : 'no key here\n');
+      u.on('main');
+      let x7 = '';
+      for (let i = 1; i <= 7; i++) x7 = u.commit(`2026-09-09T08:0${8 - i}:00Z`, `x${i}.txt`);
+      u.on('feature');
+      return { u, dir: u.dir, k, root, fork, pr, x7, head: u.merge('2026-09-09T12:00:00Z', 'main') };
+    };
+    // One scan through the as-measured gitleaks, the other scanners clean: its argv per run, and the report.
+    const glScan = (cwd, env, extra = {}) => {
+      fs.rmSync(glArgv, { force: true });
+      const res = broken({ GITLEAKS_BIN: glAsMeasured }, { GL_ARGV: glArgv, GITHUB_ACTIONS: 'true', ENABLE_SECRETS_HISTORY: 'false', ...env, ...extra }, cwd);
+      return { ...res, glArgvs: fs.existsSync(glArgv) ? fs.readFileSync(glArgv, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [] };
+    };
+    const logOptsOf = (a) => (a.includes('--log-opts') ? a[a.indexOf('--log-opts') + 1] : '');
+    const newKey = (file, k, sha) => `- ❌ ${file}:1 — generic-api-key ${redact(k)} in commit ${sha.slice(0, 7)} _(CWE-798)_`;
+    const oldKey = (file, k, sha) => `- ⚠️ ${file}:1 — generic-api-key in history ${redact(k)} in commit ${sha.slice(0, 7)} — rotate at the provider, then scrub history _(CWE-798)_`;
+    const heldNote = '\n- gitleaks: its range listed a commit the base already holds, as git does past a clock skew, so the finding there is pre-existing: secrets-history, not secret-pattern\n';
+    const refuseAncestry = gitShim(['--is-ancestor'], 'echo "fatal: ancestry refused by the selftest" >&2; exit 128', false);
+
+    // (V-a) A push of the PR branch onto main: event.before is main's seventh commit, HEAD the merge.
+    const va = cutoff('gl-cutoff-push', true);
+    const vaListed = (gitAt(va.dir)('rev-list', `${va.x7}..${va.head}`).stdout || '').split('\n').filter(Boolean);
+    check("(V-a) control: git's rev-list of the range lists the fork and the root beside the PR's commits, though the base holds both",
+      sameSet(vaListed, [va.head, va.pr, va.fork, va.root])
+      && gitAt(va.dir)('merge-base', '--is-ancestor', va.fork, va.x7).status === 0 && gitAt(va.dir)('merge-base', '--is-ancestor', va.root, va.x7).status === 0,
+      JSON.stringify({ listed: vaListed, fork: va.fork, root: va.root }));
+    const vaRaw = glOnce(va.dir, `${va.x7}..HEAD`);
+    check("(V-a) control: gitleaks' range reads the fork's key beside the PR's, and v1.19.7 blocked on both",
+      sameSet(vaRaw.map((f) => `${f.File}@${f.Commit}`), [`fork.conf@${va.fork}`, `pr.conf@${va.pr}`]), JSON.stringify(vaRaw.map((f) => [f.File, f.Commit])));
+    const tva = glScan(va.dir, pushEnv(va.x7));
+    check("(V-a) the PR's key BLOCKS as secret-pattern; the fork's, which the base holds, is secrets-history, a WARN",
+      tva.status === 1 && tva.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && tva.stdout.includes('### ❌ `secret-pattern` · T0 · 1 finding(s)')
+      && tva.stdout.includes(newKey('pr.conf', va.k.pr, va.pr)) && tva.stdout.includes('### ⚠️ `secrets-history` · T2 · 1 finding(s)')
+      && tva.stdout.includes(oldKey('fork.conf', va.k.fork, va.fork)) && !tva.stdout.includes('could not look'), verdict(tva));
+    check("(V-a) one ::error, for the PR's key; none for the fork's",
+      JSON.stringify(commands(tva.stdout)) === JSON.stringify([`::error file=pr.conf,line=1,title=security-baseline secret-pattern::secret-pattern generic-api-key at pr.conf:1 in commit ${va.pr.slice(0, 7)}`]),
+      JSON.stringify(commands(tva.stdout)));
+    check('(V-a) the report says why a finding of the range is history', tva.stdout.includes(heldNote), verdict(tva));
+    check('(V-a) gitleaks still reads <base>..HEAD: ancestry grades what it found, not what it reads',
+      tva.glArgvs.length === 1 && logOptsOf(tva.glArgvs[0]) === `${va.x7}..HEAD`, JSON.stringify(tva.glArgvs));
+    check('(V-a) NO planted value reaches the job log or stderr', tva.stdout.length > 0 && !leaked(tva.stdout) && !leaked(tva.stderr));
+    const tvaH = glScan(va.dir, pushEnv(va.x7), { ENABLE_SECRETS_HISTORY: 'true' });
+    check("(V-a) with the history baseline on, the fork's key is reported once, as the range's WARN, and the verdict stands",
+      tvaH.status === 1 && tvaH.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && tvaH.glArgvs.length === 2
+      && tvaH.stdout.split(oldKey('fork.conf', va.k.fork, va.fork)).length === 2 && tvaH.stdout.split('fork.conf:').length === 2, verdict(tvaH));
+
+    // (V-b) The same range on a pull_request run: GitHub's test merge of the PR into main, detached, and
+    // origin/main, main's seventh commit, for a base.
+    const pvb = prCheckout(va.u, 'gl-cutoff-pr');
+    const vbListed = (gitAt(pvb)('rev-list', 'refs/remotes/origin/main..HEAD').stdout || '').split('\n').filter(Boolean);
+    const tvb = glScan(pvb, { ...prEnv, PR_HEAD_SHA: va.head });
+    check("(V-b) a pull_request run lists the fork in its range too: the fork's key warns, the PR's BLOCKS",
+      vbListed.includes(va.fork) && tvb.status === 1 && tvb.stdout.includes('\nBLOCKED — 1 critical finding(s). ')
+      && tvb.stdout.includes(newKey('pr.conf', va.k.pr, va.pr)) && tvb.stdout.includes(oldKey('fork.conf', va.k.fork, va.fork))
+      && tvb.stdout.includes(heldNote) && !tvb.stdout.includes('could not look'), JSON.stringify({ listed: vbListed, verdict: verdict(tvb) }));
+
+    // (V-c) The contract a blocking check keeps: a range whose only key the base already holds passes.
+    const vc = cutoff('gl-cutoff-clean', false);
+    const tvc = glScan(vc.dir, pushEnv(vc.x7));
+    check('(V-c) a range whose only key the base already holds: PASS, exit 0, no annotation; the key a WARN',
+      tvc.status === 0 && tvc.stdout.includes('\nPASS — no critical findings.\n') && !tvc.stdout.includes('`secret-pattern`')
+      && tvc.stdout.includes(oldKey('fork.conf', vc.k.fork, vc.fork)) && commands(tvc.stdout).length === 0, verdict(tvc));
+
+    // (V-d) A git that cannot say whether the base holds a finding's commit decides nothing: the key
+    // blocks as new, the fork's too, and the leg could not look, naming the check.
+    const tvd = glScan(va.dir, pushEnv(va.x7), refuseAncestry);
+    check("(V-d) keys whose commits' ancestry git cannot tell: both BLOCK as new, and the gitleaks leg could not look, naming the check",
+      tvd.status === 1 && tvd.stdout.includes('\nBLOCKED — 2 critical finding(s). ') && tvd.stdout.includes(newKey('fork.conf', va.k.fork, va.fork))
+      && tvd.stdout.includes(newKey('pr.conf', va.k.pr, va.pr)) && !tvd.stdout.includes('`secrets-history`')
+      && tvd.stdout.includes(`\n- ❌ gitleaks secret scan — git merge-base --is-ancestor ${va.pr.slice(0, 7)} ${va.x7} failed, exit 128: fatal: ancestry refused by the selftest — so its key counts as new\n`)
+      && tvd.stdout.includes('could not look (gitleaks secret scan), so the list above may be incomplete.'), verdict(tvd));
+
+    // (V-e) scan-scope: full has no base to ask about: every key in history is graded as before, and git
+    // is asked nothing (a git that refuses to answer changes nothing).
+    const tve = glScan(va.dir, { ...pushEnv(va.x7), SCAN_SCOPE: 'full' }, refuseAncestry);
+    check('(V-e) scan-scope: full reads history with no range and asks no ancestry: both keys secret-pattern, as before',
+      tve.status === 1 && tve.stdout.includes('\nBLOCKED — 2 critical finding(s). ') && tve.stdout.includes(newKey('fork.conf', va.k.fork, va.fork))
+      && tve.stdout.includes(newKey('pr.conf', va.k.pr, va.pr)) && !tve.stdout.includes('could not look')
+      && tve.glArgvs.length === 1 && logOptsOf(tve.glArgvs[0]) === '', JSON.stringify({ argvs: tve.glArgvs, verdict: verdict(tve) }));
 
     // Each gitleaks run reports into a directory made for it, removed after — none may be left behind.
     check('every gitleaks report directory is removed afterwards', fs.readdirSync(tmp).filter((d) => d.startsWith('sb-gitleaks-')).length === 0,
