@@ -56,8 +56,8 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.20.0** *(tag not yet cut; lands with the next `v1` move)* — `security-baseline`
-reads what only a merge commit adds. Both secret legs read commits as `git log -p` prints them, and
+**v1.20.0** — `security-baseline` reads what only a merge commit adds. Both secret legs read
+commits as `git log -p` prints them, and
 `git log -p` prints no patch for a merge, so a key typed into a conflict resolution, or added while
 merging, passed gitleaks' range and every trufflehog walk; v1.19.7 documented the gap. **Measured**
 on 2026-09-26 over every branch and pull-request head of the 11 callers: of the 76 merges made since
