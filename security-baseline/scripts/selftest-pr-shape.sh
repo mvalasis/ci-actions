@@ -24,6 +24,10 @@
 #    gitleaks reports, and trufflehog walks, every key the merge adds, and neither its base's.
 # 9. A merge the base already holds, which `git rev-list <base>..<head>` lists past a clock skew
 #    (seven base commits dated before the fork): neither scanner may read what it added.
+# 10-12. A range whose own `git log` dies (v1.20.1): a clone that lacks a range object, then a checkout
+#    that does, each read by the real scanner (which exits 0 having read nothing) and FAULTed by the
+#    log scan.mjs runs first; and a git on PATH that logs every `git log` pins those logs to the
+#    scanners' own, argv and env.
 # --only-verified is swapped for an offline pass that prints unverified results, so planted tokens
 # (minted per run, never live) show what was walked; it pins the walk on every trufflehog-version
 # bump, and shape 5 pins gitleaks' range on every gitleaks-version bump. Needs git, node, openssl,
@@ -70,16 +74,20 @@ done
 exit "${PIPESTATUS[0]}"
 SH
 chmod +x "$wrap"
-# scan <checkout> <name> <env…>: scan.mjs over the checkout; every trufflehog result lands in $work/<name>.hits.
-# GITHUB_ACTIONS empty: gitleaks flags the planted tokens too, and they are worth no annotation.
-scan() {
+# run_scan <checkout> <name> <env…>: scan.mjs over the checkout, its report in $work/<name>.log; every
+# trufflehog result lands in $work/<name>.hits. GITHUB_ACTIONS empty: gitleaks flags the planted tokens
+# too, and they are worth no annotation. scan: the same, for a shape where every leg must look.
+run_scan() {
   local dir="$1" name="$2"
   shift 2
   : > "$work/$name.hits"
   (cd "$dir" && env HITS="$work/$name.hits" TRUFFLEHOG_BIN="$wrap" GITHUB_ACTIONS='' GITHUB_STEP_SUMMARY='' \
     SCAN_SCOPE=diff VERIFIED_SECRETS=on FAIL_ON_CRITICAL=false ENABLE_SECRETS_HISTORY=false ENABLE_SCA=false \
     SEMGREP_SEND_METRICS=off "$@" node "$here/scan.mjs") | tee "$work/$name.log" || true
-  ! grep -Eq 'could not look|security-baseline crashed' "$work/$name.log" || fail "$name: a scanner leg could not look; see the report above"
+}
+scan() {
+  run_scan "$@"
+  ! grep -Eq 'could not look|security-baseline crashed' "$work/$2.log" || fail "$2: a scanner leg could not look; see the report above"
 }
 hit() { grep -q "\"file\":\"$2\"" "$work/$1.hits"; }
 
@@ -328,4 +336,127 @@ scan "$work/skew2" skew2 BASE_REF="$base9" GITHUB_BASE_REF='' GITHUB_EVENT_BEFOR
 ! reported skew2 'own.txt' || fail 'a merge the base holds: gitleaks read what it added, which predates the range'
 ! walked skew2 "$fork9" || fail 'a merge the base holds: trufflehog walked what it added, which predates the range'
 passed "$n" "a merge the base already holds, listed past a clock skew: neither scanner read what it added"
+
+# ---- 10-12. a range whose own git log dies (v1.20.1) ----
+# Both scanners exit 0 having read nothing when the `git log -p` they read the range through dies on
+# an object the repository lacks: gitleaks with `[]`, trufflehog with no result, --fail-on-scan-errors
+# or not. scan.mjs runs each one's log first. Here the range's middle commit adds a blob that then
+# leaves the object store, and the head commit, whose own patch needs that blob, adds a token.
+realgit=$(command -v git)
+short4() { printf '%s…%s' "${1:0:4}" "${1: -4}"; }   # <sha>: as a reason quotes one (first4…last4)
+unpack() { # <repo>: its packed objects, loose
+  for p in "$1"/.git/objects/pack/*.pack; do
+    [ -f "$p" ] || continue
+    mv "$p" "$p.x" && rm -f "${p%.pack}.idx" && "$realgit" -C "$1" unpack-objects -q < "$p.x" && rm -f "$p.x"
+  done
+}
+g init -q lost
+tok10=$(tok)
+(
+  cd lost
+  commit 2026-09-10T10:00:00Z a.txt base 'base'
+  commit 2026-09-10T11:00:00Z b.txt b1 'the range: b.txt'
+  printf 'b2\n' > b.txt; g add b.txt
+  commit 2026-09-10T12:00:00Z key.txt "key_token = \"$tok10\"" 'the range: b.txt again, and a key'
+)
+base10=$(git -C lost rev-parse HEAD~2)
+head10=$(git -C lost rev-parse HEAD)
+blob10=$(git -C lost rev-parse HEAD~1:b.txt)
+tho() { # <repo> <out>: the real trufflehog, offline, as scan.mjs walks the range
+  "${REAL_TRUFFLEHOG:-trufflehog}" git "file://$1" --trust-local-git-config --no-verification --results=unverified --no-update --json \
+    --fail-on-scan-errors --branch "$head10" --since-commit "$base10" > "$2" 2>/dev/null
+}
+# ---- 10. a clone that lacks a range object: the walk's own log, in the clone (v1.20.1) ----
+# Cloning reads every object of the checkout, so a checkout that lacks one cannot be cloned (shape 11).
+# What goes wrong in the clone itself is what a git on PATH does here: it takes the blob out of every
+# clone it makes, as scan.mjs's clone is made.
+n=$(fails)
+g clone -q --no-checkout "file://$work/lost" lost-clone
+rc=0; tho "$work/lost-clone" "$work/clone-ok.out" || rc=$?
+{ [ "$rc" = 0 ] && grep -qF "$tok10" "$work/clone-ok.out"; } || fail "shape 10 control: the real trufflehog did not find the range's token in a whole clone (exit $rc), so the shape is not under test"
+unpack "$work/lost-clone"; rm -f "$work/lost-clone/.git/objects/${blob10:0:2}/${blob10:2}"
+rc=0; tho "$work/lost-clone" "$work/clone-lost.out" || rc=$?
+{ [ "$rc" = 0 ] && ! grep -q '"DetectorName"' "$work/clone-lost.out"; } || fail "shape 10 control: on a clone that lacks a range object the real trufflehog did not exit 0 with no result (exit $rc), so the shape is not under test"
+mkdir -p "$work/damage"
+cat > "$work/damage/git" <<SH
+#!/bin/sh
+case " \$* " in *" clone "*) ;; *) exec '$realgit' "\$@" ;; esac
+'$realgit' "\$@" || exit \$?
+for d in "\$@"; do :; done
+for p in "\$d"/.git/objects/pack/*.pack; do mv "\$p" "\$p.x" && rm -f "\${p%.pack}.idx" && '$realgit' -C "\$d" unpack-objects -q < "\$p.x" && rm -f "\$p.x"; done
+rm -f "\$d/.git/objects/${blob10:0:2}/${blob10:2}"
+SH
+chmod +x "$work/damage/git"
+run_scan "$work/lost" clone-lost PATH="$work/damage:$PATH" BASE_REF='' GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE="$base10" PR_HEAD_SHA=''
+reported clone-lost "- ❌ trufflehog verified-live secrets — trufflehog could not read its walk: git log --patch ${head10:0:7} ^${base10:0:7}, the log trufflehog reads, failed in the clone, exit 128: fatal: unable to read $(short4 "$blob10")" \
+  || fail "a clone that lacks a range object: the walk that read nothing was not could-not-look, naming its log"
+reported clone-lost "key.txt:1 — github-pat ****" || fail 'a clone that lacks a range object: gitleaks, on the whole checkout, did not report the token'
+passed "$n" "a clone that lacks a range object: the real trufflehog reads nothing and exits 0; the walk's log, run first, is could-not-look"
+
+# ---- 11. a checkout that lacks a range object: gitleaks' own log, in the checkout (v1.20.1) ----
+n=$(fails)
+rm -f "lost/.git/objects/${blob10:0:2}/${blob10:2}"
+rc=0; ( cd lost && "${GITLEAKS_BIN:-gitleaks}" detect --redact --no-banner --report-format json --report-path "$work/lost-gl.json" --exit-code 0 --log-opts "$base10..HEAD" > "$work/lost-gl.out" 2>&1 ) || rc=$?
+{ [ "$rc" = 0 ] && [ "$(tr -d ' \n' < "$work/lost-gl.json")" = '[]' ] && grep -q 'commits scanned' "$work/lost-gl.out"; } \
+  || fail "shape 11 control: on a range it cannot read the real gitleaks did not exit 0 with [] (exit $rc), so the shape is not under test"
+lost_line="- ❌ gitleaks secret scan — the range could not be read: git log -p -U0 $base10..HEAD, the log gitleaks reads, failed, exit 128: fatal: unable to read $(short4 "$blob10")"
+run_scan "$work/lost" lost VERIFIED_SECRETS=off BASE_REF='' GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE="$base10" PR_HEAD_SHA=''
+reported lost "$lost_line" || fail 'a checkout that lacks a range object: gitleaks read nothing and the leg was not could-not-look, naming its log'
+grep -q '^report-only — 1 scanner leg(s) that could have blocked could not look (gitleaks secret scan)' "$work/lost.log" || fail 'a checkout that lacks a range object: the verdict is not the fault (fail-on-critical: true would not FAULT)'
+run_scan "$work/lost" lost-verified BASE_REF='' GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE="$base10" PR_HEAD_SHA=''
+reported lost-verified "$lost_line" || fail 'a checkout that lacks a range object, verified probe on: the gitleaks leg was not could-not-look'
+reported lost-verified '- ❌ trufflehog verified-live secrets — git clone of the checkout for trufflehog failed, exit 128: ' || fail 'a checkout that lacks a range object: cloning it did not fail, so trufflehog would walk it'
+passed "$n" "a checkout that lacks a range object: the real gitleaks reads nothing and exits 0 with []; its log, run first, is could-not-look"
+
+# ---- 12. each log run first is the scanner's own: argv and env, logged by a git on PATH (v1.20.1) ----
+# A push of two merges, one of a branch dated before event.before and one of an unrelated history,
+# so the walks include one with --since-commit and one to the root. A trufflehog or gitleaks bump that
+# changes how it runs `git log` fails here. trufflehog's git gets GIT_DIR alone: no PATH, no HOME.
+n=$(fails)
+g init -q pin
+(
+  cd pin
+  commit 2026-09-11T10:00:00Z fork.txt fork 'where the branch leaves main'
+  g checkout -qb topic
+  commit 2026-09-11T11:00:00Z topic.txt topic 'the branch, dated before event.before'
+  g checkout -q --orphan imported; g rm -rfq .
+  commit 2026-09-11T09:00:00Z imported.txt imported 'an unrelated history'
+  g checkout -q -f main
+  commit 2026-09-11T12:00:00Z before.txt before 'event.before'
+  GIT_AUTHOR_DATE=2026-09-11T13:00:00Z GIT_COMMITTER_DATE=2026-09-11T13:00:00Z g merge -q --no-ff --no-edit topic
+  GIT_AUTHOR_DATE=2026-09-11T14:00:00Z GIT_COMMITTER_DATE=2026-09-11T14:00:00Z g merge -q --no-ff --no-edit --allow-unrelated-histories imported
+)
+before12=$(git -C pin rev-parse HEAD~1^1)
+mkdir -p "$work/logshim"
+cat > "$work/logshim/git" <<SH
+#!/bin/sh
+case " \$* " in *" log "*) { printf '%s | env:' "\$*"; /usr/bin/env -0 | /usr/bin/tr '\n' ' ' | /usr/bin/tr '\0' '\n' | /usr/bin/cut -d= -f1 | /usr/bin/sort | /usr/bin/tr '\n' ' '; printf '\n'; } >> '$work/pin.gitlog' ;; esac
+exec '$realgit' "\$@"
+SH
+chmod +x "$work/logshim/git"
+: > "$work/pin.gitlog"
+scan "$work/pin" pin PATH="$work/logshim:$PATH" BASE_REF='' GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE="$before12" PR_HEAD_SHA=''
+node - "$work/pin.gitlog" "$before12" <<'JS' || fail "the logs run first are not the scanners' own; see above"
+const [log, before] = process.argv.slice(2);
+const lines = require('fs').readFileSync(log, 'utf8').split('\n').filter(Boolean);
+const count = (l) => lines.filter((x) => x === l).length;
+const bad = [];
+// gitleaks: its log and the one run for it, the same argv and the same env.
+const gl = lines.filter((l) => l.startsWith('-C . log -p -U0 '));
+if (gl.length !== 2 || gl[0] !== gl[1] || !gl[0].startsWith(`-C . log -p -U0 ${before}..HEAD | env:`)) bad.push(`gitleaks: ${JSON.stringify(gl)}`);
+// trufflehog: each walk's log, and the one run for it: the walk's commits (<tip> ^<since>), or, for a
+// walk to the root, the very same line.
+const TH = /^-C (\S+) log --patch --full-history --date=iso-strict --pretty=fuller --notes (--diff-filter=AM )?([0-9a-f]{40})( \^[0-9a-f]{40})? \| env:(.*)$/;
+const th = lines.map((l) => [l, TH.exec(l)]).filter(([, m]) => m);
+const walks = th.filter(([, m]) => !m[4] && !m[2]);
+const roots = [...new Set(th.filter(([, m]) => m[2]).map(([l]) => l))];
+for (const [l, m] of walks) if (!th.some(([, p]) => p[4] && p[1] === m[1] && p[3] === m[3] && p[5] === m[5])) bad.push(`no log run for the walk ${l}`);
+for (const [l, p] of th.filter(([, m]) => m[4])) if (!walks.some(([, m]) => m[1] === p[1] && m[3] === p[3] && m[5] === p[5])) bad.push(`a log run for no walk: ${l}`);
+for (const l of roots) if (count(l) !== 2) bad.push(`the walk to the root is not read twice, identically: ${l}`);
+for (const [l, m] of th) if (!/ GIT_DIR /.test(` ${m[5]} `) || / (PATH|HOME) /.test(` ${m[5]} `)) bad.push(`trufflehog's git env is not GIT_DIR alone: ${l}`);
+if (walks.length !== 3 || roots.length !== 1) bad.push(`expected 3 walks with a stop and 1 to the root, saw ${walks.length} and ${roots.length}`);
+for (const b of bad) console.log(`::error title=security-baseline self-test::${b}`);
+process.exit(bad.length ? 1 : 0);
+JS
+passed "$n" "each log run first is the scanner's own: gitleaks' argv and env, trufflehog's argv to its stop and its GIT_DIR-only env"
 [ "$(fails)" -eq 0 ] || { echo "❌ $(fails) check(s) failed"; exit 1; }

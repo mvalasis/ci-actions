@@ -16,7 +16,7 @@ import {
   isPromotable, baseSev, safe, redact, escapeData, escapeProperty, annotation, annotations,
   canBeCritical, faultAnnotation, shortSha,
 } from './tiers.mjs';
-import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, scrub, errorLine } from './outcome.mjs';
+import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, gitLogOutcome, scrub, errorLine } from './outcome.mjs';
 import { firstPartyOwners, ownerOf, parseOwners, refFromText, readLineFromDisk, filterFirstPartyGha } from './firstparty.mjs';
 import { findArgvSecrets, argvLang, argvTargets, argvFinding } from './argv-secret.mjs';
 
@@ -430,6 +430,21 @@ console.log('\n# outcome.mjs — a scanner that could not look never reads as on
   check('hadolint exit 0 with []: looked', hd(0, '[]').looked === true);
   check('hadolint with no JSON (a file it could not open): could not look', hd(1, '', 'openBinaryFile: does not exist').looked === false);
   check('hadolint exit 2 with a valid-looking array: could not look', hd(2, '[]').looked === false);
+
+  // The git log a secret scanner reads, run first (v1.20.1): git 2.54's own answers, measured on a
+  // repository that lacks one of the range's blobs and on one whose blob does not inflate.
+  const lg = (o) => gitLogOutcome(R(o));
+  const lost = crypto.createHash('sha1').update('a blob the range lacks').digest('hex');
+  check('git log that finished: read', lg({ status: 0 }).read === true && lg({ status: 0 }).reason === undefined);
+  const lacks = lg({ status: 128, stderr: `fatal: unable to read ${lost}\n` });
+  check("git log exit 128 on an object the repository lacks: not read, git's fatal: line the reason, the sha cut to first4…last4",
+    lacks.read === false && lacks.reason === `exit 128: fatal: unable to read ${redact(lost)}`, JSON.stringify(lacks));
+  const inflate = lg({ status: 128, stderr: `error: inflate: data stream error (incorrect data check)\nerror: unable to unpack ${lost} header\nfatal: unable to read ${lost}\n` });
+  check('git log on a blob that does not inflate: not read, its first error line the reason',
+    inflate.read === false && inflate.reason === 'exit 128: error: inflate: data stream error incorrect data check', JSON.stringify(inflate));
+  check('git log killed, timed out or not found: not read, and why', lg({ status: 1, signal: 'SIGKILL' }).reason === 'killed by SIGKILL'
+    && lg({ status: 1, error: 'ETIMEDOUT', signal: 'SIGTERM', ms: 300000 }).reason === 'timed out after 300 s' && lg({ missing: true, status: 127 }).reason === 'not installed');
+  check('git log exit 1 with nothing on stderr: not read (only exit 0 is a finished log)', lg({ status: 1 }).read === false && lg({ status: 1 }).reason === 'exit 1');
 
   const tok = minted('ghp_');
   check('scrub: a letters+digits run of 20+ is cut to first4…last4', !scrub(`auth failed for ${tok}`).includes(tok.slice(0, 8)) && scrub(`auth failed for ${tok}`).includes(redact(tok)));
@@ -1693,6 +1708,119 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('(U-h) a merge the base holds is not merged again: what it added is pre-existing and never read — PASS, one gitleaks run',
       umh.status === 0 && umh.stdout.includes('\nPASS — no critical findings.\n') && umh.logOpts.length === 1 && !umh.stdout.includes(redact(kFork))
       && !umh.stdout.includes('own.txt') && !umh.stdout.includes('- merges:'), JSON.stringify({ logOpts: umh.logOpts, verdict: verdict(umh) }));
+
+    // ---- (W) a range whose own `git log` dies (v1.20.1) ----
+    // Both scanners read the range through a `git log -p` of their own and exit 0 having read nothing
+    // when it dies on an object the repository lacks: gitleaks 8.30.1 with `[]`, trufflehog 3.95.6 with
+    // no result, under --fail-on-scan-errors too. The gitleaks stub above behaves so, and so does the
+    // trufflehog stub below. Here the range's middle commit adds a blob that later leaves the object
+    // store: the changed-file list reads the range's two ends and never it, and the head's own patch,
+    // which also adds a key, needs it first.
+    const wr = repoAt('log-dies');
+    const kW = keyFor('wKey');
+    const wBase = commitFiles(wr, '2026-09-11T10:00:00Z', { 'a.txt': 'base\n' }, 'base');
+    const wMid = commitFiles(wr, '2026-09-11T11:00:00Z', { 'b.txt': 'b1\n' }, 'the range: b.txt');
+    const wHead = commitFiles(wr, '2026-09-11T12:00:00Z', { 'b.txt': 'b2\n', 'v.live': `key=${kW}\n` }, 'the range: b.txt again, and a key');
+    const wBlob = shaIn(wr, `${wMid}:b.txt`);
+    const looseOf = (dir, sha) => path.join(dir, '.git', 'objects', sha.slice(0, 2), sha.slice(2));
+    // A git that, once it has cloned, takes one object out of the clone: what goes wrong in the clone
+    // itself, after cloning read every object of the checkout. A clone's objects arrive packed, so they
+    // are unpacked loose first.
+    const gitDamagingClones = (sha) => gitShim(['clone'], [
+      `'${realGit}' "$@" || exit $?`,
+      'for d in "$@"; do :; done',
+      `for p in "$d"/.git/objects/pack/*.pack; do mv "$p" "$p.x" && rm -f "\${p%.pack}.idx" && '${realGit}' -C "$d" unpack-objects -q < "$p.x" && rm -f "$p.x"; done`,
+      `rm -f "$d/.git/objects/${sha.slice(0, 2)}/${sha.slice(2)}"`,
+    ].join('\n'));
+    // trufflehog 3.95.6 on a log that dies in the range: it runs `git log` as it does (TRUFFLEHOG_LOG in
+    // scan.mjs) in the repository it is given, with GIT_DIR its only variable, and when git dies it
+    // exits 0 having walked nothing (measured: `chunks: 0`). On a log git finishes it is the stub above.
+    const thLogDies = stub('trufflehog-log-dies', [
+      'uri=""; branch=""; since=""; prev=""',
+      'for a in "$@"; do case "$prev" in --branch) branch="$a" ;; --since-commit) since="$a" ;; esac; case "$a" in file://*) uri="${a#file://}" ;; esac; prev="$a"; done',
+      'filter=""; [ -n "$since" ] || filter="--diff-filter=AM"',
+      `env -i GIT_DIR="$uri/.git" '${realGit}' -C "$uri" log --patch --full-history --date=iso-strict --pretty=fuller --notes $filter "$branch" > /dev/null 2>&1 || { printf '%s\\n' "$*" >> '${realArgv}'; exit 0; }`,
+      `exec '${thAsMeasured}' "$@"`,
+    ].join('\n'));
+    const wDamaged = path.join(tmp, 'log-dies-clone');
+    gitAt(tmp)('clone', '-q', '--no-checkout', `file://${wr}`, wDamaged);
+    for (const p of fs.readdirSync(path.join(wDamaged, '.git', 'objects', 'pack')).filter((f) => f.endsWith('.pack'))) {
+      const pack = path.join(wDamaged, '.git', 'objects', 'pack', p);
+      fs.renameSync(pack, `${pack}.x`);
+      fs.rmSync(pack.replace(/\.pack$/, '.idx'), { force: true });
+      spawnSync(realGit, ['-C', wDamaged, 'unpack-objects', '-q'], { input: fs.readFileSync(`${pack}.x`), env: base });
+      fs.rmSync(`${pack}.x`);
+    }
+    fs.rmSync(looseOf(wDamaged, wBlob));
+    fs.rmSync(walkLog, { force: true });
+    const wCtl = spawnSync(thLogDies, ['git', `file://${wDamaged}`, '--trust-local-git-config', '--only-verified', '--json', '--fail-on-scan-errors', '--branch', wHead, '--since-commit', wBase],
+      { env: { ...base, TH_EMIT: '1' }, encoding: 'utf8' });
+    check('(W) control: trufflehog, as measured, on a repository that lacks a range object: exit 0, nothing walked, no result',
+      wCtl.status === 0 && wCtl.stdout === '' && (walked() || []).length === 0, JSON.stringify({ status: wCtl.status, stdout: wCtl.stdout, walked: walked() }));
+
+    // What goes wrong in the clone: the walk's log runs first, in the clone, as trufflehog runs it.
+    const wc = mergeScan(wr, pushEnv(wBase), gitDamagingClones(wBlob), thLogDies);
+    const wWalkFails = (tail) => `- ❌ trufflehog verified-live secrets — trufflehog could not read its walk: git log --patch ${wHead.slice(0, 7)} ^${wBase.slice(0, 7)}, the log trufflehog reads, failed in the clone, ${tail}\n`;
+    check("(W) a clone that lacks a range object: FAULT on trufflehog's leg, naming the walk's log, never the walk that read nothing; gitleaks, on the checkout, still blocks",
+      wc.status === 1 && wc.stdout.includes(wWalkFails(`exit 128: fatal: unable to read ${redact(wBlob)}`))
+      && wc.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && wc.stdout.includes('…and 1 scanner leg(s) that could have blocked could not look (trufflehog verified-live secrets)')
+      && wc.argvs.length === 1 && !leaked(wc.stdout), verdict(wc));
+    // trufflehog's git gets GIT_DIR and nothing else, so an inherited alternate that holds the object
+    // is no help to it, and must be none to the log run for it.
+    const wf = mergeScan(wr, pushEnv(wBase), { ...gitDamagingClones(wBlob), GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(wr, '.git', 'objects') }, thLogDies);
+    check("(W) …with an inherited alternate that holds the object: FAULT all the same, since trufflehog's git is given GIT_DIR alone",
+      wf.status === 1 && wf.stdout.includes(wWalkFails(`exit 128: fatal: unable to read ${redact(wBlob)}`)), verdict(wf));
+    // An object only the history below the range reads, lost from the clone: trufflehog stops at the
+    // base before it matters, and the log run for a walk is the walk's commits, never all of history.
+    const wx = mergeScan(wr, pushEnv(wBase), gitDamagingClones(shaIn(wr, `${wBase}:a.txt`)));
+    check('(W) an object only the history below the range reads, lost from the clone: no fault, the walk as before',
+      wx.status === 1 && wx.stdout.includes('\nBLOCKED — 2 critical finding(s). ') && !wx.stdout.includes('could not look') && wx.argvs.length === 1, verdict(wx));
+    // A log that prints more than run()'s 64 MB output buffer is read to its end: its output is discarded.
+    const wy = repoAt('log-over-the-buffer');
+    const wyBase = commitFiles(wy, '2026-09-12T10:00:00Z', { 'a.txt': 'a\n' }, 'base');
+    commitFiles(wy, '2026-09-12T11:00:00Z', { 'big.txt': `${'x'.repeat(99)}\n`.repeat(700000) }, 'a 70 MB file');
+    fs.rmSync(path.join(wy, 'big.txt'));   // its object is what the logs read; the working copy is not needed
+    const wyr = walkScan(wy, pushEnv(wyBase));   // the clean gitleaks stub: only the two logs read the range
+    check("(W) a range whose log prints more than run()'s 64 MB buffer: read by both logs, no fault — their output is discarded, whatever its size",
+      wyr.argvs.length === 1 && !wyr.stdout.includes('could not look'), verdict(wyr));
+
+    // What goes wrong in the checkout: gitleaks' log runs first, in the checkout, as gitleaks runs it.
+    const wAlt = path.join(tmp, 'log-dies-alternate');   // an object directory that holds the blob
+    const wAltBlob = path.join(wAlt, wBlob.slice(0, 2), wBlob.slice(2));
+    fs.mkdirSync(path.dirname(wAltBlob), { recursive: true });
+    fs.copyFileSync(looseOf(wr, wBlob), wAltBlob);
+    fs.rmSync(looseOf(wr, wBlob));
+    const wLog = gitAt(wr)('log', '-p', '-U0', `${wBase}..HEAD`);
+    const wDiff = gitAt(wr)('diff', '--name-only', '--diff-filter=d', `${wBase}...HEAD`);
+    check("(W) the fixture: git log -p of the range dies on the lost blob, while the changed-file list, which reads the range's ends, does not",
+      wLog.status === 128 && wLog.stderr.includes(`unable to read ${wBlob}`) && wDiff.status === 0 && wDiff.stdout.includes('v.live'), JSON.stringify([wLog.status, wLog.stderr, wDiff.status]));
+    const wRep = path.join(tmp, 'gitleaks-log-dies.json');
+    const wGl = spawnSync(glAsMeasured, ['detect', '--report-path', wRep, '--log-opts', `${wBase}..HEAD`], { cwd: wr, env: base, encoding: 'utf8' });
+    check('(W) control: gitleaks, as measured, reads nothing there, the key included, and exits 0 with []',
+      wGl.status === 0 && fs.readFileSync(wRep, 'utf8') === '[]');
+    const wa = mergeScan(wr, pushEnv(wBase), { VERIFIED_SECRETS: 'off' });
+    const wRangeFails = `- ❌ gitleaks secret scan — the range could not be read: git log -p -U0 ${wBase}..HEAD, the log gitleaks reads, failed, exit 128: fatal: unable to read ${redact(wBlob)}\n`;
+    check('(W) a checkout that lacks a range object: FAULT on the gitleaks leg, naming the log, never the PASS gitleaks gives; its run still goes ahead',
+      wa.status === 1 && wa.stdout.includes(wRangeFails) && wa.stdout.includes('\nFAULT — 1 scanner leg(s) that could have blocked could not look (gitleaks secret scan).')
+      && JSON.stringify(wa.logOpts) === JSON.stringify([`${wBase}..HEAD`]), verdict(wa));
+    const wb = mergeScan(wr, pushEnv(wBase));
+    check('(W) …with the verified probe on: both legs could not look, trufflehog on the clone, which cloning an incomplete checkout cannot make',
+      wb.status === 1 && wb.stdout.includes(wRangeFails) && wb.argvs.length === 0
+      && wb.stdout.includes('- ❌ trufflehog verified-live secrets — git clone of the checkout for trufflehog failed, exit 128: '), verdict(wb));
+    // gitleaks' git inherits the scan's env, so an alternate that holds the object is read by both.
+    const wg = mergeScan(wr, pushEnv(wBase), { VERIFIED_SECRETS: 'off', GIT_ALTERNATE_OBJECT_DIRECTORIES: wAlt });
+    check("(W) …with an inherited alternate that holds the object: gitleaks' git reads it, so does the log run for it — no fault, and the key BLOCKS",
+      wg.status === 1 && wg.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && wg.stdout.includes(glLine('v.live', 1, kW, `in commit ${wHead.slice(0, 7)}`))
+      && !wg.stdout.includes('could not look'), verdict(wg));
+
+    // One walk of several whose log git cannot finish, and a walk to the root, which trufflehog reads
+    // with --diff-filter=AM: each named.
+    const wd = walkScan(pa, { ...prEnv, PR_HEAD_SHA: aHead }, gitRefusing('--pretty=fuller', aMid));
+    check("(W) one walk of several whose log git cannot finish: FAULT, naming the walk, its tip and its stop",
+      wd.status === 1 && wd.stdout.includes(`- ❌ trufflehog verified-live secrets — trufflehog walk 2 of 2, from ${aMid.slice(0, 7)}, could not read its walk: git log --patch ${aMid.slice(0, 7)} ^${aFork.slice(0, 7)}, the log trufflehog reads, failed in the clone, exit 128: fatal: --pretty=fuller refused by the selftest\n`), verdict(wd));
+    const we = walkScan(pd, { ...prEnv, PR_HEAD_SHA: dHead }, gitRefusing('--diff-filter=AM', dImp));
+    check('(W) a walk to the root is read as trufflehog reads one, with --diff-filter=AM: FAULT, naming it',
+      we.status === 1 && we.stdout.includes(`- ❌ trufflehog verified-live secrets — trufflehog walk 3 of 3, from ${dImp.slice(0, 7)}, could not read its walk: git log --patch ${dImp.slice(0, 7)}, the log trufflehog reads, failed in the clone, exit 128: fatal: --diff-filter=AM refused by the selftest\n`), verdict(we));
 
     // Each gitleaks run reports into a directory made for it, removed after — none may be left behind.
     check('every gitleaks report directory is removed afterwards', fs.readdirSync(tmp).filter((d) => d.startsWith('sb-gitleaks-')).length === 0,

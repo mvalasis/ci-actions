@@ -138,8 +138,8 @@ it looked and found nothing, or it **could not look**:
 |---|---|
 | any | not installed; killed or timed out; output over the 64 MB cap; its collector crashed. A run of 10 s or more says how long it took: a registry stall leaves no other trace. |
 | semgrep | exit 2 or higher, or 1 with no results (without `--error`, which this gate never passes, 1 is not "findings"); no JSON report; an `errors[]` entry at `level: "error"`: a rule or config that did not load, or semgrep's engine failing on a file (an AST builder or fatal error, which semgrep itself exits 2 for). A per-file `warn` (a file it could not fully parse or finish) is listed under scanner notes and is not a fault. |
-| gitleaks | exit other than 0 (it runs with `--exit-code 0`); exit 0 with no report written; a report that is not a JSON array; no git history to read, checked before it runs, because outside a repository gitleaks exits 0 with `[]`; on the diff, a finding whose commit's ancestry git cannot tell (the key blocks as new; v1.19.8); on the diff, what the range's merges add that it could not read (§What a merge adds, v1.20.0) |
-| trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short; on the diff, no commit to stop a walk at (`git merge-base` of the base and a walk's tip failed, timed out or was killed; for a second tip, only a clean "they share no commit" walks it to its root instead), a range git cannot list (`git rev-list`), or a checkout it cannot clone, each checked before trufflehog runs; a finding whose commit's ancestry git cannot tell (the key blocks as new). With several walks the reason names the first that failed and its tip (v1.19.7), or the merge whose own changes it walked; and what the range's merges add that could not be read (§What a merge adds, v1.20.0) |
+| gitleaks | exit other than 0 (it runs with `--exit-code 0`); exit 0 with no report written; a report that is not a JSON array; no git history to read, checked before it runs, because outside a repository gitleaks exits 0 with `[]`; on the diff, a finding whose commit's ancestry git cannot tell (the key blocks as new; v1.19.8); on the diff, what the range's merges add that it could not read (§What a merge adds, v1.20.0); on the diff, a range whose log git cannot finish (`git log -p -U0 <base>..HEAD`, gitleaks' own, run first because gitleaks exits 0 with `[]` on it; §The scanners' own logs, v1.20.1) |
+| trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short; on the diff, no commit to stop a walk at (`git merge-base` of the base and a walk's tip failed, timed out or was killed; for a second tip, only a clean "they share no commit" walks it to its root instead), a range git cannot list (`git rev-list`), or a checkout it cannot clone, each checked before trufflehog runs; a finding whose commit's ancestry git cannot tell (the key blocks as new). With several walks the reason names the first that failed and its tip (v1.19.7), or the merge whose own changes it walked; and what the range's merges add that could not be read (§What a merge adds, v1.20.0); a walk whose log git cannot finish in the clone (trufflehog's own, run first because trufflehog exits 0 having read nothing on it; §The scanners' own logs, v1.20.1) |
 | osv-scanner | exit other than 0, 1 or 128; exit 1 with no results; 128 with `Error during extraction` on stderr (a lockfile it could not parse), or with a tracked npm/composer lockfile and no `Scanned … found N packages` line (one it did not read, such as a `bun.lockb`). Otherwise 128 is nothing to audit: no lockfile, or every lockfile read and empty (v1.19.5; measured on v2.4.0) |
 | hadolint | no JSON array; exit other than 0 or 1 (1 = a rule fired) |
 | git | the diff that lists the changed files failed: a `base-ref` or PR base that does not resolve, which gitleaks would read as an empty range and exit 0 on; `git ls-files` failed |
@@ -307,6 +307,63 @@ git's own merge of their parents`.
 - **Not read:** what a merge outside the diff range added. `scan-scope: full` and the full-history
   legs (`secrets-history`) still read `git log -p` alone, so a key in an old merge's own changes is
   not in the history baseline. On 2026-09-26 no caller's history held one (above).
+
+## The scanners' own logs (v1.20.1)
+
+Both secret legs read commits through a `git log -p` of their own, and both exit 0 having read
+nothing when it dies. Measured on the pinned binaries (2026-09-26):
+
+- **gitleaks 8.30.1** prints `[git] fatal: …`, `0 commits scanned` and `no leaks found`, and exits 0
+  with `[]` (run with `--exit-code 0`, as the gate runs it) on a `--log-opts` naming an object the
+  repository lacks (`fatal: bad object`), a range one of whose blobs or trees is gone, a blob that
+  does not inflate, and a partial clone whose promisor remote is gone.
+- **trufflehog 3.95.6** exits 0 with `chunks: 0`, `--fail-on-scan-errors` or not, when its `git log`
+  dies on a tree or blob the repository it walks lacks (`fatal: unable to read tree …`).
+
+Until v1.20.1 the range's own reads had no guard but the changed-file list, which faults on a base
+git cannot resolve. It reads the range's two ends, so a commit between them that git could not read
+left gitleaks reporting that it had looked: the gitleaks leg read as clean, and under
+`verified-secrets: off` so did the verdict. The trufflehog leg was covered on the checkout's side
+since v1.19.7: cloning the checkout fails on an object the checkout lacks or cannot read, because
+`upload-pack` reads every object and fetches none lazily. What could still go wrong was in the clone
+itself, and there a walk that read nothing read as a walk that found nothing.
+
+**The check.** Before a scanner reads the range, the same log runs in the same repository with the
+same env, its output discarded (any size). An exit other than 0 is could-not-look, naming the log;
+the scanner runs all the same, and what it read before git died stands. As each scanner runs it
+(measured with a `git` on `PATH` that logged every call's argv and env):
+
+| | The scanner's own log | The check |
+|---|---|---|
+| gitleaks, the range | `git -C . log -p -U0 <base>..HEAD`, in the checkout, with the scan's env | the same |
+| trufflehog, each walk | `git -C <clone> log --patch --full-history --date=iso-strict --pretty=fuller --notes <tip>`, with git looked up on `PATH` and started with `GIT_DIR=<clone>/.git` as its only variable. It reads toward the root and stops itself at `--since-commit`. | the same over `<tip> ^<since>`. A walk to the root has no `--since-commit`, and trufflehog adds `--diff-filter=AM` to it: so does the check |
+
+- **Why `<tip> ^<since>`.** Verbatim, trufflehog's log reads all of history on every walk, and would
+  fault on an old object no walk reads. A walk is one chain of range commits from its tip until its
+  first merge, read before anything the base holds can come up, and every range commit sits on such
+  a chain of some walk. So a log that dies before trufflehog reaches a range commit dies on a range
+  commit, which `<tip> ^<since>` reads, each patch against its parent, the parent's side included.
+- **Why not something cheaper.** `git rev-list --objects <range> | git cat-file --batch-check` passes
+  on two failures that blind both scanners (measured): a blob the range's first patch reads from the
+  base (a file's old side), and a blob whose header inflates but whose body does not.
+- **Pinned.** `selftest-pr-shape.sh` runs both real scanners behind a `git` that logs every `git
+  log`, and fails unless each check has its scanner's argv and env. A `gitleaks-version` or
+  `trufflehog-version` bump that changes how the scanner runs its log fails there.
+- **Cost.** On luxairportlu, the largest caller, over the 79 push ranges its activity log still
+  resolves (2026-09-26; a median of 1 commit, at most 33), gitleaks' check took a median of 9 ms and
+  at most 14 ms, beside a median of 204 ms for gitleaks' own run on the same range. The walks'
+  checks took together a median of 9 ms and at most 65 ms, on a range of 6 walks; trufflehog's own
+  walks of the largest ranges took 0.7 to 1.4 s. On `main~100..main` (125 commits, 1.9 MB of patch)
+  they took 52 and 58 ms, beside 265 ms for gitleaks. Measured on an idle laptop (git 2.54, Apple
+  silicon), where most of each is git starting up. Neither check failed on any of the 838 push
+  ranges the 11 callers' activity logs still resolve.
+- **Not checked:** `scan-scope: full`'s gitleaks run, which reads all of history under the T0 check,
+  and the full-history legs (`secrets-history`, which only warn). No caller runs `scan-scope: full`
+  (2026-09-26). The merge pass's commits were checked from v1.20.0 (§What a merge adds).
+- **A partial clone cannot be scanned by trufflehog.** A checkout made with `filter: blob:none`
+  lacks blobs it fetches lazily, and `upload-pack` does not fetch them, even with the promisor
+  remote reachable (measured on git 2.54). Cloning it fails, so the trufflehog leg is could-not-look
+  on every run (since v1.19.7). No caller checks out a partial clone (2026-09-26).
 
 ## Sovereignty — honest egress enumeration
 
@@ -593,6 +650,27 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   pass's walk. 25 assertions; each of 36 targeted mutants of `scan.mjs` turns it red. A 37th, the
   trufflehog dedup key taken from the pass commit instead of its merge, proved equivalent (no walk
   reports a merge commit, which `git log -p` prints no patch for), and that line keeps the code it had.
+  Its **scanners' own logs** leg (v1.20.1) feeds `outcome.mjs` git's own answers (an object the
+  repository lacks, one that does not inflate, a git killed, timed out or not found), then builds a
+  range whose middle commit adds a blob that later leaves the object store, while the head commit,
+  whose own patch needs that blob, adds a key. Controls first: `git log -p` of the range dies there
+  while the changed-file list does not; the gitleaks stub (8.30.1 as measured) exits 0 with `[]`;
+  a trufflehog stub that runs 3.95.6's own log, with `GIT_DIR` alone, exits 0 having walked
+  nothing. Then, end to end: a clone that lacks the blob (a `git` on `PATH` takes it out after
+  cloning) is could-not-look on trufflehog's leg, naming the walk's log, while gitleaks on the whole
+  checkout still blocks, and an inherited alternate that holds the blob changes nothing, since
+  trufflehog's git is given `GIT_DIR` alone; a checkout that lacks it is could-not-look on the
+  gitleaks leg, naming its log, gitleaks still runs, and with the verified probe on, cloning it
+  fails too; there an alternate that holds the blob is read by gitleaks' git and the check alike, so
+  the key blocks and nothing faults. An object only the history below the range reads, lost from
+  the clone, is no fault; a log longer than `run()`'s 64 MB buffer is read to its end; one walk of
+  several whose log git cannot finish is named, and a walk to the root is read with
+  `--diff-filter=AM`. It adds 17 assertions. Of 24 targeted mutants of `scan.mjs` and `outcome.mjs`,
+  22 turn it red, and each assertion goes red under at least one of them, or, for the fixture's own
+  controls, under one of 3 mutants of the stubs and the fixture. The other two are equivalent: `-U0`
+  implies `-p`, so a gitleaks log without `-p` reads the same, and a pass walk checked a second time
+  costs only time. v1.20.0's `scan.mjs` fails 6 of them, and on the checkout that lacks a range
+  object, with the verified probe off, it says PASS.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
 - `bash scripts/selftest-pr-shape.sh` — the shapes this repo's own pushes never produce, scanned
@@ -620,6 +698,15 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   base held. v1.19.8's `scan.mjs` fails 12 of their checks. Each of 9 targeted mutants run on them
   fails at least one, among them a pass run without its parent excluded (it reads git's own merge as
   a root commit) and a pass over a merge the base holds.
+  Since v1.20.1, with the REAL gitleaks too: a clone that lacks a range object (the real trufflehog
+  reads nothing there and exits 0; the walk's log is could-not-look), a checkout that does (the real
+  gitleaks reads nothing and exits 0 with `[]`; its log is could-not-look, and cloning the checkout
+  fails), each behind a control on the real binary, and a `git` on `PATH` that logs every `git log`
+  both scanners and both checks run: each check must have its scanner's argv (trufflehog's with its
+  walk's `^<since>`) and env (trufflehog's `GIT_DIR` alone). v1.20.0's `scan.mjs` fails all three,
+  and so do 6 targeted mutants: a gitleaks log without a patch, a walk's log handed the scan's env,
+  read to the root, started by name without `PATH`, without `--notes`, and a walk to the root
+  without `--diff-filter=AM`. Only this pin sees the one without `--notes`.
 
 All three run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a report-mode self-scan,
 after which the same job runs `scan.mjs` over this repo with the real scanners the action just

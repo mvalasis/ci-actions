@@ -20,7 +20,7 @@ import { spawnSync } from 'node:child_process';
 import { SEV, evaluate, parsePromote, groupByCheck, sevRank, CHECKS, safe, redact, annotations, canBeCritical, faultAnnotation, shortSha } from './tiers.mjs';
 import { firstPartyOwners, filterFirstPartyGha } from './firstparty.mjs';
 import { argvTargets, findArgvSecrets, argvFinding } from './argv-secret.mjs';
-import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, scrub, errorLine } from './outcome.mjs';
+import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, gitLogOutcome, scrub, errorLine } from './outcome.mjs';
 
 const env = process.env;
 const ACTION_PATH = env.GITHUB_ACTION_PATH || path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -178,6 +178,39 @@ function collectSemgrep() {
   return out;
 }
 
+// ---------- the git log each secret scanner reads (v1.20.1) ----------
+// Both scanners read commits through a `git log -p` of their own, and both exit 0 having read nothing
+// when it dies on an object the repository lacks or cannot read: gitleaks 8.30.1 with `[]` (`[git]
+// fatal: …`, `0 commits scanned`), trufflehog 3.95.6 with no result (`chunks: 0`), under
+// --fail-on-scan-errors too. So the range's own reads run that log first, in the same repository with
+// the same env, output discarded (any size), and a log git cannot finish is could-not-look, never a
+// PASS. As each scanner runs it (measured with a git on PATH that logged argv and env;
+// selftest-pr-shape.sh pins both on the real binaries):
+//   gitleaks    `git -C . log -p -U0 <--log-opts, split on spaces>`, with the scanner's own env.
+//   trufflehog  `git -C <repo> log --patch --full-history --date=iso-strict --pretty=fuller --notes
+//               [--diff-filter=AM] <--branch>`, found on PATH and started with GIT_DIR=<repo>/.git as
+//               its only variable; it reads to the root and stops itself at --since-commit, and adds
+//               the filter only when it has none.
+// A cheaper check is no substitute: `git rev-list --objects <range> | git cat-file --batch-check`
+// passes on two failures that blind both scanners (measured): a blob the range's first patch reads
+// from the base (a file's old side), and a blob whose header inflates but whose body does not.
+const GITLEAKS_LOG = ['-C', '.', 'log', '-p', '-U0'];
+const TRUFFLEHOG_LOG = ['log', '--patch', '--full-history', '--date=iso-strict', '--pretty=fuller', '--notes'];
+// git as Go starts it: looked up on PATH first (absolute entries), then run with the env it is given.
+const GIT = (() => {
+  for (const dir of String(env.PATH || '').split(path.delimiter)) {
+    if (!path.isAbsolute(dir)) continue;
+    const p = path.join(dir, 'git');
+    try { if (fs.statSync(p).isFile()) { fs.accessSync(p, fs.constants.X_OK); return p; } } catch { /* next */ }
+  }
+  return 'git';
+})();
+// '' once git finished the log, else why it did not.
+function logUnread(args, { bin = 'git', env: logEnv } = {}) {
+  const o = gitLogOutcome(run(bin, args, { timeout: 300000, stdio: ['ignore', 'ignore', 'pipe'], ...(logEnv ? { env: logEnv } : {}) }));
+  return o.read ? '' : o.reason;
+}
+
 // ---------- gitleaks (pattern secrets) ----------
 // The report goes to a directory made for this one run. The old fixed name under the shared tmp
 // (`gl-<hash of the args>.json`, the same on every run with the same base) could hand back a
@@ -220,8 +253,14 @@ function collectGitleaks() {
   // skew git lists commits the base already holds in it (baseHolds, below). What gitleaks found in one
   // of those is pre-existing, so it is secrets-history and never blocks (v1.19.8). A finding with no
   // commit counts as the change's own, and so does one whose ancestry git cannot tell: that blocks,
-  // and the leg could not look.
+  // and the leg could not look. Its log runs first (v1.20.1): the changed-file list reads the range's
+  // two ends, and a commit between them git cannot read would leave gitleaks reading nothing and
+  // reporting `[]`. The run goes ahead either way: what it did read before git died stands.
   const scoped = DIFF && BASE;
+  if (scoped) {
+    const why = logUnread([...GITLEAKS_LOG, `${BASE}..HEAD`]);
+    if (why) couldNotLook(LEGS.gitleaks, `the range could not be read: git log -p -U0 ${safe(BASE, 60)}..HEAD, the log gitleaks reads, failed, ${why}`);
+  }
   const diff = gitleaksRun(LEGS.gitleaks, scoped ? ['--log-opts', `${BASE}..HEAD`] : []);
   // …and what the range's merges add (mergePass), in a run of its own: each pass commit named with its
   // parent excluded, so the log prints it alone, read from the clone that holds it. gitleaks 8.30.1
@@ -383,13 +422,27 @@ function checkoutClone() {
     : { clone };
   return cloned;
 }
+// Each range walk's log runs first, in the clone, as trufflehog runs it, over `<tip> ^<since>`: the
+// walk's commits the base does not hold, rather than trufflehog's read to its own stop. That is enough
+// (v1.20.1): a walk is one chain of range commits from its tip until its first merge, read before
+// anything the base holds can come up, and every range commit sits on such a chain of some walk. So
+// a log that dies before trufflehog reaches a range commit dies on a range commit, which this reads.
+// Cloning already fails on an object the checkout lacks or cannot read (upload-pack reads every one,
+// and a lazy fetch is off there); this catches what goes wrong in the clone itself. A pass walk's log
+// ran in mergePass. The walk goes ahead either way: what it did read before git died stands.
 function walkRange(leg, walks, flags) {
   const c = checkoutClone();
   if (c.reason) { couldNotLook(leg, c.reason); return []; }
   const results = [];
+  const asTrufflehog = { env: { GIT_DIR: path.join(c.clone, '.git') }, bin: GIT };
   walks.forEach((w, i) => {
+    const which = walks.length > 1 ? ` walk ${i + 1} of ${walks.length}, ${w.merge ? `of what merge ${w.merge.slice(0, 7)} adds` : `from ${w.tip.slice(0, 7)}`},` : '';
+    if (!w.merge) {
+      const why = logUnread(['-C', c.clone, ...TRUFFLEHOG_LOG, ...(w.since ? [w.tip, `^${w.since}`] : ['--diff-filter=AM', w.tip])], asTrufflehog);
+      if (why) couldNotLook(leg, `trufflehog${which} could not read its walk: git log --patch ${w.tip.slice(0, 7)}${w.since ? ` ^${w.since.slice(0, 7)}` : ''}, the log trufflehog reads, failed in the clone, ${why}`);
+    }
     const o = trufflehogOutcome(run(BIN.trufflehog, ['git', `file://${c.clone}`, '--trust-local-git-config', ...flags, '--branch', w.tip, ...(w.since ? ['--since-commit', w.since] : [])], { timeout: 300000 }));
-    if (!o.looked) couldNotLook(leg, `trufflehog${walks.length > 1 ? ` walk ${i + 1} of ${walks.length}, ${w.merge ? `of what merge ${w.merge.slice(0, 7)} adds` : `from ${w.tip.slice(0, 7)}`},` : ''} ${o.reason}`);
+    if (!o.looked) couldNotLook(leg, `trufflehog${which} ${o.reason}`);
     results.push(...o.results);
   });
   return results;

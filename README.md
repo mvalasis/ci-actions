@@ -56,6 +56,46 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.20.1** *(tag not yet cut; lands with the next `v1` move)* — `security-baseline` reads a range
+git cannot read as could-not-look, never as clean. Both secret scanners read commits through a `git
+log -p` of their own and exit 0 having read nothing when it dies. Measured on the pinned binaries:
+gitleaks 8.30.1 logs `[git] fatal: …` and `0 commits scanned` and reports `[]` on a `--log-opts`
+naming an object the repository lacks, on a range one of whose blobs or trees is gone, on a blob
+that does not inflate, and in a partial clone whose promisor remote is gone; trufflehog 3.95.6 exits
+0 with `chunks: 0`, `--fail-on-scan-errors` or not, when its log cannot read a tree or blob. v1.20.0
+guarded only the merge pass's commits. Now the range's own gitleaks run and each trufflehog walk run
+their scanner's log first, in the same repository and env, output discarded (any size): gitleaks'
+`git -C . log -p -U0 <base>..HEAD` in the checkout, and trufflehog's `git log --patch --full-history
+--date=iso-strict --pretty=fuller --notes` in the clone, started as trufflehog starts it (git looked
+up on `PATH`, `GIT_DIR` its only variable), over `<tip> ^<since>` (`--diff-filter=AM <tip>` for a
+walk to the root). A log git cannot finish is could-not-look, naming it; the scanner still runs.
+Before, a checkout that lacked a range object had the gitleaks leg report that it looked, and under
+`verified-secrets: off` the verdict was PASS (reproduced through v1.20.0's `scan.mjs`); with the
+probe on, cloning the checkout already failed (since v1.19.7: `upload-pack` reads every object and
+fetches none lazily), so the verdict was FAULT on trufflehog's leg alone; damage in the clone itself
+read as a walk that found nothing. `git rev-list --objects | git cat-file --batch-check` was
+measured and rejected as the cheaper check: it passes on a blob the range's first patch reads from
+the base and on a blob whose header inflates but whose body does not, both of which blind both
+scanners. The selftest gains 17 assertions, each red under at least one of 24 targeted mutants (22
+killed, 2 proved equivalent) or, for the fixture's controls, under a mutant of the stub; v1.20.0's
+`scan.mjs` fails 6 of them. `selftest-pr-shape.sh` gains three shapes on the real binaries: a clone,
+then a checkout, that lacks a range object, each behind a control on the real scanner, and a pin of
+each check's argv and env to its scanner's, logged by a `git` on `PATH`. v1.20.0's `scan.mjs` fails
+all three, as do 6 targeted mutants; one, a walk's log without `--notes`, only the pin sees.
+**Measured before release** with v1.20.0's `scan.mjs` (then `v1`) and this one, the real gitleaks
+8.30.1 and trufflehog 3.95.6 offline, on the latest push of every branch the gate runs on for the 11
+callers (luxairportlu's `dev` too) and on the 7 open PRs: exit, report, walks and reads identical on
+all 19, each PASS. Both checks also ran on the 838 push ranges the 11 callers' activity logs still
+resolve, and failed on none. **Cost on luxairportlu**, the largest caller: over its 79 resolvable
+push ranges, gitleaks' check took a median of 9 ms (at most 14) and the walks' checks a median of 9
+ms (at most 65, on a range of 6 walks), beside a median of 204 ms for gitleaks' own run; on a
+125-commit range, 52 and 58 ms beside 265 ms (an idle laptop). **Caller-visible:** a range git
+cannot read is a FAULT naming the log, on each secret leg it blinds. No input changed. On the
+measured state the `v1` move newly-blocks nobody. Also measured: a partial clone checkout (`filter:
+blob:none`) cannot be cloned for trufflehog at all, even with its promisor reachable, so its
+trufflehog leg is could-not-look on every run (since v1.19.7; measured on git 2.54). No caller
+checks one out.
+
 **v1.20.0** — `security-baseline` reads what only a merge commit adds. Both secret legs read
 commits as `git log -p` prints them, and
 `git log -p` prints no patch for a merge, so a key typed into a conflict resolution, or added while

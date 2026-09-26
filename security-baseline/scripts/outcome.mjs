@@ -104,8 +104,10 @@ export function semgrepOutcome(r) {
 // Run with --exit-code 0: 0 = it ran, leaks or none; anything else is an error (log.Fatal exits 1).
 // A run that finished writes its report even for zero findings (`[]`; `null` read the same). No
 // report, or one that is not a JSON array, is a run that did not finish — never "no secrets".
-// Its exit code has two blind spots scan.mjs covers before it runs (measured on 8.30.1): outside a
-// git repository, and on a --log-opts range git cannot resolve, it exits 0 with `[]`.
+// Its exit code has three blind spots scan.mjs covers before it runs (measured on 8.30.1): outside a
+// git repository, on a --log-opts range git cannot resolve, and whenever its `git log` dies (an object
+// the repository lacks or cannot read, a lazy fetch that fails), it exits 0 with `[]`. It says so
+// only in its log: `[git] fatal: …`, `0 commits scanned` (gitLogOutcome, below).
 export function gitleaksOutcome(r, report) {
   const pf = processFault(r);
   if (pf) return { looked: false, reason: pf, results: [] };
@@ -121,6 +123,8 @@ export function gitleaksOutcome(r, report) {
 // trufflehog exits 0 whether or not it found anything (183 is --fail, never passed here); anything
 // else is an error. Without --fail-on-scan-errors (scan.mjs passes it) a scan that failed inside —
 // a --since-commit it cannot resolve — ALSO exits 0, having scanned nothing (measured on 3.95.6).
+// With it, a `git log` that dies on an object the repository lacks still exits 0, having read nothing
+// (`chunks: 0`): scan.mjs runs that log first (gitLogOutcome, below).
 // stdout is one JSON object per line, and one that starts like an object and does not parse is
 // output cut short. Its stderr is NEVER quoted: that is where trufflehog logs, and a live credential
 // must not reach the report, not even redacted.
@@ -138,6 +142,18 @@ export function trufflehogOutcome(r) {
   if (r.status !== 0) return { looked: false, reason: `exit ${r.status} — its log is not quoted here, rerun trufflehog to read it`, results };
   if (broken) return { looked: false, reason: `${broken} JSON line(s) cut short`, results };
   return { looked: true, results };
+}
+
+// ---------- the git log a secret scanner reads ----------
+// Both secret scanners read commits through a `git log -p` of their own, and both exit 0 having read
+// nothing when it dies. So scan.mjs runs that log first, as the scanner will, its output discarded,
+// and hands the finished process here: git finished it, or why it did not. Measured on git 2.54: an
+// object the repository lacks or cannot inflate exits 128 with `fatal:`/`error:` first on stderr.
+export function gitLogOutcome(r) {
+  const pf = processFault(r);
+  if (pf) return { read: false, reason: pf };
+  if (r.status !== 0) return { read: false, reason: exitReason(r, errorLine(r.stderr)) };
+  return { read: true };
 }
 
 // ---------- osv-scanner ----------
