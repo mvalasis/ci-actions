@@ -56,7 +56,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.19.8** *(tag not yet cut; lands with the next `v1` move)* —
+**v1.19.8** —
 `security-baseline`'s gitleaks pattern floor no longer blocks on a key the base already holds when
 git lists base commits in its range. The range is `git log <base>..HEAD`, and git stops walking the
 base's side once that side is dated older than everything left on the head's, so past a clock skew
