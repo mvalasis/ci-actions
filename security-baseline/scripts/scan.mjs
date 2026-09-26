@@ -182,16 +182,21 @@ function collectSemgrep() {
 // The report goes to a directory made for this one run. The old fixed name under the shared tmp
 // (`gl-<hash of the args>.json`, the same on every run with the same base) could hand back a
 // previous run's report, or one planted there, whenever this run wrote none.
-function gitleaksRun(leg, extraArgs) {
+// `ignore`: .gitleaksignore entries of this run's own, read beside the checkout's (collectGitleaks).
+function gitleaksRun(leg, extraArgs, { env: runEnv, ignore = [], what = 'gitleaks' } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-gitleaks-'));
   try {
     const report = path.join(dir, 'report.json');
     const args = ['detect', '--redact', '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', '0', ...extraArgs];
-    const r = run(BIN.gitleaks, args, { timeout: 300000 });
+    if (ignore.length) {
+      fs.writeFileSync(path.join(dir, 'merges.gitleaksignore'), `${ignore.join('\n')}\n`);
+      args.push('--gitleaks-ignore-path', path.join(dir, 'merges.gitleaksignore'));
+    }
+    const r = run(BIN.gitleaks, args, { timeout: 300000, ...(runEnv ? { env: runEnv } : {}) });
     let text = null;
     try { text = fs.readFileSync(report, 'utf8'); } catch { /* never written: gitleaksOutcome says why */ }
     const o = gitleaksOutcome(r, text);
-    if (!o.looked) couldNotLook(leg, `gitleaks ${o.reason}`);
+    if (!o.looked) couldNotLook(leg, `${what} ${o.reason}`);
     return o.results;
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -218,14 +223,36 @@ function collectGitleaks() {
   // and the leg could not look.
   const scoped = DIFF && BASE;
   const diff = gitleaksRun(LEGS.gitleaks, scoped ? ['--log-opts', `${BASE}..HEAD`] : []);
+  // …and what the range's merges add (mergePass), in a run of its own: each pass commit named with its
+  // parent excluded, so the log prints it alone, read from the clone that holds it. gitleaks 8.30.1
+  // exits 0 with `[]` when its `git log` dies ("0 commits scanned", said only in its log), so the same
+  // log runs here first, its output discarded (any size): a pass commit gitleaks could not read is a
+  // fault, never a PASS, and the range's own run above cannot be blinded by one.
+  const own = new Map();
+  if (scoped) {
+    const mp = mergePass();
+    if (mp.reason) couldNotLook(LEGS.gitleaks, mp.reason);
+    if (mp.pairs.length) {
+      const opts = mp.pairs.flatMap((p) => [p.tip, `^${p.since}`]);
+      const passEnv = { ...env, GIT_ALTERNATE_OBJECT_DIRECTORIES: [mp.objects, env.GIT_ALTERNATE_OBJECT_DIRECTORIES].filter(Boolean).join(path.delimiter) };
+      const pre = run('git', ['log', '-p', '-U0', '--format=%H', ...opts], { env: passEnv, timeout: 300000, stdio: ['ignore', 'ignore', 'pipe'] });
+      if (pre.status !== 0 || pre.error || pre.signal) couldNotLook(LEGS.gitleaks, `what the range's merges add could not be read by gitleaks: git log of the pass's commits failed, exit ${pre.status}${errorLine(pre.stderr) ? `: ${scrub(errorLine(pre.stderr))}` : ''}`);
+      else {
+        for (const p of mp.pairs) own.set(p.tip, p.merge);
+        diff.push(...gitleaksRun(LEGS.gitleaks, ['--log-opts', opts.join(' ')], { env: passEnv, ignore: pinnedToMerges(mp.pairs), what: "gitleaks, on what the range's merges add," }));
+      }
+    }
+  }
   const past = new Set();
   let pastFindings = 0;
   for (const f of diff) {
-    const id = String(f.Commit || '').toLowerCase();
+    // A pass commit exists only in the clone: it is named, and asked about, as its merge.
+    const merge = own.get(f.Commit);
+    const id = String(merge || f.Commit || '').toLowerCase();
     const holds = scoped && isSha(id) ? baseHolds(id) : false;
     if (holds && holds.reason) couldNotLook(LEGS.gitleaks, holds.reason);
-    if (holds === true) { past.add(id); pastFindings++; out.push(inHistory(f)); continue; }
-    out.push({ checkId: 'secret-pattern', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, commit: f.Commit, msg: `${f.RuleID || 'secret'} (${redact(f.Secret)})${inCommit(f)}`, cwe: 'CWE-798' });
+    if (holds === true) { past.add(id); pastFindings++; out.push(inHistory({ ...f, Commit: merge || f.Commit })); continue; }
+    out.push({ checkId: 'secret-pattern', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, commit: merge || f.Commit, msg: `${f.RuleID || 'secret'} (${redact(f.Secret)})${merge ? ownChanges(merge) : inCommit(f)}`, cwe: 'CWE-798' });
   }
   if (past.size) infra.push(`gitleaks: its range listed ${past.size === 1 ? 'a commit' : `${past.size} commits`} the base already holds, as git does past a clock skew, so the ${pastFindings === 1 ? 'finding there is' : `${pastFindings} findings there are`} pre-existing: secrets-history, not secret-pattern`);
   // T2 — full-history baseline (WARN; never blocks). Dedup against the diff hits by file+rule.
@@ -263,15 +290,26 @@ const isSha = (s) => /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(s);
 // commit, and so cannot stop, until it reaches its first merge or leaves the range, and every
 // commit of the range sits on such a run below some tip: together the walks cover the range
 // whatever the dates. gitleaks' `BASE..HEAD` range, the T0 pattern floor, is the same range.
-function trufflehogRange() {
-  let head = '';
+// Where the range ends, shared with mergePass (once a run): the PR's own head when the checkout holds
+// it, else HEAD. Past a pull_request's PR head, HEAD is GitHub's test merge, never the author's.
+let headOfRange = null;
+function rangeHead() {
+  if (headOfRange) return headOfRange;
+  let head = '', note = '';
   const pr = String(env.PR_HEAD_SHA || '').trim().toLowerCase();
   if (isSha(pr)) {
     if (run('git', ['merge-base', '--is-ancestor', pr, 'HEAD'], { timeout: 30000 }).status === 0) head = pr;
-    else infra.push(`trufflehog: the PR head ${pr.slice(0, 7)} is not in this checkout, so the walk starts at HEAD`);
+    else note = `trufflehog: the PR head ${pr.slice(0, 7)} is not in this checkout, so the walk starts at HEAD`;
   }
   if (!head) head = sh(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
-  if (!isSha(head)) return { reason: 'no commit checked out to walk from' };
+  headOfRange = isSha(head) ? { head, note, testMerge: isSha(pr) && head !== pr ? head : '' } : { note, reason: 'no commit checked out to walk from' };
+  return headOfRange;
+}
+function trufflehogRange() {
+  const h = rangeHead();
+  if (h.note) infra.push(h.note);
+  if (h.reason) return { reason: h.reason };
+  const { head } = h;
   const stopFor = (tip) => {
     const r = run('git', ['merge-base', BASE, tip], { timeout: 30000 });
     const since = r.status === 0 ? r.stdout.trim() : '';
@@ -318,33 +356,43 @@ const baseHolds = (c) => {
   }
   return held.get(c);
 };
-// ONE clone serves every walk: the clone trufflehog makes of `file://.` on each run (same refspec),
-// made once and without a worktree, then named with --trust-local-git-config, under which
-// trufflehog scans the repository it is given in place. Nothing of the checkout's git config
-// reaches a clone, so trusting it trusts only what `git clone` wrote. With no index, trufflehog's
-// staged-changes pass reads nothing, as on a clean checkout. The directory's name must not start
-// with `trufflehog`: after a scan trufflehog deletes the repository it read when its path starts
-// with $TMPDIR/trufflehog (its own clones' prefix; measured on 3.95.6), which would take the clone
-// away from every walk after the first.
-function walkRange(leg, walks, flags) {
+// ONE clone serves every walk and the merge pass: the clone trufflehog makes of `file://.` on each
+// run (same refspec), made once, on first use, and without a worktree, then named with
+// --trust-local-git-config, under which trufflehog scans the repository it is given in place.
+// Nothing of the checkout's git config reaches a clone, so trusting it trusts only what `git clone`
+// wrote. With no index, trufflehog's staged-changes pass reads nothing, as on a clean checkout. The
+// directory's name must not start with `trufflehog`: after a scan trufflehog deletes the repository
+// it read when its path starts with $TMPDIR/trufflehog (its own clones' prefix; measured on
+// 3.95.6), which would take the clone away from every walk after the first. It is removed when the
+// scan exits: gitleaks reads the merge pass's commits in it before trufflehog runs.
+// Every object a walk reads must be in the clone itself: trufflehog resolves commits in the
+// repository it is given and does not read an alternate object directory (3.95.6: "unable to resolve
+// commit: object not found"). So git runs for the clone without the variables that point it at other
+// object stores: through an inherited alternate, git would skip an object it can already see there,
+// in the clone and in the merge pass alike, and trufflehog's `git log` would die on it and exit 0.
+const OWN_OBJECTS = Object.fromEntries(Object.entries(env).filter(([k]) => !/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|COMMON_DIR)$/.test(k)));
+let cloned = null;
+function checkoutClone() {
+  if (cloned) return cloned;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-trufflehog-'));
-  try {
-    const clone = path.join(dir, 'repo');
-    const c = run('git', ['clone', '--quiet', '--no-checkout', '-c', 'remote.origin.fetch=+refs/*:refs/remotes/origin/*', `file://${process.cwd()}`, clone], { timeout: 300000 });
-    if (c.status !== 0 || c.error || c.signal) {
-      couldNotLook(leg, `git clone of the checkout for trufflehog failed, exit ${c.status}${errorLine(c.stderr) ? `: ${scrub(errorLine(c.stderr))}` : ''}`);
-      return [];
-    }
-    const results = [];
-    walks.forEach((w, i) => {
-      const o = trufflehogOutcome(run(BIN.trufflehog, ['git', `file://${clone}`, '--trust-local-git-config', ...flags, '--branch', w.tip, ...(w.since ? ['--since-commit', w.since] : [])], { timeout: 300000 }));
-      if (!o.looked) couldNotLook(leg, `trufflehog${walks.length > 1 ? ` walk ${i + 1} of ${walks.length}, from ${w.tip.slice(0, 7)},` : ''} ${o.reason}`);
-      results.push(...o.results);
-    });
-    return results;
-  } finally {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
-  }
+  process.on('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } });
+  const clone = path.join(dir, 'repo');
+  const c = run('git', ['clone', '--quiet', '--no-checkout', '-c', 'remote.origin.fetch=+refs/*:refs/remotes/origin/*', `file://${process.cwd()}`, clone], { timeout: 300000, env: OWN_OBJECTS });
+  cloned = c.status !== 0 || c.error || c.signal
+    ? { reason: `git clone of the checkout for trufflehog failed, exit ${c.status}${errorLine(c.stderr) ? `: ${scrub(errorLine(c.stderr))}` : ''}` }
+    : { clone };
+  return cloned;
+}
+function walkRange(leg, walks, flags) {
+  const c = checkoutClone();
+  if (c.reason) { couldNotLook(leg, c.reason); return []; }
+  const results = [];
+  walks.forEach((w, i) => {
+    const o = trufflehogOutcome(run(BIN.trufflehog, ['git', `file://${c.clone}`, '--trust-local-git-config', ...flags, '--branch', w.tip, ...(w.since ? ['--since-commit', w.since] : [])], { timeout: 300000 }));
+    if (!o.looked) couldNotLook(leg, `trufflehog${walks.length > 1 ? ` walk ${i + 1} of ${walks.length}, ${w.merge ? `of what merge ${w.merge.slice(0, 7)} adds` : `from ${w.tip.slice(0, 7)}`},` : ''} ${o.reason}`);
+    results.push(...o.results);
+  });
+  return results;
 }
 function collectTrufflehog() {
   const out = [];
@@ -362,11 +410,18 @@ function collectTrufflehog() {
   // resolve) exits 0, having scanned nothing.
   const flags = ['--only-verified', '--no-update', '--json', '--fail-on-scan-errors'];
   let range = null, results;
+  const own = new Map();
   if (scoped) {
     range = trufflehogRange();
     if (range.reason) { couldNotLook(leg, range.reason); return out; }
     if (range.walks.length > 1) infra.push(`trufflehog: the range holds ${range.merges} merge${range.merges === 1 ? '' : 's'}, so it was walked from ${range.walks.length} segment tips, each back to where it left the base${range.walks.some((w) => !w.since) ? ', or to its root where it shares no commit with the base' : ''}`);
-    results = walkRange(leg, range.walks, flags);
+    const c = checkoutClone();
+    if (c.reason) { couldNotLook(leg, c.reason); return out; }
+    // What the range's merges add: one more walk each, of the pass's one commit (mergePass).
+    const mp = mergePass();
+    if (mp.reason) couldNotLook(leg, mp.reason);
+    for (const p of mp.pairs) own.set(p.tip, p.merge);
+    results = walkRange(leg, [...range.walks, ...mp.pairs.map(({ tip, since, merge }) => ({ tip, since, merge }))], flags);
   } else {
     const o = trufflehogOutcome(run(BIN.trufflehog, ['git', 'file://.', ...flags], { timeout: 300000 }));
     if (!o.looked) couldNotLook(leg, `trufflehog ${o.reason}`);
@@ -376,6 +431,9 @@ function collectTrufflehog() {
   for (const obj of results) {
     if (obj.Verified !== true) continue;
     const g = (obj.SourceMetadata && obj.SourceMetadata.Data && obj.SourceMetadata.Data.Git) || {};
+    // A line of the merge pass's commit is the merge's own: it is named, and graded, as the merge.
+    const merge = own.get(String(g.commit || '').toLowerCase());
+    const commit = merge || g.commit;
     // Two walks that meet report the commits they share twice.
     const key = [g.commit, g.file, g.line, obj.DetectorName].join('\n');
     if (seen.has(key)) continue;
@@ -385,18 +443,119 @@ function collectTrufflehog() {
     // the base holds is pre-existing, so it warns and never blocks. A finding without a commit id
     // counts as the change's own (trufflehog names staged content `Staged`; a clone with no index has
     // none), and so does one whose ancestry git could not tell: that blocks, and the leg could not look.
-    const id = String(g.commit || '').toLowerCase();
+    // A pass commit exists only in the clone: it is asked about as its merge, which the checkout holds.
+    const id = String(commit || '').toLowerCase();
     const holds = scoped && isSha(id) ? baseHolds(id) : false;
     if (holds && holds.reason) couldNotLook(leg, holds.reason);
     const fresh = scoped && holds !== true;
     out.push({
       checkId: fresh ? 'secret-verified' : 'secrets-history', tool: 'trufflehog', rule: obj.DetectorName || 'secret',
-      file: g.file || '(history)', line: g.line || 0, commit: g.commit, cwe: 'CWE-798',
-      msg: `🔴 VERIFIED-LIVE ${obj.DetectorName || 'secret'}${shortSha(g.commit) ? ` in commit ${shortSha(g.commit)}` : ''} — ROTATE NOW${fresh ? '' : ' (pre-existing in history — WARN, not a block; rotate then scrub history)'}`,
+      file: g.file || '(history)', line: g.line || 0, commit, cwe: 'CWE-798',
+      msg: `🔴 VERIFIED-LIVE ${obj.DetectorName || 'secret'}${merge ? ownChanges(merge) : shortSha(g.commit) ? ` in commit ${shortSha(g.commit)}` : ''} — ROTATE NOW${fresh ? '' : ' (pre-existing in history — WARN, not a block; rotate then scrub history)'}`,
     });
   }
   return out;
 }
+
+// ---------- what a merge commit adds (v1.20.0) ----------
+// Both secret legs read commits as `git log -p` prints them, gitleaks over `BASE..HEAD` and trufflehog
+// on each walk, and `git log -p` prints no patch for a merge. So what only a merge commit adds, a
+// conflict resolution or an edit made while merging, was read by neither: measured on gitleaks 8.30.1
+// and trufflehog 3.95.6, beside a control commit both reported. Of the 76 merges the 11 callers made
+// after adopting the gate, 17 added lines found in neither parent (673 lines, on 5 callers).
+// Each in-range merge is merged again from its parents, in the checkout's clone, by `git merge-tree
+// --write-tree`: git's own merge, conflict markers and all (an octopus one head at a time onto the
+// merge of those before it, as git's octopus strategy merges). A merge whose tree differs from that
+// re-merge is handed to both legs as ONE ordinary commit, whose parent holds the re-merge and whose
+// tree is the merge's. Its patch is what `git show --remerge-diff` prints for the merge, and never
+// either parent's commits: a finding in it is the merge's own, new in the range, and blocks.
+//   - Why not `--remerge-diff` itself: gitleaks' parser stops at the `remerge CONFLICT` header lines
+//     and names each conflicted file `b/<path>`, which path allowlists and .gitleaksignore entries
+//     match on, and an octopus merge gets no patch at all. trufflehog takes no log options.
+//   - Why in the clone: trufflehog walks it, and sees only the objects it holds (OWN_OBJECTS); git
+//     writes into it whatever it lacks. gitleaks' git reads the clone as an alternate.
+//   - GitHub's test merge is never merged again: it is GitHub's own, and where its result differed
+//     from git's, the parents' lines would be handed over as the merge's.
+const PASS_ID = {
+  GIT_AUTHOR_NAME: 'security-baseline', GIT_AUTHOR_EMAIL: 'security-baseline@invalid', GIT_AUTHOR_DATE: '@0 +0000',
+  GIT_COMMITTER_NAME: 'security-baseline', GIT_COMMITTER_EMAIL: 'security-baseline@invalid', GIT_COMMITTER_DATE: '@0 +0000',
+};
+let mergesRead = null;
+function mergePass() {
+  if (mergesRead) return mergesRead;
+  const done = (o) => (mergesRead = { pairs: [], ...o });
+  const h = rangeHead();
+  if (h.reason) return done({ reason: h.reason });
+  const r = run('git', ['rev-list', '--merges', '--parents', `${BASE}..${h.head}`], { timeout: 60000 });
+  if (r.status !== 0 || r.error || r.signal) return done({ reason: `git rev-list --merges ${safe(BASE, 60)}..${h.head.slice(0, 7)} failed, exit ${r.status}${errorLine(r.stderr) ? `: ${scrub(errorLine(r.stderr))}` : ''}` });
+  // `git rev-list BASE..head` lists commits the base holds past a clock skew (see baseHolds): a merge
+  // the base already holds is pre-existing, and what it added is never read as new.
+  const merges = r.stdout.split('\n').filter(Boolean).map((l) => l.trim().split(/\s+/)).filter(([m]) => m !== h.testMerge && baseHolds(m) !== true);
+  if (!merges.length) return done({});
+  const lost = (why) => done({ reason: `what ${merges.length === 1 ? "the range's merge adds" : `the range's ${merges.length} merges add`} could not be read: ${why}` });
+  const c = checkoutClone();
+  if (c.reason) return lost(c.reason);
+  const git = (args, opts = {}) => run('git', args, { cwd: c.clone, env: { ...OWN_OBJECTS, ...PASS_ID }, timeout: 300000, ...opts });
+  const failure = (res, what) => `${what} failed, exit ${res.status}${errorLine(res.stderr) ? `: ${scrub(errorLine(res.stderr))}` : ''}`;
+  const commitTree = (tree, parents, msg) => {
+    const res = git(['commit-tree', '--no-gpg-sign', tree, ...parents.flatMap((p) => ['-p', p]), '-m', msg]);
+    const sha = res.stdout.trim();
+    return res.status === 0 && !res.signal && isSha(sha) ? { sha } : { reason: failure(res, 'git commit-tree') };
+  };
+  const pairs = [];
+  for (const [merge, ...parents] of merges) {
+    let at = parents[0], tree = '';
+    for (let i = 1; i < parents.length; i++) {
+      // Exit 1 is a merge with conflicts, its markers in the tree; above that, git could not merge.
+      const m = git(['merge-tree', '--write-tree', '--no-messages', '--allow-unrelated-histories', at, parents[i]]);
+      tree = (m.stdout.split('\n')[0] || '').trim();
+      if (m.status > 1 || m.error || m.signal || !isSha(tree)) return lost(failure(m, `git merge-tree for merge ${merge.slice(0, 7)}`));
+      if (i < parents.length - 1) {
+        const step = commitTree(tree, [at, parents[i]], `security-baseline: octopus step of ${merge}`);
+        if (step.reason) return lost(step.reason);
+        at = step.sha;
+      }
+    }
+    const mine = git(['rev-parse', '--verify', '--quiet', `${merge}^{tree}`]);
+    if (!isSha(mine.stdout.trim())) return lost(failure(mine, `git rev-parse ${merge.slice(0, 7)}^{tree}`));
+    if (mine.stdout.trim() === tree) continue;   // nothing git's own merge lacks
+    const since = commitTree(tree, [], `security-baseline: git's own merge of ${merge}'s parents`);
+    if (since.reason) return lost(since.reason);
+    const tip = commitTree(mine.stdout.trim(), [since.sha], `security-baseline: what ${merge} adds`);
+    if (tip.reason) return lost(tip.reason);
+    pairs.push({ merge, tip: tip.sha, since: since.sha });
+  }
+  // trufflehog exits 0 having read nothing when its `git log` dies on an object it lacks (3.95.6,
+  // --fail-on-scan-errors or not): the log it runs is run here first on every pass commit, its
+  // output discarded (any size).
+  if (pairs.length) {
+    const log = git(['log', '-p', '-U0', '--format=%H', ...pairs.flatMap((p) => [p.tip, `^${p.since}`])], { stdio: ['ignore', 'ignore', 'pipe'] });
+    if (log.status !== 0 || log.error || log.signal) return lost(failure(log, "git log of the pass's commits"));
+  }
+  const n = merges.length, k = pairs.length;
+  const held = `merges: the range holds ${n} merge${n === 1 ? '' : 's'}`;
+  infra.push(k === 0 ? `${held}, and ${n === 1 ? 'it adds nothing' : 'none adds anything'} to git's own merge of ${n === 1 ? 'its' : 'their'} parents`
+    : `${held}; ${n === 1 ? 'it adds' : k === 1 ? '1 adds' : `${k} add`} lines of ${k === 1 ? 'its' : 'their'} own, a conflict resolution or an edit made while merging, read as one commit ${k === 1 ? '' : 'each '}from git's own merge of the parents to the merge`);
+  return done({ pairs, objects: path.join(c.clone, '.git', 'objects') });
+}
+// gitleaks pins a finding to the commit it read the line in: for a merge's own lines, the pass's
+// commit, never the merge. So an entry of the checkout's .gitleaksignore pinned to one of the range's
+// merges (`<merge>:<file>:<rule-id>:<line>`, the fleet's only form) is pinned again to that commit,
+// read as gitleaks 8.30.1 reads the file: each line trimmed, `#` a comment, four fields a commit's.
+function pinnedToMerges(pairs) {
+  let text = '';
+  try { text = fs.readFileSync('.gitleaksignore', 'utf8'); } catch { return []; }
+  const tipOf = new Map(pairs.map((p) => [p.merge, p.tip]));
+  const out = [];
+  for (const raw of text.split('\n')) {
+    const l = raw.trim();
+    if (!l || l.startsWith('#')) continue;
+    const s = l.split(':');
+    if (s.length === 4 && tipOf.has(s[0])) out.push([tipOf.get(s[0]), ...s.slice(1)].join(':'));
+  }
+  return out;
+}
+const ownChanges = (merge) => ` in merge ${shortSha(merge)}'s own changes`;
 
 // ---------- osv-scanner (dependency / SCA) ----------
 // osv-scanner v2 emits results[].packages[].groups[] with a computed numeric `max_severity`

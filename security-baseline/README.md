@@ -27,7 +27,8 @@ so **adding a new check or moving `@v1` can never newly-block a caller** — pro
 8 repos (CRITICAL = 0 on every one).
 
 > **`secret-verified` is the only ADDED blocking signal, and it is safe by construction.** It is
-> scoped to the new commits (§What the verified probe walks), so it fires only on a **newly-committed** live
+> scoped to the new commits (§What the verified probe walks), and to what the range's merges add
+> themselves (§What a merge adds), so it fires only on a **newly-committed** live
 > credential — never on pre-existing state — and a verified hit is a true positive (the
 > credential's own provider authenticated it). It does **not** replace the gitleaks pattern floor
 > (which still blocks unverifiable shapes like a private key or a dead-host DB string).
@@ -137,8 +138,8 @@ it looked and found nothing, or it **could not look**:
 |---|---|
 | any | not installed; killed or timed out; output over the 64 MB cap; its collector crashed. A run of 10 s or more says how long it took: a registry stall leaves no other trace. |
 | semgrep | exit 2 or higher, or 1 with no results (without `--error`, which this gate never passes, 1 is not "findings"); no JSON report; an `errors[]` entry at `level: "error"`: a rule or config that did not load, or semgrep's engine failing on a file (an AST builder or fatal error, which semgrep itself exits 2 for). A per-file `warn` (a file it could not fully parse or finish) is listed under scanner notes and is not a fault. |
-| gitleaks | exit other than 0 (it runs with `--exit-code 0`); exit 0 with no report written; a report that is not a JSON array; no git history to read, checked before it runs, because outside a repository gitleaks exits 0 with `[]`; on the diff, a finding whose commit's ancestry git cannot tell (the key blocks as new; v1.19.8) |
-| trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short; on the diff, no commit to stop a walk at (`git merge-base` of the base and a walk's tip failed, timed out or was killed; for a second tip, only a clean "they share no commit" walks it to its root instead), a range git cannot list (`git rev-list`), or a checkout it cannot clone, each checked before trufflehog runs; a finding whose commit's ancestry git cannot tell (the key blocks as new). With several walks the reason names the first that failed and its tip (v1.19.7) |
+| gitleaks | exit other than 0 (it runs with `--exit-code 0`); exit 0 with no report written; a report that is not a JSON array; no git history to read, checked before it runs, because outside a repository gitleaks exits 0 with `[]`; on the diff, a finding whose commit's ancestry git cannot tell (the key blocks as new; v1.19.8); on the diff, what the range's merges add that it could not read (§What a merge adds, v1.20.0) |
+| trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short; on the diff, no commit to stop a walk at (`git merge-base` of the base and a walk's tip failed, timed out or was killed; for a second tip, only a clean "they share no commit" walks it to its root instead), a range git cannot list (`git rev-list`), or a checkout it cannot clone, each checked before trufflehog runs; a finding whose commit's ancestry git cannot tell (the key blocks as new). With several walks the reason names the first that failed and its tip (v1.19.7), or the merge whose own changes it walked; and what the range's merges add that could not be read (§What a merge adds, v1.20.0) |
 | osv-scanner | exit other than 0, 1 or 128; exit 1 with no results; 128 with `Error during extraction` on stderr (a lockfile it could not parse), or with a tracked npm/composer lockfile and no `Scanned … found N packages` line (one it did not read, such as a `bun.lockb`). Otherwise 128 is nothing to audit: no lockfile, or every lockfile read and empty (v1.19.5; measured on v2.4.0) |
 | hadolint | no JSON array; exit other than 0 or 1 (1 = a rule fired) |
 | git | the diff that lists the changed files failed: a `base-ref` or PR base that does not resolve, which gitleaks would read as an empty range and exit 0 on; `git ls-files` failed |
@@ -236,9 +237,76 @@ since v1.19.8 its findings are judged by the same ancestry test (§Honest limits
   dated before the fork put the fork in the list). A live key in a commit the base holds is
   `secrets-history` (WARN), never `secret-verified`; v1.19.6 would have blocked on it. One whose
   ancestry git cannot tell blocks as new, and the leg could not look.
-- **Not read by either scanner:** what only a merge commit adds. `git log -p` shows no patch for a
-  merge, so a key typed into a conflict resolution passes both gitleaks' range and every walk
-  (measured on gitleaks 8.30.1 and trufflehog 3.95.6, beside a control commit both reported).
+- **What only a merge commit adds** is one more walk, of a commit built for it (§What a merge adds,
+  v1.20.0). `git log -p` shows no patch for a merge, so until then a key typed into a conflict
+  resolution passed both gitleaks' range and every walk.
+
+## What a merge adds (v1.20.0)
+
+Both secret legs read commits as `git log -p` prints them: gitleaks over `<base>..HEAD`, trufflehog
+on each walk. `git log -p` prints no patch for a merge, so until v1.20.0 what only a merge commit
+adds passed both: a key typed into a conflict resolution, or added while merging. Measured on
+gitleaks 8.30.1 and trufflehog 3.95.6, beside a control commit both reported.
+
+**How often it matters (measured 2026-09-26).** The 11 callers' branches and pull-request heads hold
+113 merge commits; 76 of them were made after the caller adopted the gate. `git show --remerge-diff`
+prints what a merge changed against git's own merge of its parents. It is non-empty for 30 of the
+76, 25 of them add lines, and 17 add lines that neither parent's copy of the file holds: 673 lines
+on 5 callers (epn.one 6 merges, luxairportlu 5, luxairport-frontend 4, epn-astro 1, lampakia-astro
+1). They are PHP, workflow, test and API-doc lines, not only lockfiles. Read by both real scanners,
+the own changes of all 40 merges in the fleet's history that have any hold no finding (the
+unverified trufflehog results included). So the gap had carried nothing, but it was open on one
+merge in four.
+
+**The pass.** Each merge of the range (the verified probe's range, `<base>..<head>`, less any merge the
+base holds, asked by ancestry as above) is merged again from its parents, in the checkout's clone, by `git merge-tree --write-tree`: git's own merge,
+conflict markers and all. An octopus merge is merged one head at a time onto the merge of those
+before it, as git's octopus strategy merges. A merge whose tree differs from that is handed to both
+legs as one ordinary commit, whose parent holds git's merge and whose tree is the merge's. Its patch
+is what `git show --remerge-diff` prints for the merge: a line git's merge already holds, where it
+holds it, is context, and neither parent's commits are read again. A key there is named as the merge's
+(`… in merge <sha>'s own changes`), is new in the range, and blocks: `secret-pattern` from gitleaks,
+`secret-verified` from trufflehog. gitleaks reads the pass's commits in a run of its own
+(`--log-opts "<commit> ^<parent> …"`), with the clone as an alternate object directory, and
+trufflehog walks each one (`--branch <commit> --since-commit <parent>`). The commits have a fixed
+author, committer and date, so the same merge gives the same commit on every run. A range whose
+merges add nothing runs exactly as it did before. The scanner notes say which:
+`merges: the range holds 2 merges; 1 adds lines of its own, …` or `…, and none adds anything to
+git's own merge of their parents`.
+
+- **Why not `git log --remerge-diff`.** gitleaks takes it in `--log-opts` and finds the keys, but its
+  diff parser stops at the `remerge CONFLICT` header line. It then names every conflicted file
+  `b/<path>` (measured on 8.30.1), and path allowlists and `.gitleaksignore` entries match on that
+  name. An octopus merge gets no patch at all (`Skipping remerge-diff for octopus merges`), and
+  trufflehog takes no log options.
+- **Why in the clone.** trufflehog resolves a commit in the repository it is given and reads no
+  alternate object directory. With the pass kept in one, 3.95.6 fails with `unable to resolve
+  commit: object not found`. When its `git log` dies on an object the repository lacks, it exits 0
+  having read nothing, `--fail-on-scan-errors` or not. git writes into the clone whatever it lacks,
+  so the pass is built there, with no inherited `GIT_ALTERNATE_OBJECT_DIRECTORIES` or
+  `GIT_OBJECT_DIRECTORY` for the clone or the pass: through one, git would skip an object it could
+  already see there.
+- **Could not look, never a PASS.** gitleaks 8.30.1 also exits 0 with `[]` when its `git log` dies
+  (`0 commits scanned`). So the pass's `git log -p` is run first where each scanner will run it: in
+  the clone, and in the checkout with the clone as an alternate. A pass commit either one could not
+  read is could-not-look on that leg, as is a merge git cannot merge again or a commit it cannot
+  write, naming the merge and the git call. The range's own gitleaks run is left as it was.
+- **GitHub's test merge is never merged again.** It is GitHub's own commit, not the author's, and
+  where its result differed from git's, the parents' lines would be read as its own. On a
+  pull_request run the range ends at the PR head, which leaves it out. When the walk starts from
+  HEAD instead (a PR head the checkout lacks), it is skipped by name.
+- **`.gitleaksignore`.** gitleaks pins a finding to the commit it read the line in, here the pass's.
+  An entry pinned to one of the range's merges (`<merge>:<file>:<rule>:<line>`, the form the fleet
+  uses) is handed to gitleaks pinned to the pass's commit as well, beside the checkout's own file. A
+  global entry (`<file>:<rule>:<line>`) matches as before, since the file and line are the merge's.
+- **Cost.** A range that holds a merge clones the checkout, under `verified-secrets: off` too, and
+  runs one `git merge-tree` per merge (one per head of an octopus). Merges that add lines cost one
+  more gitleaks run for all of them, and a trufflehog walk each. It needs git 2.38 or later
+  (`merge-tree --write-tree`; GitHub's ubuntu-24.04 runners have 2.55). An older git is
+  could-not-look on a range that holds a merge.
+- **Not read:** what a merge outside the diff range added. `scan-scope: full` and the full-history
+  legs (`secrets-history`) still read `git log -p` alone, so a key in an old merge's own changes is
+  not in the history baseline. On 2026-09-26 no caller's history held one (above).
 
 ## Sovereignty — honest egress enumeration
 
@@ -506,6 +574,25 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   asks nothing and grades as before. The end-to-end fixture's gitleaks finding now names HEAD, since
   git cannot place a minted commit. 13 new assertions; 13 targeted mutants each turn it red, and
   every new assertion goes red under at least one.
+  Its (U) leg (v1.20.0) covers what a merge commit adds, on the clock-skew leg's gitleaks stub, which
+  also honours `--gitleaks-ignore-path` and the source's `.gitleaksignore` and exits 0 with `[]` when
+  its `git log` dies. The fixture is a
+  push of a merge whose conflict resolution keeps a key its base held and adds one, and which adds a
+  file; the control is the range's own gitleaks run, which reads neither of the merge's keys. It asserts
+  the range's run as before plus one run of the pass commit, checked against a reference computation
+  of it; BLOCKED on the merge's two keys and the topic's, each named where it was added, never the
+  base's, with no leg that could not look; trufflehog's walk of the same commit graded
+  `secret-verified`; the note; nothing written to the checkout; and the same under
+  `verified-secrets: off`. Then an ignore entry pinned to the merge and its control pinned to another
+  commit; a merge that adds nothing (the runs exactly as without the pass); an octopus (its last head's key read
+  once, in its own commit); a PR that merged its base in, walked from its head and, with a test merge
+  that is not git's own, from HEAD; an inherited alternate object directory, with trufflehog reading
+  only the clone; a merge the base holds, listed past a clock skew (seven base commits dated before
+  the fork), never read; and could-not-look for a merge git cannot merge again, a commit it cannot
+  write, a log that dies in the clone and in the checkout, a failed gitleaks run of the pass, and the
+  pass's walk. 25 assertions; each of 36 targeted mutants of `scan.mjs` turns it red. A 37th, the
+  trufflehog dedup key taken from the pass commit instead of its merge, proved equivalent (no walk
+  reports a merge commit, which `git log -p` prints no patch for), and that line keeps the code it had.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
 - `bash scripts/selftest-pr-shape.sh` — the shapes this repo's own pushes never produce, scanned
@@ -526,6 +613,13 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   the range on every `gitleaks-version` bump. v1.19.7's `scan.mjs` fails it, and so do the mutants
   that drop the note, ask ancestry of HEAD or read every finding as held; a fixture without the
   skew fails its controls.
+  Since v1.20.0 it also scans what merges add, with both real scanners: a push of a merge whose
+  conflict resolution keeps main's key and adds one, and which adds a file; a PR that merged its base in with a key in the resolution; an octopus that adds a file; and a merge the
+  base holds, listed past a clock skew. Each fails unless gitleaks reports exactly the keys the
+  range added, each merge's named as its own, and trufflehog walks them, neither reading a key the
+  base held. v1.19.8's `scan.mjs` fails 12 of their checks. Each of 9 targeted mutants run on them
+  fails at least one, among them a pass run without its parent excluded (it reads git's own merge as
+  a root commit) and a pass over a merge the base holds.
 
 All three run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a report-mode self-scan,
 after which the same job runs `scan.mjs` over this repo with the real scanners the action just

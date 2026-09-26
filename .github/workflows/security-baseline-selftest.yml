@@ -7,8 +7,9 @@ name: security-baseline self-test
 # real scanners that fails when any leg could not look (a FAULT a green smoke would hide), and the
 # shapes this repo's own pushes never produce scanned with the real trufflehog and gitleaks: a
 # pull_request checkout, a PR that merged its base in, a push of a merge (every walk must reach every
-# commit of the range and none of the base's), and gitleaks' range past a clock skew (a key the base
-# already holds must warn, never block).
+# commit of the range and none of the base's), gitleaks' range past a clock skew (a key the base
+# already holds must warn, never block), and merges that add lines of their own (each key a merge
+# adds must be read, and none its base held).
 
 on:
   push:
@@ -80,8 +81,8 @@ jobs:
       # branch. A pull_request run is detached on GitHub's test merge with a ref name for a base, which
       # faulted every PR run from v1.19.0 to v1.19.5 (v1.19.6); a range that holds a merge left one
       # walk short of its older commits until v1.19.7; past a clock skew gitleaks' range blocked on a
-      # key the base already held until v1.19.8. The script builds those shapes; its header says what
-      # each pins.
-      - name: PR, merge and clock-skew shapes — every commit of the range read, none of the base's blocking (real scanners)
+      # key the base already held until v1.19.8; what only a merge adds was read by neither scanner
+      # until v1.20.0. The script builds those shapes; its header says what each pins.
+      - name: PR, merge and clock-skew shapes — every commit of the range read, none of the base's blocking, and what each merge adds (real scanners)
         shell: bash
         run: bash security-baseline/scripts/selftest-pr-shape.sh

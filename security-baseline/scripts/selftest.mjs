@@ -1462,6 +1462,238 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
       && tve.stdout.includes(newKey('pr.conf', va.k.pr, va.pr)) && !tve.stdout.includes('could not look')
       && tve.glArgvs.length === 1 && logOptsOf(tve.glArgvs[0]) === '', JSON.stringify({ argvs: tve.glArgvs, verdict: verdict(tve) }));
 
+    // ---- (U) what a merge commit adds (v1.20.0) ----
+    // `git log -p` prints no patch for a merge, and both legs read commits through it, so a key only a
+    // merge adds (a conflict resolution, an edit made while merging) was read by neither. It reuses (V)'s
+    // gitleaks stub, 8.30.1 as measured: it reads `git log -p -U0` per --log-opts, honours the ignore
+    // files, and exits 0 with `[]` when its `git log` dies.
+    const repoAt = (name) => { const dir = path.join(tmp, name); fs.mkdirSync(dir); gitAt(dir)('init', '-q', '-b', 'main'); return dir; };
+    const commitFiles = (dir, iso, files, msg) => {
+      for (const [f, text] of Object.entries(files)) { fs.writeFileSync(path.join(dir, f), text); gitAt(dir)('add', f); }
+      gitAt(dir, iso)('commit', '-q', '-m', msg);
+      return shaIn(dir, 'HEAD');
+    };
+    // One scan through both as-measured stubs: gitleaks' argv per run (and its --log-opts), trufflehog's walks.
+    const mergeScan = (cwd, env, extra = {}, bin = thAsMeasured) => {
+      fs.rmSync(glArgv, { force: true });
+      const res = walkScan(cwd, env, { GITLEAKS_BIN: glAsMeasured, GL_ARGV: glArgv, TH_EMIT: '1', ENABLE_SECRETS_HISTORY: 'false', ...extra }, bin);
+      const glArgvs = fs.existsSync(glArgv) ? fs.readFileSync(glArgv, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+      return { ...res, glArgvs, logOpts: glArgvs.map((a) => (a.includes('--log-opts') ? a[a.indexOf('--log-opts') + 1] : '')) };
+    };
+    // The pass commit as specified, computed here in a clone of the fixture (the checkout stays as it
+    // was): the merge's tree over git's own merge of its parents (an octopus one head at a time), both
+    // by a fixed author and committer at a fixed date, so the same merge gives the same commit each run.
+    const passId = {
+      GIT_AUTHOR_NAME: 'security-baseline', GIT_AUTHOR_EMAIL: 'security-baseline@invalid', GIT_AUTHOR_DATE: '@0 +0000',
+      GIT_COMMITTER_NAME: 'security-baseline', GIT_COMMITTER_EMAIL: 'security-baseline@invalid', GIT_COMMITTER_DATE: '@0 +0000',
+    };
+    const passOf = (dir, merge) => {
+      const ref = fs.mkdtempSync(path.join(tmp, 'pass-reference-'));
+      spawnSync('git', ['clone', '-q', '--no-checkout', `file://${dir}`, path.join(ref, 'c')], { env: base });
+      const g = (...a) => (spawnSync('git', a, { cwd: path.join(ref, 'c'), env: { ...base, ...passId }, encoding: 'utf8' }).stdout || '').trim();
+      const [, ...ps] = g('rev-list', '--parents', '-n1', merge).split(' ');
+      let at = ps[0], tree = '';
+      for (let i = 1; i < ps.length; i++) {
+        tree = g('merge-tree', '--write-tree', '--no-messages', '--allow-unrelated-histories', at, ps[i]).split('\n')[0];
+        if (i < ps.length - 1) at = g('commit-tree', '--no-gpg-sign', tree, '-p', at, '-p', ps[i], '-m', `security-baseline: octopus step of ${merge}`);
+      }
+      const since = g('commit-tree', '--no-gpg-sign', tree, '-m', `security-baseline: git's own merge of ${merge}'s parents`);
+      const tip = g('commit-tree', '--no-gpg-sign', `${merge}^{tree}`, '-p', since, '-m', `security-baseline: what ${merge} adds`);
+      fs.rmSync(ref, { recursive: true, force: true });
+      return `${tip} ^${since}`;
+    };
+    const glLine = (file, line, k, where) => `- ❌ ${file}:${line} — generic-api-key ${redact(k)} ${where} _(CWE-798)_`;
+    const thLine = (file, where) => `- ❌ ${file}:1 — 🔴 VERIFIED-LIVE Github ${where} — ROTATE NOW _(CWE-798)_`;
+    const byMerge = (sha) => `in merge ${sha.slice(0, 7)}'s own changes`;
+
+    // (U-a) A push of a merge onto main. The merge resolves a conflict keeping main's key, which
+    // predates the range, adds a key of its own to the resolution, and adds a file neither side had;
+    // topic's commit adds a key too (the control both scanners always read).
+    const ma = repoAt('merge-adds-push');
+    const kCtl = keyFor('mCtl'), kPre = keyFor('mPre'), kRes = keyFor('mRes'), kEvil = keyFor('mEvil');
+    commitFiles(ma, '2026-09-06T10:00:00Z', { 'conf.txt': 'a\nshared=base\nz\n' }, 'fork');
+    gitAt(ma)('checkout', '-q', '-b', 'topic');
+    const maCtl = commitFiles(ma, '2026-09-06T11:00:00Z', { 'control.live': `control=${kCtl}\n`, 'conf.txt': 'a\nshared=topic\nz\n' }, 'topic: a key, and its side of conf.txt');
+    gitAt(ma)('checkout', '-q', 'main');
+    const maBefore = commitFiles(ma, '2026-09-06T12:00:00Z', { 'conf.txt': `a\nshared=${kPre}\nz\n` }, 'main: a key that predates the range');
+    gitAt(ma, '2026-09-06T13:00:00Z')('merge', '-q', '--no-ff', '--no-commit', 'topic');
+    const maMerge = commitFiles(ma, '2026-09-06T13:00:00Z', { 'conf.txt': `a\nshared=${kPre}\nresolved=${kRes}\nz\n`, 'evil.live': `evil=${kEvil}\n` }, 'merge topic: keep main, add a key, and a file neither side had');
+    const maRemerge = gitAt(ma)('show', '--remerge-diff', '--format=', '-U0', maMerge).stdout || '';
+    check("(U-a) the fixture: a merge whose own changes add two keys, a conflict resolution's and a new file's, and keep main's, which predates the range",
+      shaIn(ma, `${maMerge}^1`) === maBefore && shaIn(ma, `${maMerge}^2`) === maCtl
+      && maRemerge.includes(`+resolved=${kRes}`) && maRemerge.includes(`+evil=${kEvil}`) && !maRemerge.includes(`+shared=${kPre}`), maRemerge);
+    const maV1197 = glOnce(ma, `${maBefore}..HEAD`);
+    check("(U-a) control: v1.19.7's gitleaks range, <base>..HEAD, reads topic's key and neither of the merge's",
+      maV1197.length === 1 && maV1197[0].Commit === maCtl && maV1197[0].File === 'control.live', JSON.stringify(maV1197.map((f) => [f.File, f.StartLine, f.Commit])));
+    const uma = mergeScan(ma, pushEnv(maBefore));
+    const [maTip, maSince] = (uma.logOpts[1] || '').split(' ').map((s) => s.replace(/^\^/, ''));
+    check("(U-a) gitleaks reads the range as before, then, in a run of its own, the pass commit with its parent excluded: the merge's tree over git's own merge of its parents",
+      uma.logOpts.length === 2 && uma.logOpts[0] === `${maBefore}..HEAD` && uma.logOpts[1] === passOf(ma, maMerge)
+      && ![maMerge, maBefore, maCtl].includes(maTip), JSON.stringify({ logOpts: uma.logOpts, want: passOf(ma, maMerge) }));
+    check("(U-a) BLOCKED on the merge's two keys and topic's, each named where it was added; main's, which predates the range, never reaches the report",
+      uma.status === 1 && uma.stdout.includes('\nBLOCKED — 5 critical finding(s). ') && uma.stdout.includes('### ❌ `secret-pattern` · T0 · 3 finding(s)')
+      && uma.stdout.includes(glLine('conf.txt', 3, kRes, byMerge(maMerge))) && uma.stdout.includes(glLine('evil.live', 1, kEvil, byMerge(maMerge)))
+      && uma.stdout.includes(glLine('control.live', 1, kCtl, `in commit ${maCtl.slice(0, 7)}`)) && !uma.stdout.includes(redact(kPre))
+      && !uma.stdout.includes('could not look'), verdict(uma));
+    check("(U-a) trufflehog walks that same commit from that same parent, and what it finds there is the merge's: secret-verified, never demoted to history",
+      uma.argvs.length === 3 && new RegExp(` --branch ${maTip} --since-commit ${maSince}$`).test(uma.argvs[2])
+      && uma.stdout.includes('### ❌ `secret-verified` · T0 · 2 finding(s)') && uma.stdout.includes(thLine('evil.live', byMerge(maMerge)))
+      && !uma.stdout.includes('`secrets-history`'), JSON.stringify({ argvs: uma.argvs, verdict: verdict(uma) }));
+    check('(U-a) the report says the merge adds lines of its own, and how they were read',
+      uma.stdout.includes("\n- merges: the range holds 1 merge; it adds lines of its own, a conflict resolution or an edit made while merging, read as one commit from git's own merge of the parents to the merge\n"), verdict(uma));
+    check("(U-a) the pass writes nothing to the checkout: its commit is in no object store of it", gitAt(ma)('cat-file', '-e', `${maTip}^{commit}`).status !== 0, maTip);
+    check('(U-a) NO planted value reaches the job log or stderr', uma.stdout.length > 0 && !leaked(uma.stdout) && !leaked(uma.stderr));
+    const umaOff = mergeScan(ma, pushEnv(maBefore), { VERIFIED_SECRETS: 'off' });
+    check('(U-a) verified-secrets: off: gitleaks reads what the merge adds all the same, from the same commit (fixed author, committer and dates)',
+      umaOff.status === 1 && umaOff.argvs.length === 0 && umaOff.logOpts[1] === uma.logOpts[1]
+      && umaOff.stdout.includes(glLine('conf.txt', 3, kRes, byMerge(maMerge))) && umaOff.stdout.includes(glLine('evil.live', 1, kEvil, byMerge(maMerge))), verdict(umaOff));
+
+    // (U-b) The fleet's only ignore form pins a line to the commit that added it: for a merge's own
+    // line, the merge. gitleaks reads that line in the pass's commit, so the entry is handed over again.
+    fs.writeFileSync(path.join(ma, '.gitleaksignore'), `# the resolution's line, pinned to the merge\n  ${maMerge}:conf.txt:generic-api-key:3  \n`);
+    const umb = mergeScan(ma, pushEnv(maBefore), { VERIFIED_SECRETS: 'off' });
+    fs.writeFileSync(path.join(ma, '.gitleaksignore'), `${maBefore}:conf.txt:generic-api-key:3\n`);
+    const umbCtl = mergeScan(ma, pushEnv(maBefore), { VERIFIED_SECRETS: 'off' });
+    fs.rmSync(path.join(ma, '.gitleaksignore'));
+    check('(U-b) a .gitleaksignore entry pinned to the merge silences exactly that line of what the merge adds',
+      umb.status === 1 && !umb.stdout.includes(redact(kRes)) && umb.stdout.includes(glLine('evil.live', 1, kEvil, byMerge(maMerge)))
+      && umb.stdout.includes(glLine('control.live', 1, kCtl, `in commit ${maCtl.slice(0, 7)}`)), verdict(umb));
+    check('(U-b) control: the same entry pinned to another commit silences nothing', umbCtl.stdout.includes(glLine('conf.txt', 3, kRes, byMerge(maMerge))), verdict(umbCtl));
+
+    // (U-c) A merge that adds nothing git's own merge lacks: v1.19.7's runs, and a note.
+    const mc = repoAt('merge-adds-nothing');
+    commitFiles(mc, '2026-09-07T10:00:00Z', { 'a.txt': 'a\n' }, 'fork');
+    gitAt(mc)('checkout', '-q', '-b', 'topic');
+    commitFiles(mc, '2026-09-07T11:00:00Z', { 'topic.txt': 'topic\n' }, 'topic');
+    gitAt(mc)('checkout', '-q', 'main');
+    const mcBefore = commitFiles(mc, '2026-09-07T12:00:00Z', { 'b.txt': 'b\n' }, 'main');
+    gitAt(mc, '2026-09-07T13:00:00Z')('merge', '-q', '--no-ff', '--no-edit', 'topic');
+    const umc = mergeScan(mc, pushEnv(mcBefore));
+    check("(U-c) a merge that adds nothing: no pass commit, gitleaks' one run and trufflehog's walks as before — PASS",
+      umc.status === 0 && JSON.stringify(umc.logOpts) === JSON.stringify([`${mcBefore}..HEAD`]) && umc.argvs.length === 2 && !umc.stdout.includes('could not look')
+      && umc.stdout.includes("\n- merges: the range holds 1 merge, and it adds nothing to git's own merge of its parents\n"), JSON.stringify({ logOpts: umc.logOpts, argvs: umc.argvs, verdict: verdict(umc) }));
+
+    // (U-d) An octopus merge that adds a file no head had: merged again one head at a time.
+    const mo = repoAt('merge-adds-octopus');
+    const kOct = keyFor('mOct'), kO2 = keyFor('mO2');
+    commitFiles(mo, '2026-09-08T10:00:00Z', { 'a.txt': 'a\n' }, 'fork');
+    const moHeads = {};
+    for (const b of ['o1', 'o2']) { gitAt(mo)('checkout', '-q', '-b', b, 'main'); moHeads[b] = commitFiles(mo, '2026-09-08T11:00:00Z', { [`${b}.txt`]: b === 'o2' ? `o2=${kO2}\n` : `${b}\n` }, b); }
+    gitAt(mo)('checkout', '-q', 'main');
+    const moBefore = commitFiles(mo, '2026-09-08T12:00:00Z', { 'b.txt': 'b\n' }, 'main');
+    gitAt(mo, '2026-09-08T13:00:00Z')('merge', '-q', '--no-commit', 'o1', 'o2');
+    const moMerge = commitFiles(mo, '2026-09-08T13:00:00Z', { 'octo.live': `octo=${kOct}\n` }, 'octopus, and a file no head had');
+    const tmo = mergeScan(mo, pushEnv(moBefore));
+    check('(U-d) an octopus merge: what it adds is read by both legs, and named as its own',
+      (gitAt(mo)('rev-list', '--parents', '-n1', moMerge).stdout || '').trim().split(' ').length === 4
+      && tmo.stdout.includes(glLine('octo.live', 1, kOct, byMerge(moMerge))) && tmo.stdout.includes(thLine('octo.live', byMerge(moMerge)))
+      && !tmo.stdout.includes('could not look'), verdict(tmo));
+    check("(U-d) its last head's key is read once, in that head's commit, never again as the octopus's own",
+      tmo.logOpts[1] === passOf(mo, moMerge) && tmo.stdout.split('\n').filter((l) => l.includes(redact(kO2))).length === 1
+      && tmo.stdout.includes(glLine('o2.txt', 1, kO2, `in commit ${moHeads.o2.slice(0, 7)}`)), JSON.stringify({ logOpts: tmo.logOpts, verdict: verdict(tmo) }));
+
+    // (U-e) A PR that merged its base in, resolving a conflict with a key of its own. GitHub's test
+    // merge here is not git's own merge (it carries a file neither side had), as one GitHub computed
+    // differently would be: it is never merged again, since its lines would be read as the merge's.
+    const mu = repoAt('merge-adds-pr-up');
+    const kPrRes = keyFor('mPrRes'), kGh = keyFor('mGh');
+    commitFiles(mu, '2026-09-09T10:00:00Z', { 'conf.txt': 'a\nshared=base\nz\n' }, 'fork');
+    gitAt(mu)('checkout', '-q', '-b', 'feature');
+    commitFiles(mu, '2026-09-09T11:00:00Z', { 'conf.txt': 'a\nshared=feature\nz\n' }, 'feature: its side');
+    gitAt(mu)('checkout', '-q', 'main');
+    commitFiles(mu, '2026-09-09T12:00:00Z', { 'conf.txt': 'a\nshared=main\nz\n' }, 'main: its side');
+    gitAt(mu)('checkout', '-q', 'feature');
+    gitAt(mu, '2026-09-09T13:00:00Z')('merge', '-q', '--no-commit', 'main');
+    const prMerge = commitFiles(mu, '2026-09-09T13:00:00Z', { 'conf.txt': `a\nshared=main\nresolved=${kPrRes}\nz\n` }, 'merge main into feature: resolve, and add a key');
+    const pe = path.join(tmp, 'merge-adds-pr');
+    fs.mkdirSync(pe);
+    gitAt(pe)('init', '-q');
+    gitAt(pe)('fetch', '-q', '--no-tags', mu, '+refs/heads/*:refs/remotes/origin/*');
+    gitAt(pe)('checkout', '-q', '--detach', 'refs/remotes/origin/main');
+    gitAt(pe, '2026-09-09T14:00:00Z')('merge', '-q', '--no-ff', '--no-commit', 'refs/remotes/origin/feature');
+    const ghMerge = commitFiles(pe, '2026-09-09T14:00:00Z', { 'github.live': `github=${kGh}\n` }, 'Merge feature into main');
+    gitAt(pe)('update-ref', 'refs/remotes/pull/1/merge', 'HEAD');
+    gitAt(pe)('checkout', '-q', '--detach', 'refs/remotes/pull/1/merge');
+    const prMergeEnv = { BASE_REF: '', GITHUB_BASE_REF: 'main', GITHUB_EVENT_BEFORE: '' };
+    const ume = mergeScan(pe, { ...prMergeEnv, PR_HEAD_SHA: prMerge });
+    check("(U-e) a PR that merged its base in: what the PR's merge adds is read, and named as it; the range ends at the PR head, so GitHub's test merge is never read",
+      shaIn(pe, 'HEAD') === ghMerge && ume.stdout.includes(glLine('conf.txt', 3, kPrRes, byMerge(prMerge))) && !ume.stdout.includes('could not look')
+      && !ume.stdout.includes(redact(kGh)) && !ume.stdout.includes('github.live'), verdict(ume));
+    const umeGh = mergeScan(pe, { ...prMergeEnv, PR_HEAD_SHA: shaOf('a PR head this checkout never fetched') });
+    check("(U-e) walked from GitHub's test merge, the PR's merge is read still, and GitHub's own file never is",
+      umeGh.stdout.includes(glLine('conf.txt', 3, kPrRes, byMerge(prMerge))) && !umeGh.stdout.includes(redact(kGh)) && !umeGh.stdout.includes('github.live')
+      && !umeGh.stdout.includes('could not look'), verdict(umeGh));
+
+    // (U-f) What could not look. Each is a FAULT on the leg it blinds, never a PASS.
+    const umf = mergeScan(ma, pushEnv(maBefore), gitRefusing('merge-tree'));
+    check('(U-f) a merge git cannot merge again: FAULT on both secret legs, naming the merge and the git call',
+      umf.status === 1
+      && umf.stdout.includes(`- ❌ gitleaks secret scan — what the range's merge adds could not be read: git merge-tree for merge ${maMerge.slice(0, 7)} failed, exit 128: fatal: merge-tree refused by the selftest\n`)
+      && umf.stdout.includes(`- ❌ trufflehog verified-live secrets — what the range's merge adds could not be read: git merge-tree for merge ${maMerge.slice(0, 7)} failed, exit 128: fatal: merge-tree refused by the selftest\n`), verdict(umf));
+    const umf2 = mergeScan(ma, pushEnv(maBefore), gitRefusing('commit-tree'));
+    check("(U-f) a pass commit git cannot write: FAULT, naming the git call",
+      umf2.status === 1 && umf2.stdout.includes("- ❌ gitleaks secret scan — what the range's merge adds could not be read: git commit-tree failed, exit 128: fatal: commit-tree refused by the selftest\n"), verdict(umf2));
+    // trufflehog exits 0 having read nothing when its `git log` dies (3.95.6): the clone's log runs first.
+    const umf3 = mergeScan(ma, pushEnv(maBefore), gitRefusing('log'));
+    check("(U-f) a pass commit whose log git cannot print in the clone: FAULT on trufflehog's leg too, never a walk that read nothing",
+      umf3.status === 1 && umf3.stdout.includes("- ❌ trufflehog verified-live secrets — what the range's merge adds could not be read: git log of the pass's commits failed, exit 128: fatal: log refused by the selftest\n"), verdict(umf3));
+    // …and gitleaks exits 0 with `[]` when its `git log` dies (8.30.1): a checkout whose git cannot
+    // see the clone's objects must fault, not pass.
+    const noAlt = path.join(tmp, 'git-without-alternates');
+    fs.mkdirSync(noAlt);
+    fs.writeFileSync(path.join(noAlt, 'git'), `#!/bin/sh\nunset GIT_ALTERNATE_OBJECT_DIRECTORIES\nexec '${realGit}' "$@"\n`);
+    fs.chmodSync(path.join(noAlt, 'git'), 0o755);
+    const umf4 = mergeScan(ma, pushEnv(maBefore), { PATH: `${noAlt}:${process.env.PATH}`, VERIFIED_SECRETS: 'off' });
+    check("(U-f) a pass commit the checkout's git cannot read: FAULT, never the empty PASS gitleaks itself would give",
+      umf4.status === 1 && umf4.stdout.includes("- ❌ gitleaks secret scan — what the range's merges add could not be read by gitleaks: git log of the pass's commits failed, exit 128: fatal: bad object ")
+      && umf4.glArgvs.length === 1, verdict(umf4));
+    const glFailsOnPass = stub('gitleaks-fails-on-the-pass', `case "$*" in *" ^"*) echo 'fatal: pass run refused by the selftest' >&2; exit 1 ;; esac\nexec '${glAsMeasured}' "$@"`);
+    const umf6 = mergeScan(ma, pushEnv(maBefore), { GITLEAKS_BIN: glFailsOnPass, VERIFIED_SECRETS: 'off' });
+    check("(U-f) gitleaks failing on the pass's run alone: FAULT, naming that run, and the range's own run still reported",
+      umf6.status === 1 && umf6.stdout.includes("- ❌ gitleaks secret scan — gitleaks, on what the range's merges add, exit 1: fatal: pass run refused by the selftest\n")
+      && umf6.stdout.includes(glLine('control.live', 1, kCtl, `in commit ${maCtl.slice(0, 7)}`)), verdict(umf6));
+    const thFailsOnPass = stub('trufflehog-fails-on-the-pass', `case " $* " in *" --branch ${maTip} "*) exit 1 ;; esac\nexec '${thAsMeasured}' "$@"`);
+    const umf5 = mergeScan(ma, pushEnv(maBefore), {}, thFailsOnPass);
+    check("(U-f) the pass's walk that cannot look: FAULT, naming the merge whose changes it walks",
+      umf5.status === 1 && umf5.stdout.includes(`- ❌ trufflehog verified-live secrets — trufflehog walk 3 of 3, of what merge ${maMerge.slice(0, 7)} adds, exit 1 — its log is not quoted here, rerun trufflehog to read it\n`), verdict(umf5));
+
+    // (U-g) A scan that inherits an alternate object directory, one that already holds git's own merge
+    // of the parents (as any checkout that merged them itself would). trufflehog walks only what the
+    // clone holds, like 3.95.6, which reads no alternate: were git pointed at that directory for the
+    // clone or the pass, it would leave there what the clone lacks, and the walk would read nothing.
+    const alt = path.join(ma, '.git', 'objects');
+    gitAt(ma)('merge-tree', '--write-tree', '--no-messages', '--allow-unrelated-histories', maBefore, maCtl);
+    const thOwnObjects = stub('trufflehog-own-objects-only', `unset GIT_ALTERNATE_OBJECT_DIRECTORIES\nexec '${thAsMeasured}' "$@"`);
+    const umg = mergeScan(ma, pushEnv(maBefore), { GIT_ALTERNATE_OBJECT_DIRECTORIES: alt }, thOwnObjects);
+    check('(U-g) an inherited alternate object directory: the pass still walks what the merge adds, from the clone alone',
+      umg.status === 1 && umg.stdout.includes(thLine('evil.live', byMerge(maMerge))) && umg.stdout.includes(glLine('evil.live', 1, kEvil, byMerge(maMerge)))
+      && !umg.stdout.includes('could not look'), verdict(umg));
+
+    // (U-h) A merge the base already holds, which `git rev-list <base>..<head>` lists past a clock skew:
+    // the fork point is a merge that added a key of its own, and seven base commits after it are dated
+    // before it (measured on git 2.54: five are not enough). What it added is pre-existing, never read.
+    const mh = repoAt('merge-held-by-the-base');
+    const kFork = keyFor('mFork');
+    commitFiles(mh, '2026-09-10T10:00:00Z', { 'a.txt': 'a\n' }, 'root');
+    gitAt(mh)('checkout', '-q', '-b', 'side');
+    commitFiles(mh, '2026-09-10T10:30:00Z', { 's.txt': 's\n' }, 'side');
+    gitAt(mh)('checkout', '-q', 'main');
+    commitFiles(mh, '2026-09-10T10:40:00Z', { 'm.txt': 'm\n' }, 'main');
+    gitAt(mh, '2026-09-10T11:00:00Z')('merge', '-q', '--no-ff', '--no-commit', 'side');
+    const mhFork = commitFiles(mh, '2026-09-10T11:00:00Z', { 'own.txt': `forkkey=${kFork}\n` }, 'the fork: a merge that adds a key of its own');
+    gitAt(mh)('checkout', '-q', '-b', 'feature');
+    const mhHead = commitFiles(mh, '2026-09-10T12:00:00Z', { 'f.txt': 'f\n' }, 'feature');
+    gitAt(mh)('checkout', '-q', 'main');
+    for (let i = 1; i <= 7; i++) commitFiles(mh, `2026-09-10T09:0${i}:00Z`, { [`b${i}.txt`]: `${i}\n` }, `base ${i}, dated before the fork`);
+    const mhBase = shaIn(mh, 'HEAD');
+    gitAt(mh)('checkout', '-q', 'feature');
+    check('(U-h) control: past the skew, `git rev-list <base>..<head>` lists the fork, a merge the base holds',
+      (gitAt(mh)('rev-list', `${mhBase}..${mhHead}`).stdout || '').split('\n').includes(mhFork) && gitAt(mh)('merge-base', '--is-ancestor', mhFork, mhBase).status === 0);
+    const umh = mergeScan(mh, { BASE_REF: mhBase, GITHUB_BASE_REF: '', GITHUB_EVENT_BEFORE: '', PR_HEAD_SHA: '' });
+    check('(U-h) a merge the base holds is not merged again: what it added is pre-existing and never read — PASS, one gitleaks run',
+      umh.status === 0 && umh.stdout.includes('\nPASS — no critical findings.\n') && umh.logOpts.length === 1 && !umh.stdout.includes(redact(kFork))
+      && !umh.stdout.includes('own.txt') && !umh.stdout.includes('- merges:'), JSON.stringify({ logOpts: umh.logOpts, verdict: verdict(umh) }));
+
     // Each gitleaks run reports into a directory made for it, removed after — none may be left behind.
     check('every gitleaks report directory is removed afterwards', fs.readdirSync(tmp).filter((d) => d.startsWith('sb-gitleaks-')).length === 0,
       fs.readdirSync(tmp).join(','));

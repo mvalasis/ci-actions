@@ -56,6 +56,51 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.20.0** *(tag not yet cut; lands with the next `v1` move)* — `security-baseline`
+reads what only a merge commit adds. Both secret legs read commits as `git log -p` prints them, and
+`git log -p` prints no patch for a merge, so a key typed into a conflict resolution, or added while
+merging, passed gitleaks' range and every trufflehog walk; v1.19.7 documented the gap. **Measured**
+on 2026-09-26 over every branch and pull-request head of the 11 callers: of the 76 merges made since
+each one adopted the gate, `git show --remerge-diff` is non-empty for 30, and 17 add 673 lines found
+in neither parent's copy of the file (5 callers; PHP, workflow, test and API-doc lines). Read by
+both real scanners, the own changes of all 40 merges in the fleet's history that have any hold no
+finding, so the gap had carried nothing. Now each merge of the range that the base does not hold
+(asked by ancestry, as the gate grades findings) is merged again from its parents by `git merge-tree
+--write-tree`, in the checkout's clone (an octopus one head at a time). A merge whose tree differs
+is handed to both legs as one commit, its parent git's merge and its tree the merge's: its patch is
+what `--remerge-diff` prints, and neither parent's commits are read again. gitleaks reads those
+commits in a run of its own, and trufflehog walks each; a finding is named `in merge <sha>'s own
+changes` and graded as the merge's. `--remerge-diff` itself was ruled out on the pinned gitleaks,
+whose parser names every conflicted file `b/<path>` (path allowlists and `.gitleaksignore` match on
+the name) and which gets no patch for an octopus. The commits live in the clone because trufflehog
+reads no alternate object directory. Both tools exit 0 having read nothing when their `git log`
+dies (gitleaks `0 commits scanned`; trufflehog with `--fail-on-scan-errors` too), so the same
+`git log -p` runs first where each will run it: a pass commit either could not read is
+could-not-look, never a PASS, and git runs for the clone with no inherited alternate object
+directory. A `.gitleaksignore` entry pinned to a merge is handed to gitleaks pinned to its commit as
+well (checked on the real binary). GitHub's test merge is never merged again. A range whose merges
+add nothing runs as before; the scanner notes say which. `selftest.mjs` gains the (U) leg, 25
+assertions (§Self-test), and each of 36 targeted mutants of `scan.mjs` turns it red; a 37th proved
+equivalent and its line keeps the code it had. `selftest-pr-shape.sh` gains four shapes on the REAL
+scanners (a push, a PR that merged its base in, an octopus, a merge the base holds past a clock
+skew), each checked by the tokens and by an exact count of the keys gitleaks reports: v1.19.8's
+`scan.mjs` fails 12 of their checks, and each of 9 targeted mutants fails at least one.
+**Measured before release** with the real gitleaks 8.30.1 and trufflehog 3.95.6, v1.19.8's
+`scan.mjs` (then `v1`) and this one on the same checkout each time (semgrep and hadolint stubbed
+clean, SCA and the history legs off). (A) The last push of all 11 callers' `main` and of
+luxairportlu's `dev`, and the 4 open PRs, with trufflehog `--only-verified` as CI runs it and again
+offline: every verdict PASS. (B) The 20 pushes since each caller adopted the gate whose range held a
+merge with changes of its own, and (C) each of the 40 merges in the fleet's history that has any,
+pushed alone, with trufflehog offline and every candidate counted. All 92 runs give v1.19.8's exit
+code, verdict and findings (5 block offline, both versions alike, on lookalikes in ordinary
+commits), none could not look, and none reports a key in a merge's own changes. The pass read what
+60 of them added, 79 more trufflehog walks in all; on an idle machine a run took a median 3.5 s
+against 2.5 s, at most 17.6 s against 13.2 s.
+**Caller-visible:** what a merge adds is read, and a key there blocks; a range that holds a merge
+clones the checkout, under `verified-secrets: off` too; merges that add lines cost one more gitleaks
+run and a trufflehog walk each; a git older than 2.38 FAULTs a range that holds a merge (GitHub's
+runners have 2.55). No input changed. On the measured state the `v1` move newly-blocks nobody.
+
 **v1.19.8** —
 `security-baseline`'s gitleaks pattern floor no longer blocks on a key the base already holds when
 git lists base commits in its range. The range is `git log <base>..HEAD`, and git stops walking the

@@ -18,6 +18,12 @@
 #    and the REAL gitleaks reads its key. It fails unless the PR's key is secret-pattern and the
 #    fork's secrets-history, never secret-pattern; its controls fail when git or gitleaks stop
 #    reading the fork into the range, since the shape would then test nothing.
+# 6-8. What only a merge commit adds (v1.20.0), which `git log -p` prints no patch for: a push of a
+#    merge whose conflict resolution keeps main's key and adds one, and which adds a file; a PR that
+#    merged its base in with a key in the resolution; an octopus that adds a file. Each fails unless
+#    gitleaks reports, and trufflehog walks, every key the merge adds, and neither its base's.
+# 9. A merge the base already holds, which `git rev-list <base>..<head>` lists past a clock skew
+#    (seven base commits dated before the fork): neither scanner may read what it added.
 # --only-verified is swapped for an offline pass that prints unverified results, so planted tokens
 # (minted per run, never live) show what was walked; it pins the walk on every trufflehog-version
 # bump, and shape 5 pins gitleaks' range on every gitleaks-version bump. Needs git, node, openssl,
@@ -211,4 +217,115 @@ listed "$work/skew-pr" refs/remotes/origin/main..HEAD "$fork" \
 scan "$work/skew-pr" skew-pr BASE_REF='' GITHUB_BASE_REF=main GITHUB_EVENT_BEFORE='' PR_HEAD_SHA="$(git -C "$work/skew-pr" rev-parse HEAD^2)"
 graded skew-pr "gitleaks' range past a clock skew, on a pull_request"
 passed "$n" "gitleaks' range past a clock skew: the fork's key, which main holds, warns as history; the PR's is secret-pattern, on a push and a pull_request"
+
+# ---- 6-8. what only a merge commit adds (v1.20.0) ----
+# `git log -p` prints no patch for a merge, so neither scanner read a key typed into a conflict
+# resolution or added while merging. Each merge below adds keys of its own, beside a control commit
+# both scanners always read, and keeps a key its base already held, which neither may read again:
+# gitleaks is checked in the report (file, line, and whose change it names), trufflehog by the tokens
+# it walked.
+reported() { grep -qF -- "$2" "$work/$1.log"; }   # <name> <fragment of a report line>
+walked() { grep -qF -- "$2" "$work/$1.hits"; }    # <name> <token>
+short() { git -C "$1" rev-parse "$2" | cut -c1-7; }   # <repo> <rev>: as the report shortens a sha
+dated() { GIT_AUTHOR_DATE="$1" GIT_COMMITTER_DATE="$1" g commit -qm "$2"; }   # <iso> <message>: commit what is staged
+# <name> <n>: gitleaks reported exactly n keys, so none a parent or git's own merge of them held.
+counted() { grep -qF -- "\`secret-pattern\` · T0 · $2 finding(s)" "$work/$1.log"; }
+# ---- 6. a push of a merge: its resolution keeps main's key and adds one, and it adds a file ----
+n=$(fails)
+g init -q push2
+ctl4=$(tok); pre4=$(tok); res4=$(tok); new4=$(tok)
+(
+  cd push2
+  printf 'a\nshared=base\nz\n' > conf.txt; g add conf.txt; dated 2026-09-06T10:00:00Z fork
+  g checkout -qb topic
+  printf 'a\nshared=topic\nz\n' > conf.txt; g add conf.txt
+  commit 2026-09-06T11:00:00Z control.txt "control_token = \"$ctl4\"" 'topic: a key, and its side of conf.txt'
+  g checkout -q main
+  printf 'a\nshared=%s\nz\n' "$pre4" > conf.txt; g add conf.txt; dated 2026-09-06T12:00:00Z 'main: a key that predates the push'
+  g merge -q --no-ff --no-commit topic >/dev/null 2>&1 || true
+  printf 'a\nshared=%s\nresolved=%s\nz\n' "$pre4" "$res4" > conf.txt
+  printf 'evil_token = "%s"\n' "$new4" > evil.txt
+  g add conf.txt evil.txt; dated 2026-09-06T13:00:00Z 'merge topic: keep main, add a key, and a file neither side had'
+)
+[ "$(git -C push2 rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" = 3 ] || fail 'shape 6: no merge at HEAD, so the shape is not under test'
+scan "$work/push2" push2 BASE_REF='' GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE="$(git -C "$work/push2" rev-parse HEAD^1)" PR_HEAD_SHA=''
+m4="in merge $(short push2 HEAD)'s own changes"
+reported push2 "conf.txt:3 — github-pat **** $m4" || fail "a push of a merge: gitleaks did not report the key its conflict resolution adds (conf.txt:3) as the merge's own"
+reported push2 "evil.txt:1 — github-pat **** $m4" || fail "a push of a merge: gitleaks did not report the key in the file it adds (evil.txt:1) as the merge's own"
+reported push2 "control.txt:1 — github-pat **** in commit $(short push2 HEAD^2)" || fail 'a push of a merge: gitleaks did not report the control commit'
+! reported push2 'conf.txt:2' || fail "a push of a merge: gitleaks reported main's key (conf.txt:2), which the push did not add"
+for t in "$res4" "$new4" "$ctl4"; do walked push2 "$t" || fail "a push of a merge: trufflehog did not walk a key the push added (${t:0:8}…)"; done
+! walked push2 "$pre4" || fail "a push of a merge: trufflehog walked main's key, which the push did not add"
+grep -q '^- merges: the range holds 1 merge; it adds lines of its own' "$work/push2.log" || fail 'a push of a merge: the report does not say the merge adds lines of its own'
+counted push2 3 || fail "a push of a merge: gitleaks did not report exactly 3 keys, so it read something the range did not add"
+passed "$n" "a push of a merge: both scanners read the keys its own changes add, and not main's it kept"
+
+# ---- 7. a PR that merged its base in, resolving the conflict with a key ----
+n=$(fails)
+g init -q up5
+pre5=$(tok); res5=$(tok)
+(
+  cd up5
+  printf 'a\nshared=base\nz\n' > conf.txt; g add conf.txt; dated 2026-09-07T10:00:00Z fork
+  g checkout -qb feature
+  printf 'a\nshared=feature\nz\n' > conf.txt; g add conf.txt; dated 2026-09-07T11:00:00Z 'feature: its side'
+  g checkout -q main
+  printf 'a\nshared=%s\nz\n' "$pre5" > conf.txt; g add conf.txt; dated 2026-09-07T12:00:00Z 'main: a key the PR does not add'
+  g checkout -q feature
+  g merge -q --no-commit main >/dev/null 2>&1 || true
+  printf 'a\nshared=%s\nresolved=%s\nz\n' "$pre5" "$res5" > conf.txt
+  g add conf.txt; dated 2026-09-07T13:00:00Z 'merge main into feature: resolve, and add a key'
+)
+pr_checkout "$work/up5" "$work/pr5" 2026-09-07T14:00:00Z
+scan "$work/pr5" pr5 BASE_REF='' GITHUB_BASE_REF=main GITHUB_EVENT_BEFORE='' PR_HEAD_SHA="$(git -C "$work/pr5" rev-parse HEAD^2)"
+reported pr5 "conf.txt:3 — github-pat **** in merge $(short pr5 HEAD^2)'s own changes" || fail "a PR that merged its base in: gitleaks did not report the key its resolution adds as the PR merge's own"
+! reported pr5 'conf.txt:2' || fail "a PR that merged its base in: gitleaks reported main's key, which the PR does not add"
+walked pr5 "$res5" || fail "a PR that merged its base in: trufflehog did not walk the key its resolution adds"
+! walked pr5 "$pre5" || fail "a PR that merged its base in: trufflehog walked main's key, which the PR does not add"
+counted pr5 1 || fail "a PR that merged its base in: gitleaks did not report exactly 1 key, so it read something the range did not add"
+passed "$n" "a PR that merged its base in: both scanners read the key its resolution adds, and not main's"
+
+# ---- 8. an octopus merge that adds a file no head had ----
+n=$(fails)
+g init -q octo2
+oct6=$(tok)
+(
+  cd octo2
+  commit 2026-09-08T10:00:00Z fork.txt fork 'where the heads leave main'
+  for b in o1 o2; do g checkout -q -b "$b" main; commit 2026-09-08T11:00:00Z "$b.txt" "$b" "$b"; done
+  g checkout -q main
+  commit 2026-09-08T12:00:00Z main.txt main 'event.before'
+  g merge -q --no-commit o1 o2 >/dev/null 2>&1 || true
+  printf 'octo_token = "%s"\n' "$oct6" > octo.txt
+  g add octo.txt; dated 2026-09-08T13:00:00Z 'octopus, and a file no head had'
+)
+[ "$(git -C octo2 rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" = 4 ] || fail 'shape 8: no octopus merge at HEAD, so the shape is not under test'
+scan "$work/octo2" octo2 BASE_REF='' GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE="$(git -C "$work/octo2" rev-parse HEAD^1)" PR_HEAD_SHA=''
+reported octo2 "octo.txt:1 — github-pat **** in merge $(short octo2 HEAD)'s own changes" || fail "an octopus merge: gitleaks did not report the key it adds as its own"
+walked octo2 "$oct6" || fail 'an octopus merge: trufflehog did not walk the key it adds'
+counted octo2 1 || fail "an octopus merge: gitleaks did not report exactly 1 key, so it read something the range did not add"
+passed "$n" "an octopus merge: both scanners read the key it adds"
+# ---- 9. a merge the base already holds, which `git rev-list <base>..<head>` lists past a clock skew ----
+n=$(fails)
+g init -q skew2
+fork9=$(tok)
+(
+  cd skew2
+  commit 2026-09-10T10:00:00Z a.txt a root
+  g checkout -qb side; commit 2026-09-10T10:30:00Z s.txt s side
+  g checkout -q main; commit 2026-09-10T10:40:00Z m.txt m main
+  g merge -q --no-ff --no-commit side >/dev/null 2>&1 || true
+  printf 'fork_token = "%s"\n' "$fork9" > own.txt
+  g add own.txt; dated 2026-09-10T11:00:00Z 'the fork: a merge that adds a key of its own'
+  g checkout -qb feature; commit 2026-09-10T12:00:00Z f.txt f feature
+  g checkout -q main
+  for i in 1 2 3 4 5 6 7; do commit "2026-09-10T09:0$i:00Z" "b$i.txt" "$i" "base $i, dated before the fork"; done
+  g checkout -q feature
+)
+base9=$(git -C skew2 rev-parse main)
+listed "$work/skew2" "$base9..HEAD" "$(git -C skew2 rev-parse HEAD^)" || fail 'shape 9: rev-list does not list the fork past the skew, so the shape is not under test'
+scan "$work/skew2" skew2 BASE_REF="$base9" GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE='' PR_HEAD_SHA=''
+! reported skew2 'own.txt' || fail 'a merge the base holds: gitleaks read what it added, which predates the range'
+! walked skew2 "$fork9" || fail 'a merge the base holds: trufflehog walked what it added, which predates the range'
+passed "$n" "a merge the base already holds, listed past a clock skew: neither scanner read what it added"
 [ "$(fails)" -eq 0 ] || { echo "❌ $(fails) check(s) failed"; exit 1; }
