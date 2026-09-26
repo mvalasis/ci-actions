@@ -37,6 +37,12 @@ git push origin v1.2.0
 git tag -f --no-sign v1 HEAD && git push -f origin v1   # move the floating major
 ```
 
+**In an auto-mode agent session the `v1` move is the operator's.** The classifier refuses the agent's
+`git tag -f` on `v1` as destructive (the v1.20.0 and v1.20.1 moves, 2026-09-26), so the agent cuts
+and pushes the anchor, checks nobody moved `v1` meanwhile, and hands over the two commands with the
+commit spelled out, one per line: `git -C ~/dev/ci-actions tag -f --no-sign v1 <sha>`, then `git -C
+~/dev/ci-actions push -f origin v1`. It verifies the move and writes the release commit after.
+
 **A move ships every version staged below it.** `v1 HEAD` carries everything on
 `main`, including entries below whose tag is not yet cut. Cut each one's anchor on
 its own commit, mark its entry as shipped with this move, and tell whoever staged it
@@ -56,7 +62,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.20.1** *(tag not yet cut; lands with the next `v1` move)* — `security-baseline` reads a range
+**v1.20.1** — `security-baseline` reads a range
 git cannot read as could-not-look, never as clean. Both secret scanners read commits through a `git
 log -p` of their own and exit 0 having read nothing when it dies. Measured on the pinned binaries:
 gitleaks 8.30.1 logs `[git] fatal: …` and `0 commits scanned` and reports `[]` on a `--log-opts`
