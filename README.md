@@ -37,11 +37,14 @@ git push origin v1.2.0
 git tag -f --no-sign v1 HEAD && git push -f origin v1   # move the floating major
 ```
 
-**In an auto-mode agent session the `v1` move is the operator's.** The classifier refuses the agent's
-`git tag -f` on `v1` as destructive (the v1.20.0 and v1.20.1 moves, 2026-09-26), so the agent cuts
-and pushes the anchor, checks nobody moved `v1` meanwhile, and hands over the two commands with the
+**In an auto-mode agent session the `v1` move needs the operator's word for that version.** The agent
+cuts and pushes the anchor, checks nobody moved `v1` meanwhile, and asks "Release v1.x.y — move `v1`
+onto <sha>?" as a question of its own. With a yes the agent's move went through (v1.21.0,
+2026-09-28); without one the classifier refuses the agent's `git tag -f` on `v1` as destructive
+(v1.20.0 and v1.20.1, 2026-09-26). When it refuses, the agent hands over the two commands with the
 commit spelled out, one per line: `git -C ~/dev/ci-actions tag -f --no-sign v1 <sha>`, then `git -C
-~/dev/ci-actions push -f origin v1`. It verifies the move and writes the release commit after.
+~/dev/ci-actions push -f origin v1`. Either way it verifies the move and writes the release commit
+after.
 
 **A move ships every version staged below it.** `v1 HEAD` carries everything on
 `main`, including entries below whose tag is not yet cut. Cut each one's anchor on
@@ -62,7 +65,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.21.0** *(tag not yet cut; lands with the next `v1` move)* — every third-party tool the actions
+**v1.21.0** — every third-party tool the actions
 install is checked against a SHA-256 before it is installed. Until now the release binaries were
 pinned by release tag only (`curl | tar`, trufflehog's without `-f`), semgrep was whatever `pip
 install semgrep` resolved on the day, and `a11y-audit` installed the floating `pa11y-ci@4`: a
@@ -83,7 +86,13 @@ No caller overrides a version (checked across the fleet's workflows), so none ha
 the pins to every `action.yml` default and the installer to the real assets (20 targeted mutants
 each turn it red), and `security-baseline-selftest.yml`'s `pinned-installs` job runs the action with
 a wrong digest end to end. **Caller-visible:** the same tool versions, each checked first; semgrep's
-dependencies no longer land in the runner's user site-packages. Nothing newly blocks.
+dependencies no longer land in the runner's user site-packages. Nothing newly blocks. **Verified
+after the move** by re-runs that downloaded `c88c915`: luxairport-frontend's security-baseline as a
+push (main) and as a pull_request (a Renovate PR), each installing all five tools verified against
+their pins, and each verdict identical to its v1.20.1 attempt (`critical: 0 · warnings: 7`, PASS);
+its deps-currency sweep, whose osv-scanner came through `../security-baseline` on a remote caller
+(PASS, no issue written); lampakia-astro's a11y-audit with `pa11y-ci@4.1.1` (162 packages, as with
+`@4`; 2/2 URLs passed).
 
 **v1.20.1** — `security-baseline` reads a range
 git cannot read as could-not-look, never as clean. Both secret scanners read commits through a `git
