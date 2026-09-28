@@ -6,3 +6,6 @@ linkcheck-report.txt
 
 # node deps installed at action runtime (regenerated via `npm ci` from the lockfile)
 node_modules/
+
+# Playwright MCP output (page snapshots, console logs, screenshots): can hold production data
+.playwright-mcp/
