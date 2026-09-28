@@ -55,7 +55,11 @@ runs:
       # verify-token to the first (navigation) request via request interception;
       # a future major that switched to setExtraHTTPHeaders would broadcast it to
       # every cross-origin subresource — re-audit token scope before bumping.
-      run: npm install -g pa11y-ci@4
+      # An EXACT version (v1.21.0; was the floating `@4`), so a new pa11y-ci release reaches no
+      # caller until it is pinned here: npm never lets a published version's tarball change, and
+      # npm checks it against the registry's integrity hash. Its own dependencies still resolve
+      # within their ranges at install time (README §Notes).
+      run: npm install -g pa11y-ci@4.1.1
     - name: Audit
       shell: bash
       env:

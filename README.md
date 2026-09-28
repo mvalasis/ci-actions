@@ -62,6 +62,29 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.21.0** *(tag not yet cut; lands with the next `v1` move)* — every third-party tool the actions
+install is checked against a SHA-256 before it is installed. Until now the release binaries were
+pinned by release tag only (`curl | tar`, trufflehog's without `-f`), semgrep was whatever `pip
+install semgrep` resolved on the day, and `a11y-audit` installed the floating `pa11y-ci@4`: a
+replaced release asset or a compromised maintainer account ran on every caller's runner. Now
+`security-baseline/scripts/install-pinned.sh` downloads gitleaks, trufflehog, osv-scanner and
+hadolint to a private temp dir and installs each only when it hashes to its pin in
+`security-baseline/tool-pins.txt`; semgrep 1.178.0 and every package it pulls come from the hashed
+lock `security-baseline/semgrep-requirements.txt` (pip `--require-hashes --only-binary :all:`) into a
+fresh virtualenv; `deps-currency` installs osv-scanner through the same script and pin; `a11y-audit`
+installs `pa11y-ci@4.1.1`. Each pin was checked against GitHub's recorded asset digest, the vendor's
+checksums file and a local download (trufflehog's cosign signature, osv-scanner's SLSA provenance and
+semgrep's PyPI attestation verified too). A mismatch, a missing digest or a failed download fails the
+install step before anything runs, in every mode. **New inputs:** `semgrep-sha256`,
+`gitleaks-sha256`, `trufflehog-sha256`, `osv-sha256`, `hadolint-sha256` (and `deps-currency`'s
+`osv-sha256`); a caller overriding a `*-version` must set the matching digest, or the step fails.
+No caller overrides a version (checked across the fleet's workflows), so none has to change;
+`semgrep-version` now defaults to `1.178.0`, what callers already resolved. `selftest-pins.sh` holds
+the pins to every `action.yml` default and the installer to the real assets (17 targeted mutants
+each turn it red), and `security-baseline-selftest.yml`'s `pinned-installs` job runs the action with
+a wrong digest end to end. **Caller-visible:** the same tool versions, each checked first; semgrep's
+dependencies no longer land in the runner's user site-packages. Nothing newly blocks.
+
 **v1.20.1** — `security-baseline` reads a range
 git cannot read as could-not-look, never as clean. Both secret scanners read commits through a `git
 log -p` of their own and exit 0 having read nothing when it dies. Measured on the pinned binaries:

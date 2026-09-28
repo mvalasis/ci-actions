@@ -35,6 +35,13 @@ Rollout: start `fail-on-violations: false` (surface the backlog), fix it, then f
 
 ## Notes
 
+- **Exact pin** (v1.21.0). `action.yml` installs `pa11y-ci@4.1.1`, not the floating `@4`
+  it used before, so a new pa11y-ci release reaches no caller until it is pinned here. npm
+  never lets a published version's tarball change and checks it against the registry's
+  integrity hash, so the version pins the content. pa11y-ci's own dependencies (pa11y,
+  puppeteer, the Chromium puppeteer downloads) still resolve within their semver ranges at
+  install time; a lockfile for them is not vendored yet. Bump: pick a release at least a week
+  old, re-audit the `verify-token` scope below, change the one version in `action.yml`.
 - **Modern browser.** Uses `pa11y-ci@4` (pa11y 9 / puppeteer 24, current Chromium). The
   earlier `@3` pin shipped Chromium 91, which predates CSS cascade layers (`@layer`, Chrome
   99+); on any layered stylesheet — e.g. **Tailwind v4** — the utilities block was dropped,

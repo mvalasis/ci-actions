@@ -10,7 +10,8 @@ name: deps-currency self-test
 on:
   push:
     branches: [main]
-    paths: ['deps-currency/**', '.github/workflows/deps-currency-selftest.yml']
+    # deps-currency installs osv-scanner through security-baseline's installer and pin.
+    paths: ['deps-currency/**', '.github/workflows/deps-currency-selftest.yml', 'security-baseline/tool-pins.txt', 'security-baseline/scripts/install-pinned.sh']
   workflow_dispatch: {}
 
 permissions:
@@ -40,12 +41,13 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
-      - name: Install osv-scanner (action.yml's pin)
+      # action.yml's default, through the installer the action runs: a default that is not the pin
+      # in security-baseline/tool-pins.txt has no digest, so this step fails.
+      - name: Install osv-scanner (action.yml's pin, SHA-256 verified)
         run: |
           v="$(awk '/^  osv-version:/ { f = 1 } f && /default:/ { print $2; exit }' deps-currency/action.yml | tr -d "'\"")"
           [ -n "$v" ] || { echo "::error::could not read osv-version's default from deps-currency/action.yml"; exit 1; }
-          sudo curl -fsSL "https://github.com/google/osv-scanner/releases/download/${v}/osv-scanner_linux_amd64" -o /usr/local/bin/osv-scanner
-          sudo chmod +x /usr/local/bin/osv-scanner
+          PIN_VERSION="$v" bash security-baseline/scripts/install-pinned.sh osv-scanner
           osv-scanner --version
       - name: Looked, looked at nothing, could not look
         run: |
@@ -83,3 +85,50 @@ jobs:
           case "$out" in *"osv-scanner could not look — exit 128: it read none of the tree's lockfiles: bun.lockb"*) ;; *) bad 'a bun.lockb alone: no could-not-look note naming it' ;; esac
           [ "$rc" = 1 ] || bad "a bun.lockb alone under fail-on-vuln: exit $rc, want 1"
           exit "$fail"
+
+  # The action's own install step, end to end (v1.21.0). It runs security-baseline's installer from
+  # the sibling directory: the positive run proves that path resolves and the pin installs through
+  # action.yml, so the negative run's failure can only be the digest's. Neither run opens an issue
+  # (manage-issue: false; the token is read-only anyway).
+  install-wiring:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Precondition — no osv-scanner on this runner yet
+        shell: bash
+        run: |
+          if command -v osv-scanner; then
+            echo "::error title=deps-currency self-test::the runner image already has osv-scanner, so the checks below cannot tell what the action installed"
+            exit 1
+          fi
+      # 8.30.0's gitleaks digest given for osv-scanner: well-formed, published, and wrong.
+      - name: A wrong osv-sha256 fails the action (expected to fail)
+        id: wrong-digest
+        continue-on-error: true
+        uses: ./deps-currency
+        with:
+          osv-sha256: '79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e'
+          manage-issue: 'false'
+      - name: The wrong digest failed the action and installed nothing
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.wrong-digest.outcome }}
+        run: |
+          fail=0
+          [ "$OUTCOME" = failure ] || { echo "::error title=deps-currency self-test::a wrong osv-sha256 left the action's outcome '$OUTCOME', not failure"; fail=1; }
+          if command -v osv-scanner; then echo "::error title=deps-currency self-test::osv-scanner was installed despite a wrong digest"; fail=1; fi
+          exit "$fail"
+      - name: The pin installs through action.yml (report mode)
+        id: pinned
+        uses: ./deps-currency
+        with:
+          manage-issue: 'false'
+      - name: The pinned osv-scanner is the one installed
+        shell: bash
+        run: |
+          want="$(awk '$1 == "osv-scanner" { print $3 }' security-baseline/tool-pins.txt)"
+          got="$(sha256sum "$(command -v osv-scanner)" | cut -d' ' -f1)"
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "::error title=deps-currency self-test::the installed osv-scanner hashes to $got, not the pin ${want:-?}"; exit 1; }

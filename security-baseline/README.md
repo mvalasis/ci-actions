@@ -75,7 +75,66 @@ keeps those working with zero edits**; the new WARN tiers ride along automatical
 | `verified-secrets` | `auto` | `auto`/`on` = trufflehog `--only-verified` (provider test-auth egress); `off` = air-gap mode (gitleaks pattern floor still blocks), and the way to run without trufflehog. |
 | `enable-sca` | `true` | osv-scanner dependency audit (WARN; package-coordinate egress to osv.dev). `false` runs without osv-scanner. |
 | `enable-secrets-history` | `true` | Full-history secret baseline (WARN). Set `false` on huge repos to save CI minutes. |
-| `*-version` | _(pinned)_ | `gitleaks` / `trufflehog` / `osv` / `hadolint` / `semgrep` release pins. |
+| `*-version` | _(pinned)_ | `semgrep` `1.178.0` / `gitleaks` `8.30.1` / `trufflehog` `3.95.6` / `osv` `v2.4.0` / `hadolint` `2.12.0`. Overriding one requires the matching `*-sha256` (§Pinned tools). |
+| `*-sha256` | `''` | The digest of what an overridden `*-version` downloads. Empty = the pin's own digest, which applies only to the pinned version: a moved version with no digest fails the step, and so does one whose download does not match. |
+
+## Pinned tools — checked before they are installed (v1.21.0)
+
+Every third-party tool the gate runs is checked against a SHA-256 before it is installed, by
+`scripts/install-pinned.sh`. A mismatch, a missing digest, a malformed input or a failed download
+fails that install step with `::error title=<tool> install::…`, before the scan runs. There is no
+report-mode path around it: a binary that does not hash to its pin is never run. Until v1.21.0 the
+release binaries were pinned by release TAG only (`curl | tar`, trufflehog's without `-f`) and
+semgrep was whatever `pip install semgrep` resolved on the day, so a replaced release asset or a
+compromised maintainer account ran on every caller's runner.
+
+| Tool | Pinned in | Checked against | Installed as |
+|---|---|---|---|
+| gitleaks, trufflehog | `tool-pins.txt` | SHA-256 of the linux x86_64 `.tar.gz`, then the binary is extracted from it | `/usr/local/bin/<tool>` |
+| osv-scanner, hadolint | `tool-pins.txt` | SHA-256 of the linux x86_64 binary | `/usr/local/bin/<tool>` |
+| semgrep | `semgrep-requirements.txt` | pip `--require-hashes --only-binary :all:`: semgrep **and every package it pulls**, each pinned `==` with the hashes of its files (68 entries) | a fresh virtualenv in `$RUNNER_TEMP`, linked as `/usr/local/bin/semgrep` |
+
+`deps-currency` installs osv-scanner through the same script and pin. Each pin was checked three
+ways on 2026-09-28 (`tool-pins.txt` says how for each): GitHub's recorded asset digest, the vendor's
+checksums file (trufflehog's cosign signature and osv-scanner's SLSA provenance verified as well),
+and a download hashed locally. hadolint 2.12.0 predates GitHub's asset digests (June 2025); its
+asset was never replaced (`updated_at` is its 2022 upload). semgrep's manylinux x86_64 wheel matches
+PyPI's digest and its PyPI publish attestation (semgrep's own release workflow). semgrep installs
+into a new virtualenv so no package is taken from what the runner already had (pip checks no hash
+on a package it finds installed), nothing is built from source, and its dependencies never shadow
+the caller's own Python packages; the lock resolved nothing uploaded in the week before it was cut
+except semgrep itself, which callers already ran, and osv.dev lists no advisory for any of the 68.
+
+**Overriding a version.** Set the version and the digest of what it downloads, together:
+
+```yaml
+      - uses: mvalasis/ci-actions/security-baseline@v1
+        with:
+          gitleaks-version: '8.30.0'
+          gitleaks-sha256: '79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e'
+```
+
+A release asset's digest: `gh api repos/<owner>/<repo>/releases/tags/<tag> --jq '.assets[] |
+{name, digest}'` (cross-check it against the vendor's checksums file). For `semgrep-version`,
+`semgrep-sha256` is the digest of the wheel pip installs on the runner, on GitHub-hosted ubuntu the
+manylinux x86_64 one: `curl -s https://pypi.org/pypi/semgrep/<v>/json | jq -r '.urls[] |
+select(.filename | test("manylinux.*x86_64")) | .digests.sha256'`. Only semgrep's own line moves;
+its dependencies stay the lock's, so a version they do not satisfy fails the step.
+
+**Bumping a pin** (a release, like any change here):
+
+1. Pick a release at least a week old: a compromised release is usually caught within days.
+2. Take the asset's digest from GitHub's API and check it against the vendor's checksums file, and
+   its signature or provenance where one is published. Record what was checked in `tool-pins.txt`.
+3. Change the version and digest in `tool-pins.txt` and the `*-version` default in `action.yml`
+   (for osv-scanner, in `deps-currency/action.yml` too). `scripts/selftest-pins.sh` fails while
+   they disagree.
+4. semgrep: rerun the `uv pip compile` command in `semgrep-requirements.txt`'s header with the new
+   version, `--exclude-newer` a week back and semgrep's own upload day in
+   `--exclude-newer-package`; set `semgrep-version`'s default; check the lock's packages against
+   osv.dev.
+5. `bash security-baseline/scripts/selftest-pins.sh` locally (its semgrep legs need Linux x86_64),
+   then the release ritual; the self-test workflow installs every pin through `action.yml`.
 
 ## Promoting checks per-caller (without forking)
 
@@ -373,7 +432,7 @@ and how to remove it:
 
 | Egress | What is sent | Remove it by |
 |---|---|---|
-| `pip install semgrep`, release downloads (gitleaks/trufflehog/osv/hadolint) | nothing of yours — fetching the tools at install | mirror the tools on a self-hosted runner |
+| semgrep's hashed lock from PyPI, release downloads (gitleaks/trufflehog/osv/hadolint), each checked against a pinned SHA-256 | nothing of yours — fetching the tools at install | mirror the tools on a self-hosted runner |
 | semgrep `p/security-audit` registry fetch | rule **definitions** (no code) | set `semgrep-config` to a vendored local path |
 | **custom rule packs** (`rules/*.yaml`) | nothing — **vendored-local, zero fetch** | — (already offline) |
 | trufflehog `--only-verified` | a **test-auth** to the credential's OWN provider (only when a candidate secret is found) | `verified-secrets: off` |
@@ -708,7 +767,27 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   read to the root, started by name without `PATH`, without `--notes`, and a walk to the root
   without `--diff-filter=AM`. Only this pin sees the one without `--notes`.
 
-All three run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a report-mode self-scan,
+- `bash scripts/selftest-pins.sh` (v1.21.0) — the installer and its pins. Offline: each pin in
+  `tool-pins.txt` is well-formed and equals its `*-version` default here and in
+  `deps-currency/action.yml`, semgrep's default equals the lock's, every `*-sha256` defaults to
+  empty (so a moved version never borrows the pinned digest), the lock pins every package `==`
+  with hashes and allows wheels only, and no `action.yml` or workflow downloads a release,
+  pip-installs, pipes `curl` into a shell or `tar`, or npm-installs a package at anything but an
+  exact version. Against the real assets: each pin installs an ELF executable (never the archive
+  it came in); the digest of another asset, a version moved without a digest (nothing downloaded,
+  as a logging `curl` stub proves, behind a control), a malformed digest or version, a release
+  that does not exist and an unknown tool each exit 1 with their own message and install nothing,
+  leaving a binary already in place as it was; a moved version with its right digest, and the pin
+  spelled `sha256:<HEX>`, install. On Linux x86_64 (CI) the semgrep legs: a moved version with no
+  digest is refused before a venv exists, another wheel's digest is refused by pip and links
+  nothing, the lock installs a semgrep that runs, and the override path installs. 17 targeted
+  mutants of the installer, the pins, the lock and the three `action.yml` files each turn it red;
+  one, the archive installed in place of its binary, survived until the ELF check was added.
+  The workflow's `pinned-installs` job first runs the action itself with a wrong
+  `gitleaks-sha256` on a fresh runner and asserts the step failed after semgrep was installed and
+  before any gitleaks was; `self-scan-smoke` installs every pin through `action.yml`.
+
+All of these run in CI (`.github/workflows/security-baseline-selftest.yml`) plus a report-mode self-scan,
 after which the same job runs `scan.mjs` over this repo with the real scanners the action just
 installed, in both scopes, and fails if any leg could not look: the one place real scanner output,
 not a stub's, goes through `outcome.mjs` before a release. Both of those runs are a push of this
@@ -745,5 +824,6 @@ scanner process (looked, or could not look and why) and the map of legs to the c
 scanners, normalizes their output into `{checkId, rule, file, line, msg}` findings, tiers + promotes
 via the engine, renders a per-check report to `GITHUB_STEP_SUMMARY` and the job log, annotates each
 CRITICAL (`annotations()` in `tiers.mjs`), exits non-zero under `fail-on-critical` only on a
-CRITICAL or on a FAULT. Zero npm dependencies (pure Node 22). Tools are pinned binaries installed
-in `action.yml`.
+CRITICAL or on a FAULT. Zero npm dependencies (pure Node 22). `scripts/install-pinned.sh` installs
+the tools, each checked against a pinned SHA-256 first (`tool-pins.txt`; semgrep's is the hashed
+lock `semgrep-requirements.txt`) — §Pinned tools.

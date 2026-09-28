@@ -117,7 +117,8 @@ jobs:
 | `manage-issue` | `true` | Open/auto-close the `deps-currency: dependency advisories` issue (needs `issues: write`). A failed issue call never fails the run; the `ℹ️ issue lifecycle` block after the report says what happened. |
 | `fail-on-vuln` | `false` | `true` = BLOCK when a ≥floor advisory exists, and FAULT (exit 1, no verdict) when osv-scanner could not look. Default `false` (report-only, exit 0 either way). Unpinned-action advisories never block regardless. |
 | `issue-title` | `deps-currency: dependency advisories` | Stable title so the same issue is reused / closed. |
-| `osv-version` | `v2.4.0` | Pinned osv-scanner release (mirrors `security-baseline`). |
+| `osv-version` | `v2.4.0` | Pinned osv-scanner release: `security-baseline`'s pin (`security-baseline/tool-pins.txt`). Overriding it requires `osv-sha256`. |
+| `osv-sha256` | `''` | SHA-256 of an overridden release's `osv-scanner_linux_amd64` (`gh api repos/google/osv-scanner/releases/tags/<tag> --jq '.assets[] \| {name, digest}'`). Empty = the pin's digest, which applies only to the pinned version: a moved version with no digest, or a download that does not match, fails the step (v1.21.0). |
 | `first-party-owners` | *(empty)* | **Extra** owners to treat as first-party in the unpinned-action scan, space/comma separated. The caller's owner and this action's own owner are already included — see below. Only needed for a third account you also control. |
 
 ## Who counts as "first-party" (the owner set)
@@ -240,7 +241,7 @@ it (mirrors `security-baseline`'s SCA honesty):
 
 | Egress | What is sent | Remove it by |
 |---|---|---|
-| osv-scanner release download | nothing of yours — fetching the tool at install | mirror the binary on a self-hosted runner |
+| osv-scanner release download, checked against a pinned SHA-256 | nothing of yours — fetching the tool at install | mirror the binary on a self-hosted runner |
 | osv-scanner scan | package **coordinates** (`name@version`) to **osv.dev** — never your lockfile body or source | run with an offline OSV DB on a self-hosted runner (roadmap) |
 | `gh issue` ops | the issue body is **your own report** (already-redacted advisory ids + package names), on `github.token` | `manage-issue: 'false'` |
 | unpinned-action scan | nothing — a **local text scan** of `.github/workflows/*` | — (already offline) |
@@ -354,4 +355,9 @@ engine, renders to `GITHUB_STEP_SUMMARY` and the job log, manages the tracking i
 the outcome to both, annotates each ≥floor advisory (`annotations()` in `engine.mjs`) and a scan
 that could not look, and exits non-zero only under `fail-on-vuln`: on a ≥floor advisory, or when
 osv-scanner could not look. **Zero npm
-dependencies** (pure Node 22). osv-scanner is a pinned binary installed in `action.yml`.
+dependencies** (pure Node 22). osv-scanner is installed by `security-baseline/scripts/install-pinned.sh`
+from the sibling directory, checked against the pin in `security-baseline/tool-pins.txt` before
+it is installed (v1.21.0; `security-baseline` README §Pinned tools), so the fleet runs one
+osv-scanner. The runner fetches this whole repository at the caller's ref, so the sibling is always
+the same release. `deps-currency-selftest.yml`'s `install-wiring` job runs the action with a wrong
+`osv-sha256` (the step fails, nothing is installed) and with the pin (it installs the pinned file).

@@ -10,7 +10,9 @@ name: security-baseline self-test
 # commit of the range and none of the base's), gitleaks' range past a clock skew (a key the base
 # already holds must warn, never block), merges that add lines of their own (each key a merge adds
 # must be read, and none its base held), and a range whose own git log dies, where each real scanner
-# reads nothing and exits 0 (the log run first must fault).
+# reads nothing and exits 0 (the log run first must fault). And the pinned installs (v1.21.0): a
+# wrong digest fails the action's install step and installs nothing, and selftest-pins.sh holds the
+# installer to its pins and to the real release assets.
 
 on:
   push:
@@ -36,8 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install semgrep (telemetry off)
-        run: python3 -m pip install --quiet --disable-pip-version-check semgrep
+      # The semgrep callers run: the hashed lock, through the action's own installer.
+      - name: Install semgrep (pinned, every package hash-checked)
+        run: bash security-baseline/scripts/install-pinned.sh semgrep
       - name: Vendored rule-pack self-test (semgrep --test)
         working-directory: security-baseline
         env: { SEMGREP_SEND_METRICS: 'off' }
@@ -88,3 +91,49 @@ jobs:
       - name: PR, merge and clock-skew shapes — every commit of the range read, none of the base's blocking, and what each merge adds (real scanners)
         shell: bash
         run: bash security-baseline/scripts/selftest-pr-shape.sh
+
+  # Every tool the action installs is checked against a SHA-256 before it is installed (v1.21.0).
+  # self-scan-smoke above installs every pin through action.yml; this job proves the other half:
+  # a digest that does not match fails the ACTION's step and installs nothing. It runs the action
+  # first, on a fresh runner (asserted), so what it finds afterwards is what the action did; then
+  # selftest-pins.sh tests the installer itself against the real assets and the lock.
+  pinned-installs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Precondition — no semgrep, no /usr/local/bin/gitleaks on this runner yet
+        shell: bash
+        run: |
+          if command -v semgrep || [ -e /usr/local/bin/gitleaks ]; then
+            echo "::error title=security-baseline self-test::the runner image already has semgrep or /usr/local/bin/gitleaks, so the end-to-end check below cannot tell what the action installed"
+            exit 1
+          fi
+      # 8.30.0's real digest given for 8.30.1: well-formed, published, and wrong for this asset.
+      - name: A wrong gitleaks-sha256 fails the action (end to end, expected to fail)
+        id: wrong-digest
+        continue-on-error: true
+        uses: ./security-baseline
+        with:
+          gitleaks-sha256: '79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e'
+          fail-on-critical: 'false'
+          enable-secrets-history: 'false'
+          verified-secrets: 'off'
+      # Failure alone would pass for any reason (a download that failed, a path that did not
+      # resolve). semgrep present = the action got past its first step to gitleaks'; gitleaks
+      # absent = that step installed nothing; self-scan-smoke installs the same gitleaks with the
+      # pinned digest, so the digest is the only difference.
+      - name: The action failed at gitleaks' digest, having installed semgrep and no gitleaks
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.wrong-digest.outcome }}
+        run: |
+          fail=0
+          pinned="$(sed -n 's/^semgrep==\([^ ;\\]*\).*/\1/p' security-baseline/semgrep-requirements.txt)"
+          [ "$OUTCOME" = failure ] || { echo "::error title=security-baseline self-test::a wrong gitleaks-sha256 left the action's outcome '$OUTCOME', not failure"; fail=1; }
+          [ -n "$pinned" ] && [ "$(SEMGREP_SEND_METRICS=off semgrep --version 2>/dev/null)" = "$pinned" ] || { echo "::error title=security-baseline self-test::the action did not reach its gitleaks step (no semgrep ${pinned:-?} on PATH), so its failure is not the digest's"; fail=1; }
+          [ ! -e /usr/local/bin/gitleaks ] || { echo "::error title=security-baseline self-test::gitleaks was installed despite a wrong digest"; fail=1; }
+          exit "$fail"
+      - name: The installer — pins against every action.yml, the real assets refused and accepted, semgrep's lock
+        shell: bash
+        run: bash security-baseline/scripts/selftest-pins.sh

@@ -45,9 +45,13 @@ inputs:
     required: false
     default: 'deps-currency: dependency advisories'
   osv-version:
-    description: 'Pinned osv-scanner release (with "v"). Mirrors security-baseline''s pin.'
+    description: 'Pinned osv-scanner release (with "v"). The same pin as security-baseline''s (security-baseline/tool-pins.txt). Overriding it requires osv-sha256.'
     required: false
     default: 'v2.4.0'
+  osv-sha256:
+    description: 'SHA-256 of that release''s osv-scanner_linux_amd64. Required when osv-version is overridden (a missing or mismatched digest fails the step); empty = the pinned digest.'
+    required: false
+    default: ''
   first-party-owners:
     description: >-
       EXTRA GitHub owners (space/comma separated) to treat as first-party in the unpinned-action
@@ -61,19 +65,20 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install osv-scanner (pinned)
+    - name: Install osv-scanner (pinned, SHA-256 verified)
       shell: bash
-      # Same pinned-release-binary supply-chain posture as security-baseline. osv-scanner is a
-      # self-contained Go binary; the only egress at scan time is package coordinates → osv.dev.
+      # security-baseline's installer and pin, so the fleet runs one osv-scanner: the release asset
+      # is checked against security-baseline/tool-pins.txt (or osv-sha256 beside an overridden
+      # osv-version) before it is installed, and a mismatch, a missing digest or a failed download
+      # fails the step. The runner fetches this whole repository at the caller's ref, so the
+      # sibling directory is always the same release. osv-scanner is a self-contained Go binary;
+      # the only egress at scan time is package coordinates → osv.dev. `--version` smoke-checks
+      # that it runs.
+      env:
+        PIN_VERSION: ${{ inputs.osv-version }}
+        PIN_SHA256: ${{ inputs.osv-sha256 }}
       run: |
-        v="${{ inputs.osv-version }}"
-        # NOTE asset name is UNVERSIONED (osv-scanner_linux_amd64) — osv-scanner v2.x dropped the
-        # version from the release-asset filename; the version is pinned by the release TAG (${v}).
-        # `-f` makes a missing/renamed asset FAIL THE STEP (red) instead of silently saving the 404
-        # body as a fake binary → the scan would skip → a false "clean" SCA. `--version` smoke-checks
-        # the binary actually runs. (This exact bug silently disabled osv in CI before 2026-06-30.)
-        sudo curl -fsSL "https://github.com/google/osv-scanner/releases/download/${v}/osv-scanner_linux_amd64" -o /usr/local/bin/osv-scanner
-        sudo chmod +x /usr/local/bin/osv-scanner
+        bash "${{ github.action_path }}/../security-baseline/scripts/install-pinned.sh" osv-scanner
         osv-scanner --version
     - name: Scan dependency currency
       shell: bash

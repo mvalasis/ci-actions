@@ -80,71 +80,91 @@ inputs:
     description: 'Dependency/SCA audit via osv-scanner (WARN; egress: package coordinates → osv.dev). Set false to disable. A run that cannot complete is reported, and FAULTs the scan only if an sca-* check is promoted via critical-checks.'
     required: false
     default: 'true'
-  # ---- pinned tool versions (air-gap / reproducibility) ----
+  # ---- pinned tools: every download is checked against a SHA-256 before it is installed ----
+  # A caller overriding a *-version must also set the matching *-sha256, or the step fails:
+  # nothing is installed that does not hash to a pin (README §Pinned tools).
   semgrep-version:
-    description: 'Pinned semgrep version (empty = latest).'
+    description: 'Pinned semgrep version, installed with every dependency from the hashed lock semgrep-requirements.txt (pip --require-hashes). Empty = the pinned version. Overriding it requires semgrep-sha256.'
+    required: false
+    default: '1.178.0'
+  semgrep-sha256:
+    description: 'SHA-256 of the semgrep wheel pip installs for semgrep-version on the runner (GitHub-hosted ubuntu: the manylinux x86_64 wheel). Required when semgrep-version is overridden. Its dependencies stay the lock''s, pinned and hashed, so a version they do not satisfy fails the step.'
     required: false
     default: ''
   gitleaks-version:
-    description: 'Pinned gitleaks release (no "v").'
+    description: 'Pinned gitleaks release (no "v"). Overriding it requires gitleaks-sha256.'
     required: false
     default: '8.30.1'
+  gitleaks-sha256:
+    description: 'SHA-256 of gitleaks_<version>_linux_x64.tar.gz. Required when gitleaks-version is overridden; empty = the pinned digest (tool-pins.txt).'
+    required: false
+    default: ''
   trufflehog-version:
-    description: 'Pinned trufflehog release (no "v").'
+    description: 'Pinned trufflehog release (no "v"). Overriding it requires trufflehog-sha256.'
     required: false
     default: '3.95.6'
+  trufflehog-sha256:
+    description: 'SHA-256 of trufflehog_<version>_linux_amd64.tar.gz. Required when trufflehog-version is overridden; empty = the pinned digest (tool-pins.txt).'
+    required: false
+    default: ''
   osv-version:
-    description: 'Pinned osv-scanner release (with "v").'
+    description: 'Pinned osv-scanner release (with "v"). Overriding it requires osv-sha256.'
     required: false
     default: 'v2.4.0'
+  osv-sha256:
+    description: 'SHA-256 of that release''s osv-scanner_linux_amd64. Required when osv-version is overridden; empty = the pinned digest (tool-pins.txt).'
+    required: false
+    default: ''
   hadolint-version:
-    description: 'Pinned hadolint release (no "v"). Only invoked when a Dockerfile is in scope.'
+    description: 'Pinned hadolint release (no "v"). Only invoked when a Dockerfile is in scope. Overriding it requires hadolint-sha256.'
     required: false
     default: '2.12.0'
+  hadolint-sha256:
+    description: 'SHA-256 of that release''s hadolint-Linux-x86_64. Required when hadolint-version is overridden; empty = the pinned digest (tool-pins.txt).'
+    required: false
+    default: ''
 
 runs:
   using: composite
   steps:
-    - name: Install semgrep (telemetry off)
+    # Each tool is downloaded, checked against its SHA-256 (tool-pins.txt, the hashed lock
+    # semgrep-requirements.txt, or the caller's own *-sha256 beside an overridden *-version) and
+    # only then installed; a mismatch, a missing digest or a failed download fails the step before
+    # anything runs. Inputs reach the script through env, never spliced into its text.
+    - name: Install semgrep (pinned, every package hash-checked; telemetry off)
       shell: bash
-      run: |
-        spec="semgrep"
-        [ -n "${{ inputs.semgrep-version }}" ] && spec="semgrep==${{ inputs.semgrep-version }}"
-        python3 -m pip install --quiet --disable-pip-version-check "$spec"
-    - name: Install gitleaks (pinned)
+      env:
+        PIN_VERSION: ${{ inputs.semgrep-version }}
+        PIN_SHA256: ${{ inputs.semgrep-sha256 }}
+      run: bash "${{ github.action_path }}/scripts/install-pinned.sh" semgrep
+    - name: Install gitleaks (pinned, SHA-256 verified)
       shell: bash
-      run: |
-        v="${{ inputs.gitleaks-version }}"
-        curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${v}/gitleaks_${v}_linux_x64.tar.gz" | tar -xz gitleaks
-        sudo install gitleaks /usr/local/bin/gitleaks && rm -f gitleaks
-    - name: Install trufflehog (pinned release binary, no telemetry)
+      env:
+        PIN_VERSION: ${{ inputs.gitleaks-version }}
+        PIN_SHA256: ${{ inputs.gitleaks-sha256 }}
+      run: bash "${{ github.action_path }}/scripts/install-pinned.sh" gitleaks
+    - name: Install trufflehog (pinned, SHA-256 verified, no telemetry)
       shell: bash
-      # Pinned release tarball (NOT curl|sh from the moving main branch) — same supply-chain
-      # posture as the gitleaks pin above.
-      run: |
-        v="${{ inputs.trufflehog-version }}"
-        curl -sSL "https://github.com/trufflesecurity/trufflehog/releases/download/v${v}/trufflehog_${v}_linux_amd64.tar.gz" | tar -xz trufflehog
-        sudo install trufflehog /usr/local/bin/trufflehog && rm -f trufflehog
-    - name: Install osv-scanner (pinned)
+      env:
+        PIN_VERSION: ${{ inputs.trufflehog-version }}
+        PIN_SHA256: ${{ inputs.trufflehog-sha256 }}
+      run: bash "${{ github.action_path }}/scripts/install-pinned.sh" trufflehog
+    - name: Install osv-scanner (pinned, SHA-256 verified)
       shell: bash
+      env:
+        PIN_VERSION: ${{ inputs.osv-version }}
+        PIN_SHA256: ${{ inputs.osv-sha256 }}
+      # `--version` smoke-checks that the verified binary runs on this runner.
       run: |
-        v="${{ inputs.osv-version }}"
-        # Asset name is UNVERSIONED (osv-scanner_linux_amd64) — osv-scanner v2.x dropped the version
-        # from the filename; version is pinned by the release TAG (${v}). `-f` fails the step on a
-        # missing/renamed asset instead of silently saving the 404 body as a fake binary (which would
-        # skip the SCA → false "clean"); `--version` smoke-checks it runs. (Fixed 2026-06-30 — the
-        # versioned name had silently disabled osv SCA fleet-wide.)
-        sudo curl -fsSL "https://github.com/google/osv-scanner/releases/download/${v}/osv-scanner_linux_amd64" -o /usr/local/bin/osv-scanner
-        sudo chmod +x /usr/local/bin/osv-scanner
+        bash "${{ github.action_path }}/scripts/install-pinned.sh" osv-scanner
         osv-scanner --version
-    - name: Install hadolint (pinned; used only when a Dockerfile is in scope)
+    - name: Install hadolint (pinned, SHA-256 verified; used only when a Dockerfile is in scope)
       shell: bash
+      env:
+        PIN_VERSION: ${{ inputs.hadolint-version }}
+        PIN_SHA256: ${{ inputs.hadolint-sha256 }}
       run: |
-        v="${{ inputs.hadolint-version }}"
-        # -f so a missing/renamed asset fails the step instead of silently saving the 404 body as a
-        # fake binary (the osv-scanner silent-skip class — fail loud, never fail-open to "clean").
-        sudo curl -fsSL "https://github.com/hadolint/hadolint/releases/download/v${v}/hadolint-Linux-x86_64" -o /usr/local/bin/hadolint
-        sudo chmod +x /usr/local/bin/hadolint
+        bash "${{ github.action_path }}/scripts/install-pinned.sh" hadolint
         hadolint --version
     - name: Scan
       shell: bash
