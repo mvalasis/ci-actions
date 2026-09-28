@@ -44,7 +44,9 @@ onto <sha>?" as a question of its own. With a yes the agent's move went through 
 (v1.20.0 and v1.20.1, 2026-09-26). When it refuses, the agent hands over the two commands with the
 commit spelled out, one per line: `git -C ~/dev/ci-actions tag -f --no-sign v1 <sha>`, then `git -C
 ~/dev/ci-actions push -f origin v1`. Either way it verifies the move and writes the release commit
-after.
+after. Landing commits that an open PR carries is a merge: for v1.22.0 the classifier refused the
+agent's `git push origin HEAD:main` as a merge without review until the operator answered "Land PR
+#14?", asked the same way.
 
 **A move ships every version staged below it.** `v1 HEAD` carries everything on
 `main`, including entries below whose tag is not yet cut. Cut each one's anchor on
@@ -65,7 +67,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.22.0** *(tag not yet cut; lands with the next `v1` move)* — `a11y-audit` installs every
+**v1.22.0** — `a11y-audit` installs every
 package from a vendored lockfile and runs a Chrome checked against a SHA-256. v1.21.0 pinned
 `pa11y-ci@4.1.1` itself, but its dependencies (pa11y, puppeteer, cheerio, lodash and the rest)
 still resolved within their ranges on every caller run, and puppeteer's postinstall downloaded
