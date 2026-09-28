@@ -82,7 +82,12 @@ endpoint is not a URL gets an `endpoint-unknown` WARN that names it, and the for
 still probed. **Caller-visible:** nothing for a form that one entry maps, which is every form of
 both callers today (epn-astro's two selectors never share a form; lampakia maps one), and the
 v1.22.0 fixtures pass unchanged. The new fixtures, and what turns them red: `form-protection/README.md`
-§Self-test. No input changed. Nothing newly blocks a current caller.
+§Self-test. No input changed. Nothing newly blocks a current caller. Verified after the move:
+epn-astro's and lampakia-astro's form-protection reruns (both enforcing) downloaded 9933d83 and
+passed with their reports unchanged. A report-only dispatch on lampakia's `/checkout/` with both
+entries read `1 gated form(s) · 2 endpoints`: create-order refused both probes with 403
+`turnstile_failed`, and `/api/cart/track` answered 405, since the route ships with lampakia 1.0.83.
+Its line lands in lampakia after that deploy.
 
 **v1.22.0** — `a11y-audit` installs every
 package from a vendored lockfile and runs a Chrome checked against a SHA-256. v1.21.0 pinned
