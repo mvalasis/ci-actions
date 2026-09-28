@@ -93,6 +93,7 @@ compromised maintainer account ran on every caller's runner.
 | gitleaks, trufflehog | `tool-pins.txt` | SHA-256 of the linux x86_64 `.tar.gz`, then the binary is extracted from it | `/usr/local/bin/<tool>` |
 | osv-scanner, hadolint | `tool-pins.txt` | SHA-256 of the linux x86_64 binary | `/usr/local/bin/<tool>` |
 | semgrep | `semgrep-requirements.txt` | pip `--require-hashes --only-binary :all:`: semgrep **and every package it pulls**, each pinned `==` with the hashes of its files (68 entries) | a fresh virtualenv in `$RUNNER_TEMP`, linked as `/usr/local/bin/semgrep` |
+| chrome-for-testing (v1.22.0; `a11y-audit`'s) | `tool-pins.txt` | SHA-256 of `chrome-linux64.zip`, then extracted from it | `$INSTALL_DIR/chrome-linux64/` (a11y-audit: a private dir under `$RUNNER_TEMP`) |
 
 `deps-currency` installs osv-scanner through the same script and pin. Each pin was checked three
 ways on 2026-09-28 (`tool-pins.txt` says how for each): GitHub's recorded asset digest, the vendor's
@@ -104,6 +105,15 @@ into a new virtualenv so no package is taken from what the runner already had (p
 on a package it finds installed), nothing is built from source, and its dependencies never shadow
 the caller's own Python packages; the lock resolved nothing uploaded in the week before it was cut
 except semgrep itself, which callers already ran, and osv.dev lists no advisory for any of the 68.
+
+Chrome for Testing (v1.22.0) publishes no checksum or signature, so its pin is the digest of a
+download, checked against the md5 Google's bucket records for the object and its generation (never
+replaced since its 2026-04-28 upload), and downloaded again by every run of `a11y-audit`'s
+real-install self-test. It has no action input: it is the build puppeteer-core in
+`a11y-audit/package-lock.json` launches, and it moves with that lock (`a11y-audit/README.md`
+§Refreshing the lockfile). The npm packages `a11y-audit`, `seo-aeo`, `form-protection` and
+`verify-homepage` run are pinned by their committed lockfiles (`npm ci`, each tarball checked
+against its sha512 integrity).
 
 **Overriding a version.** Set the version and the digest of what it downloads, together:
 
@@ -135,6 +145,8 @@ its dependencies stay the lock's, so a version they do not satisfy fails the ste
    osv.dev.
 5. `bash security-baseline/scripts/selftest-pins.sh` locally (its semgrep legs need Linux x86_64),
    then the release ritual; the self-test workflow installs every pin through `action.yml`.
+6. chrome-for-testing moves only with `a11y-audit`'s lock: its procedure is `a11y-audit/README.md`
+   §Refreshing the lockfile.
 
 ## Promoting checks per-caller (without forking)
 
@@ -784,6 +796,16 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   mutants of the installer, the pins, the lock and the three `action.yml` files each turn it red
   (the semgrep path's three on a Linux runner); one, the archive installed in place of its binary,
   survived until the ELF check was added.
+  Since v1.22.0 the offline legs also hold the npm side: no `action.yml` or workflow runs a local
+  `npm install`; every committed `package-lock.json` gives each package a registry tarball and a
+  sha512 integrity and agrees with its `package.json`, whose dependencies are exact; `a11y-audit`
+  installs through `scripts/install.sh` (`npm ci --ignore-scripts` on its lock, Chrome for Testing
+  through the installer with no `PIN_*` from the job); `audit.sh`'s token-scope note names the
+  pa11y and pa11y-ci the lock installs; every `osv-scanner.toml` ignore gives a reason and expires
+  within 100 days; chrome-for-testing's pin is well-formed. 24 targeted mutants each turn them red.
+  `lint.yml` runs the offline legs on every push and PR, since they read files well outside
+  `security-baseline/`. chrome-for-testing's real download, a wrong digest refused and its build
+  checked against the lock are `a11y-audit`'s real-install self-test.
   The workflow's `pinned-installs` job first runs the action itself with a wrong
   `gitleaks-sha256` on a fresh runner and asserts the step failed after semgrep was installed and
   before any gitleaks was; `self-scan-smoke` installs every pin through `action.yml`.

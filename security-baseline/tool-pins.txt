@@ -5,12 +5,12 @@
 # version must set). A mismatch, a missing digest or a failed download fails the step, before the
 # binary is installed. One line per tool. Each version must equal its `<tool>-version` default in
 # security-baseline/action.yml (and osv-scanner's in deps-currency/action.yml, which installs it
-# through the same script); selftest-pins.sh fails when they differ. semgrep is pinned by the
-# hashed lock ../semgrep-requirements.txt instead.
+# through the same script); selftest-pins.sh fails when they differ. chrome-for-testing (below) has
+# no such input. semgrep is pinned by the hashed lock ../semgrep-requirements.txt instead.
 #
-# Checked 2026-09-28, each three ways: GitHub's recorded asset digest (`gh api
-# repos/<owner>/<repo>/releases/tags/<tag> --jq '.assets[] | {name, digest}'`), the vendor's own
-# checksums file, and a download hashed locally.
+# The four release binaries were checked 2026-09-28, each three ways: GitHub's recorded asset
+# digest (`gh api repos/<owner>/<repo>/releases/tags/<tag> --jq '.assets[] | {name, digest}'`), the
+# vendor's own checksums file, and a download hashed locally.
 #   gitleaks     gitleaks_8.30.1_checksums.txt. No signature is published.
 #   trufflehog   trufflehog_3.95.6_checksums.txt, its cosign signature verified against the
 #                certificate issued to trufflesecurity/trufflehog's release.yml@refs/tags/v3.95.6.
@@ -20,9 +20,21 @@
 #   hadolint     GitHub records no digest for an asset uploaded before June 2025; the vendor's
 #                hadolint-Linux-x86_64.sha256 matches, and the asset's updated_at is its upload
 #                time (2022-11-09), so it was never replaced.
-# Bump: see security-baseline/README.md §Pinned tools.
+#
+# chrome-for-testing (v1.22.0) is the SHA-256 of chrome-linux64.zip, the Chrome a11y-audit's pa11y-ci
+# runs: the build puppeteer-core in a11y-audit/package-lock.json launches (its
+# PUPPETEER_REVISIONS.chrome; a11y-audit's real-install self-test fails when they differ). No action
+# input moves it. Checked 2026-09-28: Chrome for Testing publishes no checksum or signature (its
+# known-good-versions-with-downloads.json lists a URL only), so the pin is trust-on-first-use against
+# Google's bucket, which is also where puppeteer downloads it. The download hashed here matches the
+# md5 the bucket records for the object (storage/v1 JSON API: md5Hash j2Fm0T/aAZVF/bXFCW8l0w==,
+# 183950119 bytes); its generation 1777416380381639 is its creation time (2026-04-28T22:46:20Z), with
+# metageneration 1, so it was never replaced; the build is listed in that JSON. Every run of
+# a11y-audit's real-install self-test downloads it again on a GitHub runner and checks this digest.
+# Bump: see security-baseline/README.md §Pinned tools (and a11y-audit/README.md for this one).
 
-gitleaks     8.30.1  551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
-trufflehog   3.95.6  1b62ea3cbc672ed5fd36e0eebb00b1fb50bbb7ee35090f42437a5852a299e16b
-osv-scanner  v2.4.0  15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0
-hadolint     2.12.0  56de6d5e5ec427e17b74fa48d51271c7fc0d61244bf5c90e828aab8362d55010
+gitleaks            8.30.1         551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+trufflehog          3.95.6         1b62ea3cbc672ed5fd36e0eebb00b1fb50bbb7ee35090f42437a5852a299e16b
+osv-scanner         v2.4.0         15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0
+hadolint            2.12.0         56de6d5e5ec427e17b74fa48d51271c7fc0d61244bf5c90e828aab8362d55010
+chrome-for-testing  148.0.7778.97  8a760543807c67d3836d530cc4bc2e39c93e217f1629ec6ea311415fdfa21a75

@@ -1,6 +1,6 @@
 name: a11y-audit engine self-test
 
-# Offline regression guard for the crash guard + fault ATTRIBUTION: stubs
+# engine-selftest: offline regression guard for the crash guard + fault ATTRIBUTION: stubs
 # `pa11y-ci` on PATH and runs the real audit.sh, asserting that a tool fault is
 # reported as a tool fault (never as WCAG debt) and exits
 # `fail-on-violations ? 1 : 0`, while a genuine WCAG verdict passes through
@@ -8,6 +8,17 @@ name: a11y-audit engine self-test
 # Cases H–I also pin the verify-token's handling on the runner: never in argv,
 # never in pa11y-ci's environment, only in 0600 files inside a 0700 dir that is
 # gone on every exit path.
+#
+# real-install (v1.22.0): the half the stubs cannot see. selftest-install.sh installs pa11y-ci from
+# the vendored lock and Chrome for Testing from its pin, as the action does, and drives the real
+# audit.sh at two loopback origins: where the verify-token goes (the audited navigations and the
+# sitemap, never a subresource or a redirect target: pa11y's first-request-only interception,
+# measured rather than read), and the verdicts. Then the action itself, end to end, the same way.
+# advisories: osv.dev over the lock, through this repo's own deps-currency, failing on any advisory
+# a11y-audit/osv-scanner.toml does not carry a reviewed, unexpired ignore for.
+# Both also run weekly, so a new advisory on a locked package, an ignore reaching its review date, a
+# package gone from the registry or a Chrome build no longer served turns this workflow red on the
+# Monday after, not on a caller's run.
 #
 # TWO LEGS ON PURPOSE. audit.sh ships to callers and runs wherever they run, and
 # the guard is built out of `trap … EXIT`, `set -u` abort semantics and `$?`
@@ -22,11 +33,17 @@ on:
     branches: [main]
     paths:
       - 'a11y-audit/**'
+      - 'security-baseline/tool-pins.txt'
+      - 'security-baseline/scripts/install-pinned.sh'
       - '.github/workflows/a11y-audit-selftest.yml'
   pull_request:
     paths:
       - 'a11y-audit/**'
+      - 'security-baseline/tool-pins.txt'
+      - 'security-baseline/scripts/install-pinned.sh'
       - '.github/workflows/a11y-audit-selftest.yml'
+  schedule:
+    - cron: '41 4 * * 1' # Mondays 04:41 UTC
   workflow_dispatch: {}
 
 permissions:
@@ -64,3 +81,54 @@ jobs:
       - name: Crash-guard + attribution self-test
         shell: bash
         run: bash a11y-audit/scripts/selftest.sh
+
+  real-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install, token scope and verdicts, for real (selftest-install.sh)
+        shell: bash
+        run: bash a11y-audit/scripts/selftest-install.sh
+
+      # The composite itself: its install step's outputs reach the audit step (pa11y-ci on PATH, the
+      # pinned Chrome for puppeteer), and a real audit reaches a verdict. Enforcing, against clean
+      # pages, so success is a PASS verdict: a crash exits 1 under fail-on-violations: true.
+      - name: Start the two loopback origins for the action
+        id: fixtures
+        shell: bash
+        run: |
+          node a11y-audit/scripts/selftest-fixtures.mjs serve "$RUNNER_TEMP/e2e-requests.log" "$RUNNER_TEMP/e2e-ports.json" >/dev/null 2>&1 &
+          for _ in $(seq 1 50); do [ -s "$RUNNER_TEMP/e2e-ports.json" ] && break; sleep 0.2; done
+          port="$(node -p 'require(process.argv[1]).A' "$RUNNER_TEMP/e2e-ports.json")"
+          { echo "origin=http://127.0.0.1:$port"; echo "canary=a11y-e2e-canary-$RANDOM$RANDOM"; } >>"$GITHUB_OUTPUT"
+      - name: The action, enforcing, on the clean pages (sitemap + a cross-origin redirect)
+        uses: ./a11y-audit
+        with:
+          sitemap-url: ${{ steps.fixtures.outputs.origin }}/sitemap.xml
+          urls: ${{ steps.fixtures.outputs.origin }}/redirect
+          fail-on-violations: 'true'
+          verify-token: ${{ steps.fixtures.outputs.canary }}
+      - name: The action sent the verify-token with the sitemap fetch and the audited navigations only
+        shell: bash
+        env:
+          CANARY: ${{ steps.fixtures.outputs.canary }}
+        run: |
+          major="$(awk '$1 == "chrome-for-testing" { split($2, v, "."); print v[1] }' security-baseline/tool-pins.txt)"
+          node a11y-audit/scripts/selftest-fixtures.mjs check "$RUNNER_TEMP/e2e-requests.log" "$CANARY" /sitemap.xml,/page,/redirect --chrome-major "$major"
+
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      # Every advisory counts (floor LOW): pa11y-ci runs on every caller's runner. No issue is opened
+      # here; a red run is the signal (README §Notes, "Refreshing the lockfile").
+      - name: No known advisory on a package the lock installs (osv.dev)
+        uses: ./deps-currency
+        with:
+          working-directory: a11y-audit
+          severity-floor: LOW
+          fail-on-vuln: 'true'
+          manage-issue: 'false'

@@ -35,15 +35,41 @@ Rollout: start `fail-on-violations: false` (surface the backlog), fix it, then f
 
 ## Notes
 
-- **Exact pin** (v1.21.0). `action.yml` installs `pa11y-ci@4.1.1`, not the floating `@4`
-  it used before, so a new pa11y-ci release reaches no caller until it is pinned here. npm
-  never lets a published version's tarball change and checks it against the registry's
-  integrity hash, so the version pins the content. pa11y-ci's own dependencies (pa11y,
-  puppeteer, the Chromium puppeteer downloads) still resolve within their semver ranges at
-  install time; a lockfile for them is not vendored yet. Bump: pick a release at least a week
-  old, re-audit the `verify-token` scope below, change the one version in `action.yml`.
-- **Modern browser.** Uses `pa11y-ci@4` (pa11y 9 / puppeteer 24, current Chromium). The
-  earlier `@3` pin shipped Chromium 91, which predates CSS cascade layers (`@layer`, Chrome
+- **Every package from a vendored lockfile** (v1.22.0). `scripts/install.sh` copies
+  `package.json` and `package-lock.json` into a private dir under `$RUNNER_TEMP` and runs `npm ci
+  --omit=dev --ignore-scripts --no-audit --no-fund` there: pa11y-ci 4.1.1 and the 161 packages
+  it pulls install at the lock's versions, each tarball checked against its sha512 integrity,
+  and no lifecycle script runs (puppeteer's postinstall, the only one, would download a browser
+  of its own). The audit step gets a bin dir that holds `pa11y-ci` alone on its `PATH`; nothing
+  lands in the action's dir or on the job's `PATH`. Until v1.22.0 the step was `npm install -g
+  pa11y-ci@4.1.1` (v1.21.0; the floating `@4` before): the top package was pinned, but pa11y,
+  puppeteer, cheerio, lodash and the rest resolved within their ranges on every caller run, so
+  a compromised patch release of any of them reached every caller at its next run.
+- **Chromium: Chrome for Testing, pinned by SHA-256** (v1.22.0). The browser is the build
+  puppeteer-core in the lock launches (148.0.7778.97 for puppeteer 24.43.1), installed by
+  `security-baseline/scripts/install-pinned.sh` from its line in `security-baseline/tool-pins.txt`:
+  downloaded from Google's bucket (the URL puppeteer's own download uses) to a temp dir, and
+  extracted only when the zip hashes to the pin. puppeteer finds it through
+  `PUPPETEER_EXECUTABLE_PATH` and downloads nothing. Chosen over puppeteer's postinstall and over
+  `npx puppeteer browsers install <build>`, which pin the same build and check nothing: both
+  download and unzip without a digest (and unzip with extract-zip, below). **What cannot be
+  checked:** Google publishes no checksum or signature for Chrome for Testing, so the pin is
+  trust-on-first-use. It proves every runner gets the bytes first downloaded on 2026-09-28, which
+  matched the md5 the bucket records for the object, whose generation shows it was never replaced
+  since its 2026-04-28 upload; it cannot prove those bytes are what Google built. Likewise the
+  lock's integrity hashes prove every runner gets the tarballs first resolved, not that they were
+  benign when published; the week-old rule and the advisory check below are what stand between the
+  two. Node, npm, and the system libraries Chrome loads are the runner image's.
+- **Advisories, weekly.** `a11y-audit-selftest.yml` runs every Monday as well as on every change:
+  its `advisories` job runs this repo's own `deps-currency` over the lock, failing on an advisory
+  of any severity. `osv-scanner.toml` beside the lock carries the reviewed exceptions, each with a
+  reason and an `ignoreUntil` at most 100 days out (`selftest-pins.sh` fails an entry without
+  them), so an exception is looked at again when it expires. Today: extract-zip 2.0.1 (two
+  symlink path-traversal advisories, no fixed release), reached only through `@puppeteer/browsers`'
+  `install()`, which a11y-audit never runs; it leaves the tree once a pa11y-ci release moves to
+  pa11y 10 (puppeteer 25 dropped it).
+- **Modern browser.** pa11y-ci 4.1.1 → pa11y 9.1.1 → puppeteer 24.43.1, driving Chrome for
+  Testing 148. The earlier `pa11y-ci@3` shipped Chromium 91, which predates CSS cascade layers (`@layer`, Chrome
   99+); on any layered stylesheet — e.g. **Tailwind v4** — the utilities block was dropped,
   so the page rendered unstyled and axe reported **bogus contrast failures** (text fell back
   to the UA link colour). The current engine renders the page as real users see it.
@@ -55,12 +81,20 @@ Rollout: start `fail-on-violations: false` (surface the backlog), fix it, then f
 - **`verify-token` scope.** The token (`X-Verify-Source`) is injected via pa11y-ci's
   `defaults.headers`, which pa11y@9 applies with **first-request-only** Puppeteer request
   interception — *not* `setExtraHTTPHeaders`. So it rides only the **navigation request** to
-  each audited URL (and the sitemap fetch, which uses no `-L`), never a cross-origin
-  subresource (fonts/CDNs/analytics) or a cross-origin redirect target. It's still a secret
-  sent to the audited origin: point the action only at first-party origins you trust, and
-  prefer an origin-bound / IP-allowlisted WAF rule over a portable bearer token. The
-  no-broadcast guarantee is a property of pa11y@9's interception code, so the `pa11y-ci@4`
-  pin is a security control — re-audit before a major bump.
+  each audited URL (and the sitemap fetch, which uses no `-L`), never a subresource or a
+  fetch, first- or third-party (fonts/CDNs/analytics), and never a redirect target. It's still
+  a secret sent to the audited origin: point the action only at first-party origins you trust,
+  and prefer an origin-bound / IP-allowlisted WAF rule over a portable bearer token. The
+  no-broadcast guarantee is a property of pa11y's interception code, so the lock's pa11y is a
+  security control. **Measured, not only read** (v1.22.0): the real-install self-test
+  (`scripts/selftest-install.sh`, `scripts/selftest-fixtures.mjs`) drives the real pa11y-ci and
+  Chrome at two loopback origins, one audited and one a third party and redirect target, and
+  fails if the token reaches any request but the sitemap fetch and the audited navigations, or if
+  any of the page's subresources, fetches or the redirect's landing was never requested (so the
+  absence was observed). It runs on every change to the lock and weekly, and the action itself
+  runs the same check end to end. A pa11y with its first-request guard removed fails it (14 stray
+  requests, the redirect target among them). `selftest-pins.sh` fails while the versions named in
+  `audit.sh`'s TOKEN SCOPE note are not the ones the lock installs.
 - **`verify-token` on the runner** (v1.15.1). The token never appears in a process's argv,
   in the environment `pa11y-ci`, Chromium and their npm dependencies inherit, or in a file
   another user can read. `audit.sh` writes everything into a private `mktemp -d` dir (0700),
@@ -95,3 +129,42 @@ Rollout: start `fail-on-violations: false` (surface the backlog), fix it, then f
   per-URL summary lines (`> <url> - …`, ANSI-stripped), not the page's own HTML, so page
   content can't spoof it. A URL that still *Fails to run* after the retry stays non-zero and
   blocks in enforce mode.
+
+## Refreshing the lockfile
+
+**Who:** whoever maintains ci-actions (today Manos, or an agent session on his word): a refresh
+changes what every caller runs, so it is a release like any other.
+
+**When:** the week the `a11y-audit self-test` workflow goes red on its Monday run (a new advisory
+on a locked package, an `osv-scanner.toml` exception reaching its `ignoreUntil`, a package gone
+from the registry, a Chrome build no longer served), or when a new pa11y-ci release is a week old.
+No calendar refresh beyond that: an exception expires within 100 days, so a lock carrying one is
+reviewed at least that often, and one carrying none moves when osv.dev knows of a reason to.
+
+**How** (from `a11y-audit/`):
+
+1. pa11y-ci: a release at least a week old, set as an exact version in `package.json`.
+2. Resolve every package to what was published at least a week ago, the way the lock was cut
+   (2026-09-28, `--before=2026-09-21`):
+   ```bash
+   npm install --package-lock-only --ignore-scripts --no-audit --no-fund --before="$(date -u -v-7d +%F)"
+   ```
+   (GNU date: `date -u -d '7 days ago' +%F`.) Read what moved: `git diff package-lock.json`.
+3. Advisories: `osv-scanner scan source --recursive .` (the pinned binary, or the osv.dev
+   `querybatch` API). Drop the `osv-scanner.toml` entries the lock no longer needs; for one you
+   keep, say why again and move its `ignoreUntil` (100 days at most).
+4. The Chrome build: install the new lock in a scratch dir as the action does (`npm ci
+   --ignore-scripts`) and read `node -p "require('./node_modules/puppeteer-core/lib/cjs/puppeteer/revisions.js').PUPPETEER_REVISIONS.chrome"`.
+   If it moved, download
+   `https://storage.googleapis.com/chrome-for-testing-public/<build>/linux64/chrome-linux64.zip`,
+   hash it (`shasum -a 256`), compare its md5 (`openssl dgst -md5 -binary <zip> | base64`) with the
+   bucket's record (`curl -s
+   https://storage.googleapis.com/storage/v1/b/chrome-for-testing-public/o/<build>%2Flinux64%2Fchrome-linux64.zip`:
+   `md5Hash`; `timeCreated` equal to `updated` and `metageneration` 1 say it was never replaced),
+   and set the build and digest on chrome-for-testing's line in `security-baseline/tool-pins.txt`
+   and in its comment.
+5. Token scope: if pa11y or pa11y-ci moved, read the new pa11y's `lib/pa11y.js` for the
+   first-request-only interception, and put the new versions in `scripts/audit.sh`'s TOKEN SCOPE
+   note (`selftest-pins.sh` fails until they match); the real-install self-test then measures it.
+6. `bash security-baseline/scripts/selftest-pins.sh --offline`, then a PR: the workflow's
+   `real-install` and `advisories` jobs must pass on it. Then the release ritual.

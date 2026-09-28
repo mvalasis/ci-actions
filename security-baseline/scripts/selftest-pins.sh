@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# selftest-pins.sh — install-pinned.sh and the pins it reads, tested (v1.21.0).
+# selftest-pins.sh — install-pinned.sh and the pins it reads, tested (v1.21.0; npm locks v1.22.0).
 #
 #   bash security-baseline/scripts/selftest-pins.sh [--offline]
 #
@@ -10,8 +10,16 @@
 #     never borrow the pinned digest; the lock pins every package `==` with hashes and allows
 #     wheels only; and no action.yml or workflow downloads a release binary, pip-installs, pipes
 #     curl into a shell or tar, or npm-installs a package at anything but an exact version, outside
-#     the installer.
-# (N) the real release assets: each binary's pin installs; the digest of another asset, a version
+#     the installer. npm (v1.22.0): no action.yml or workflow runs a local `npm install` (it resolves
+#     ranges; a committed lock goes through `npm ci`); every committed package-lock.json names each
+#     package with a registry tarball and its sha512 integrity, and agrees with its package.json,
+#     whose dependencies are exact versions; a11y-audit installs through scripts/install.sh (`npm
+#     ci --ignore-scripts` on its lock, Chrome for Testing through the installer), and audit.sh's
+#     token-scope note names the pa11y and pa11y-ci the lock installs, so a lock that moves either
+#     fails here until that scope is measured again; every osv-scanner.toml ignore says why and
+#     expires within 100 days. Needs node.
+# (N) the real release assets (the four binaries; chrome-for-testing's install is a11y-audit's
+#     real-install self-test): each binary's pin installs; the digest of another asset, a version
 #     moved without a digest (nothing downloaded: a curl stub on PATH logs every call, and a
 #     control proves the stub is the curl the installer runs), a malformed digest or version, a
 #     failed download and an unknown tool each exit 1 with their own message and install nothing,
@@ -35,6 +43,7 @@ installer="$sb/scripts/install-pinned.sh"
 pins="$sb/tool-pins.txt"
 lock="$sb/semgrep-requirements.txt"
 tools='gitleaks trufflehog osv-scanner hadolint'
+pinned="$tools chrome-for-testing"
 offline=0
 [ "${1:-}" = --offline ] && offline=1
 
@@ -64,12 +73,14 @@ pin_version() { awk -v t="$1" '$1 == t { print $2 }' "$pins"; }
 pin_sha() { awk -v t="$1" '$1 == t { print $3 }' "$pins"; }
 
 echo "== (O) the pins agree with every action.yml, and nothing installs around them"
-for t in $tools; do
+for t in $pinned; do
 	check "tool-pins.txt: exactly one pin for $t" [ "$(awk -v t="$t" '$1 == t' "$pins" | wc -l | tr -d ' ')" = 1 ]
 	check "tool-pins.txt: $t's digest is 64 lowercase hex digits" eval '[[ "$(pin_sha '"$t"')" =~ ^[0-9a-f]{64}$ ]]'
 done
-check "tool-pins.txt: pins these four tools and nothing else" \
-	[ "$(awk '!/^#/ && NF { print $1 }' "$pins" | sort | tr '\n' ' ')" = "gitleaks hadolint osv-scanner trufflehog " ]
+check "tool-pins.txt: pins these five tools and nothing else" \
+	[ "$(awk '!/^#/ && NF { print $1 }' "$pins" | sort | tr '\n' ' ')" = "chrome-for-testing gitleaks hadolint osv-scanner trufflehog " ]
+check "tool-pins.txt: chrome-for-testing's version is a Chrome build (four numbers)" \
+	eval '[[ "$(pin_version chrome-for-testing)" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]'
 for pair in gitleaks:gitleaks trufflehog:trufflehog osv:osv-scanner hadolint:hadolint; do
 	input="${pair%%:*}-version" t="${pair#*:}"
 	check "security-baseline/action.yml: $input defaults to $t's pin ($(pin_version "$t"))" \
@@ -104,7 +115,68 @@ around="$(grep -nE 'releases/download|pip3? install([^a-z]|$)|curl[^|]*\|[[:spac
 check "no action.yml or workflow downloads a release, pip-installs or pipes curl into sh/tar outside install-pinned.sh${around:+: $around}" [ -z "$around" ]
 floating="$(grep -nE 'npm (i|install) (-g|--global)' "${surfaces[@]}" | grep -vE '@[0-9]+\.[0-9]+\.[0-9]+([^0-9A-Za-z.-]|$)' | sed "s|^$root/||")"
 check "every global npm install names an exact version${floating:+: $floating}" [ -z "$floating" ]
-check "a11y-audit installs an exact pa11y-ci" grep -qE 'npm install -g pa11y-ci@[0-9]+\.[0-9]+\.[0-9]+$' "$root/a11y-audit/action.yml"
+local_install="$(grep -nE 'npm (i|install)([[:space:]]|$)' "${surfaces[@]}" | grep -vE 'npm (i|install) (-g|--global)' | sed "s|^$root/||")"
+check "no action.yml or workflow runs a local npm install (a committed lock goes through npm ci)${local_install:+: $local_install}" [ -z "$local_install" ]
+
+# Every committed npm lock (and any new one not yet ignored): a registry tarball and a sha512
+# integrity for each package, in step with its package.json, whose dependencies are exact.
+npm_locks="$(git -C "$root" ls-files -co --exclude-standard -- '*package-lock.json' 2>/dev/null)"
+check "the repo has npm locks to check (git ls-files found some)" [ -n "$npm_locks" ]
+for l in $npm_locks; do
+	problems="$(node -e '
+		const fs = require("fs"), path = require("path");
+		const file = process.argv[1], lock = JSON.parse(fs.readFileSync(file, "utf8"));
+		const pkg = JSON.parse(fs.readFileSync(path.join(path.dirname(file), "package.json"), "utf8"));
+		const out = [];
+		if (lock.lockfileVersion !== 3) out.push(`lockfileVersion ${lock.lockfileVersion}, not 3`);
+		for (const [k, v] of Object.entries(lock.packages || {})) {
+			if (!k) continue;
+			if (v.link) { out.push(`${k} is a link`); continue; }
+			if (!/^https:\/\/registry\.npmjs\.org\/.+\.tgz$/.test(v.resolved || "")) out.push(`${k} resolved from ${v.resolved}`);
+			if (!/^sha512-[A-Za-z0-9+/]{86}==$/.test(v.integrity || "")) out.push(`${k} has no sha512 integrity`);
+		}
+		for (const f of ["devDependencies", "optionalDependencies", "peerDependencies", "bundleDependencies", "bundledDependencies"]) if (pkg[f]) out.push(`package.json has ${f}`);
+		const deps = pkg.dependencies || {};
+		for (const [n, r] of Object.entries(deps)) if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(r)) out.push(`package.json: ${n} ${r} is not an exact version`);
+		const root = (lock.packages || {})[""] || {};
+		if (JSON.stringify(root.dependencies || {}) !== JSON.stringify(deps)) out.push("the lock root and package.json list different dependencies");
+		for (const [n, r] of Object.entries(deps)) if (((lock.packages || {})[`node_modules/${n}`] || {}).version !== r) out.push(`the lock does not install ${n} ${r}`);
+		if (!Object.keys(deps).length) out.push("package.json has no dependencies");
+		console.log(out.join("; "));' "$root/$l" 2>&1)"
+	check "$l: every package a registry tarball with a sha512 integrity, in step with package.json's exact versions${problems:+ ($problems)}" [ -z "$problems" ]
+done
+
+# a11y-audit (v1.22.0): pa11y-ci from its lock with no lifecycle script, Chrome for Testing from its pin.
+a11y="$root/a11y-audit"
+code_of() { grep -vE '^[[:space:]]*#' "$1"; }
+check "a11y-audit/action.yml installs through scripts/install.sh and runs no npm or npx itself" \
+	eval 'grep -q "scripts/install.sh" "$a11y/action.yml" && ! code_of "$a11y/action.yml" | grep -qE "(^|[^A-Za-z])(npm|npx)([^A-Za-z]|$)"'
+check "a11y-audit/scripts/install.sh copies the vendored lock and runs npm ci --ignore-scripts on it" \
+	eval 'code_of "$a11y/scripts/install.sh" | grep -q "package-lock.json" && code_of "$a11y/scripts/install.sh" | grep -qE "npm ci( --[a-z][a-z=-]*)* --ignore-scripts([[:space:]]|[)]|$)" && ! code_of "$a11y/scripts/install.sh" | grep -qE "npm (i|install)([[:space:]]|$)"'
+check "a11y-audit/scripts/install.sh installs chrome-for-testing through install-pinned.sh, with no PIN_* from the job" \
+	eval 'code_of "$a11y/scripts/install.sh" | grep -q "security-baseline/scripts/install-pinned.sh" && code_of "$a11y/scripts/install.sh" | grep -qE "env -u PIN_VERSION -u PIN_SHA256 .*\"\\\$installer\" chrome-for-testing"'
+a11y_lockv() { node -p 'require(process.argv[1]).packages["node_modules/" + process.argv[2]].version' "$a11y/package-lock.json" "$1" 2>/dev/null; }
+scope_line="$(grep -m1 'TOKEN SCOPE' "$a11y/scripts/audit.sh")"
+check "audit.sh's token-scope note names the pa11y $(a11y_lockv pa11y) and pa11y-ci $(a11y_lockv pa11y-ci) the lock installs (a lock moving either re-measures the scope first): '$scope_line'" \
+	eval 'has "$scope_line" "pa11y@$(a11y_lockv pa11y) " && has "$scope_line" "pa11y-ci@$(a11y_lockv pa11y-ci)"'
+
+# osv-scanner reads an osv-scanner.toml beside a lock: every ignore in one says why, and expires.
+for t in $(git -C "$root" ls-files -co --exclude-standard -- '*osv-scanner.toml' 2>/dev/null); do
+	problems="$(node -e '
+		const fs = require("fs");
+		const blocks = fs.readFileSync(process.argv[1], "utf8").split(/^\[\[IgnoredVulns\]\][ \t]*$/m).slice(1);
+		const out = [], limit = Date.now() + 100 * 86400e3;
+		if (!blocks.length) out.push("no [[IgnoredVulns]] entry");
+		for (const b of blocks) {
+			const get = (k) => ((b.match(new RegExp(`^${k}[ \t]*=[ \t]*(.+)$`, "m")) || [])[1] || "").trim();
+			const id = get("id").replace(/"/g, "") || "(no id)", until = Date.parse(get("ignoreUntil"));
+			if (!/^"[^"]{20,}"$/.test(get("reason"))) out.push(`${id}: no reason`);
+			if (!until) out.push(`${id}: no ignoreUntil`);
+			else if (until > limit) out.push(`${id}: ignoreUntil ${get("ignoreUntil")} is more than 100 days out`);
+		}
+		console.log(out.join("; "));' "$root/$t" 2>&1)"
+	check "$t: every ignore gives a reason and expires within 100 days${problems:+ ($problems)}" [ -z "$problems" ]
+done
 
 if [ "$offline" = 1 ]; then
 	echo "== $n assertions (offline only)"

@@ -1,0 +1,9 @@
+{
+  "name": "ci-actions-a11y-audit",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WCAG audit of live URLs with pa11y-ci. Installed with npm ci from the lockfile beside this file, into a private dir; Chrome for Testing comes from security-baseline/tool-pins.txt.",
+  "dependencies": {
+    "pa11y-ci": "4.1.1"
+  }
+}

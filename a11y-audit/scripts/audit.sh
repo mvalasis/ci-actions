@@ -149,20 +149,24 @@ urls_json=$(printf '%s\n' "$urls" | sed 's#.*#"&"#' | paste -sd, -)
 # the race; the cookie removes the reload deterministically). Harmless without
 # Guest Mode. X-Verify-Source is added when a token is set (WAF/CF bypass).
 #
-# TOKEN SCOPE (verified against pa11y@9.1.1 / pa11y-ci@4.1.1): these go into
-# pa11y-ci's `defaults.headers`, which pa11y applies via first-request-only
-# Puppeteer request interception — NOT page.setExtraHTTPHeaders. Its handler
-# overrides headers only while an `interceptionHandled` flag is false, then sets
-# it true (lib/pa11y.js: "We only want to make changes to the first request …
-# which is the request for the page we're testing"). So X-Verify-Source rides
-# ONLY the navigation request to each audited URL — never a cross-origin
-# subresource (fonts/CDNs/analytics) and never a cross-origin redirect target
-# (the 3xx target is a later request → empty overrides → no token). The token is
-# therefore confined to the first-party origins you point this action at. This
-# no-broadcast property depends on pa11y NOT switching to setExtraHTTPHeaders, so
-# the `pa11y-ci@4` pin (see action.yml install step) is a SECURITY control —
-# re-audit token scope on any pa11y-ci major bump. (`_lscache_vary=1` is a public
-# literal, not a secret; only X-Verify-Source is sensitive.)
+# TOKEN SCOPE (measured on pa11y@9.1.1 / pa11y-ci@4.1.1 with Chrome for Testing 148, the
+# versions the lock installs): these go into pa11y-ci's `defaults.headers`, which
+# pa11y applies via first-request-only Puppeteer request interception — NOT
+# page.setExtraHTTPHeaders. Its handler overrides headers only while an
+# `interceptionHandled` flag is false, then sets it true (lib/pa11y.js: "We only
+# want to make changes to the first request … which is the request for the page
+# we're testing"). So X-Verify-Source rides ONLY the navigation request to each
+# audited URL — never a subresource or a fetch, first- or third-party
+# (fonts/CDNs/analytics), and never a redirect target (the 3xx target is a later
+# request → empty overrides → no token). The token is therefore confined to the
+# first-party origins you point this action at. This no-broadcast property depends
+# on pa11y NOT switching to setExtraHTTPHeaders, so the lock's pa11y is a SECURITY
+# control. The real-install self-test (selftest-install.sh + selftest-fixtures.mjs)
+# measures the scope against two loopback origins on every change to the lock and
+# weekly, and selftest-pins.sh fails while the versions on the first line of this
+# note are not the lock's: a lock that moves pa11y or pa11y-ci is measured again
+# before it ships. (`_lscache_vary=1` is a public literal, not a secret; only
+# X-Verify-Source is sensitive.)
 hdr_pairs='"Cookie": "_lscache_vary=1"'
 [ -n "${VERIFY_TOKEN:-}" ] && hdr_pairs="$hdr_pairs, \"X-Verify-Source\": \"$VERIFY_TOKEN\""
 headers_json="\"headers\": { $hdr_pairs }, "

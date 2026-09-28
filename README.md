@@ -65,6 +65,32 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.22.0** *(tag not yet cut; lands with the next `v1` move)* — `a11y-audit` installs every
+package from a vendored lockfile and runs a Chrome checked against a SHA-256. v1.21.0 pinned
+`pa11y-ci@4.1.1` itself, but its dependencies (pa11y, puppeteer, cheerio, lodash and the rest)
+still resolved within their ranges on every caller run, and puppeteer's postinstall downloaded
+Chromium unchecked. Now `a11y-audit/scripts/install.sh` runs `npm ci --omit=dev --ignore-scripts`
+on `a11y-audit/package-lock.json` (162 packages, each a registry tarball with its sha512 integrity,
+resolved to what was published by 2026-09-21) in a private dir under `$RUNNER_TEMP`, and installs
+Chrome for Testing 148.0.7778.97, the build puppeteer-core 24.43.1 launches, through
+`install-pinned.sh` from a new line in `tool-pins.txt`. Google publishes no checksum for Chrome for
+Testing, so that pin is the digest of a download, matched against the md5 the bucket records for
+it and an object generation that shows it never changed since its upload; what that cannot prove
+is in `a11y-audit/README.md` §Notes. The verify-token's scope is now measured, not only read: a
+real-install self-test drives the real pa11y-ci and Chrome at two loopback origins and fails if the
+token reaches anything but the sitemap fetch and the audited navigations (no subresource, no fetch,
+no redirect target); a pa11y with its first-request guard removed fails it. `a11y-audit-selftest.yml`
+runs it and the action end to end on every change and on Mondays, with `deps-currency` over the
+lock failing on any advisory; `a11y-audit/osv-scanner.toml` carries the one reviewed exception
+(extract-zip 2.0.1, reached only by the browser download a11y-audit never runs), expiring
+2026-12-28. `selftest-pins.sh` gains offline legs for every npm lock in the repo, a11y-audit's
+install shape, osv exceptions and the new pin (24 targeted mutants each turn them red), and
+`lint.yml` runs them on every push and PR. Refresh procedure: `a11y-audit/README.md` §Refreshing
+the lockfile. **Caller-visible:** the same pa11y-ci, pa11y and puppeteer versions and the same
+Chrome build callers already resolved, now checked first; `pa11y-ci` is no longer left on the job's
+`PATH` after the action (no caller uses it); the action needs a Linux x86_64 runner (every caller
+is on `ubuntu-latest`). No input changed. Nothing newly blocks.
+
 **v1.21.0** — every third-party tool the actions
 install is checked against a SHA-256 before it is installed. Until now the release binaries were
 pinned by release tag only (`curl | tar`, trufflehog's without `-f`), semgrep was whatever `pip

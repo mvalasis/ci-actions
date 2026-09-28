@@ -4,12 +4,17 @@
 #
 #   install-pinned.sh <tool>
 #     tool         gitleaks | trufflehog | osv-scanner | hadolint   (release binaries, ../tool-pins.txt)
+#                  chrome-for-testing                             (a zip, ../tool-pins.txt; a11y-audit)
 #                  semgrep                                        (pip, ../semgrep-requirements.txt)
 #     PIN_VERSION  the caller's <tool>-version input; '' = the pinned version
 #     PIN_SHA256   the caller's <tool>-sha256 input; '' = the pinned digest. REQUIRED when
 #                  PIN_VERSION is not the pinned version: a caller who moves a pin names the digest
 #                  of what they moved it to, or nothing is installed.
-#     INSTALL_DIR  where the tool lands (default /usr/local/bin; sudo only when it is not writable)
+#     INSTALL_DIR  where the tool lands (default /usr/local/bin; sudo only when it is not writable).
+#                  chrome-for-testing is a directory: it lands as $INSTALL_DIR/chrome-linux64/, its
+#                  executable chrome-linux64/chrome, and INSTALL_DIR must be writable (no sudo).
+#                  No action input moves it: a11y-audit installs the pin, the build puppeteer-core in
+#                  a11y-audit/package-lock.json launches.
 #
 # Until v1.21.0 the release binaries were pinned by release TAG only (`curl | tar`, trufflehog's
 # without -f) and semgrep was whatever `pip install semgrep` resolved on the day: a replaced
@@ -104,8 +109,8 @@ fi
 
 pins="$here/../tool-pins.txt"
 case "$tool" in
-gitleaks | trufflehog | osv-scanner | hadolint) ;;
-*) die "unknown tool '$tool' (gitleaks, trufflehog, osv-scanner, hadolint, semgrep)" ;;
+gitleaks | trufflehog | osv-scanner | hadolint | chrome-for-testing) ;;
+*) die "unknown tool '$tool' (gitleaks, trufflehog, osv-scanner, hadolint, chrome-for-testing, semgrep)" ;;
 esac
 [ -f "$pins" ] || die "$tool: the pin file $pins is missing"
 pin="$(awk -v t="$tool" '$1 == t { print $2, $3; n++ } END { exit n == 1 ? 0 : 1 }' "$pins")" ||
@@ -138,6 +143,12 @@ osv-scanner)
 hadolint)
 	url="https://github.com/hadolint/hadolint/releases/download/v${version}/hadolint-Linux-x86_64"
 	;;
+chrome-for-testing)
+	# The URL puppeteer's own browser download uses for this build (@puppeteer/browsers). Chrome for
+	# Testing publishes no checksum or signature, so the pin is a digest hashed at pin time and
+	# cross-checked against the bucket's own metadata (tool-pins.txt says how).
+	url="https://storage.googleapis.com/chrome-for-testing-public/${version}/linux64/chrome-linux64.zip"
+	;;
 esac
 
 # -f: an HTTP error fails here instead of saving the error page as the "binary" (the v1.4.2
@@ -147,6 +158,17 @@ curl -fsSL --retry 3 --proto '=https' --proto-redir '=https' -o "$tmp/asset" "$u
 got="$(sha256_of "$tmp/asset")"
 [ "$got" = "$want" ] ||
 	die "$tool $version: SHA-256 mismatch, refusing to install it. Downloaded $got, expected $want ($why), from $url. Nothing was installed."
+if [ "$tool" = chrome-for-testing ]; then
+	# Extracted from the verified file only, into this run's temp dir, and moved into place whole:
+	# a failure anywhere before the move leaves INSTALL_DIR as it was.
+	command -v unzip >/dev/null 2>&1 || die "$tool $version: unzip is not installed, so the verified archive cannot be extracted. Nothing was installed."
+	unzip -q "$tmp/asset" -d "$tmp/x" || die "$tool $version: unzip failed on the verified archive $url. Nothing was installed."
+	[ -x "$tmp/x/chrome-linux64/chrome" ] || die "$tool $version: chrome-linux64/chrome is not in the verified archive $url. Nothing was installed."
+	{ mkdir -p "$dir" && [ -w "$dir" ] && rm -rf "$dir/chrome-linux64" && mv "$tmp/x/chrome-linux64" "$dir/chrome-linux64"; } ||
+		die "$tool $version: cannot install it into $dir (it must be writable)"
+	echo "$tool $version: sha256 $got verified against $why → $dir/chrome-linux64/chrome"
+	exit 0
+fi
 src="$tmp/asset"
 if [ -n "$member" ]; then
 	tar -xzf "$tmp/asset" -C "$tmp" "$member" || die "$tool $version: $member is not in the verified archive $url"

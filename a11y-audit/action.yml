@@ -32,34 +32,35 @@ inputs:
     default: '25'
   verify-token:
     description: >-
-      Optional WAF/CF-bypass token, sent as X-Verify-Source. Scope (verified on
-      pa11y-ci@4/pa11y@9): it rides ONLY the navigation request to each audited
-      URL and the sitemap fetch — pa11y uses first-request-only request
-      interception, so it is NOT broadcast to cross-origin subresources or
-      redirect targets. Still a secret sent to the audited origin: point this
-      action only at first-party origins you trust, and prefer an origin-bound /
-      IP-allowlisted WAF rule over a portable bearer token where you can.
+      Optional WAF/CF-bypass token, sent as X-Verify-Source. Scope (measured on
+      pa11y-ci 4.1.1 / pa11y 9.1.1 / Chrome 148 by the real-install self-test): it
+      rides ONLY the navigation request to each audited URL and the sitemap fetch —
+      pa11y uses first-request-only request interception, so it is NOT sent with
+      any subresource or to a redirect target. Still a secret sent to the audited
+      origin: point this action only at first-party origins you trust, and prefer
+      an origin-bound / IP-allowlisted WAF rule over a portable bearer token where
+      you can.
     required: false
     default: ''
 
 runs:
   using: composite
   steps:
-    - name: Install pa11y-ci
+    - name: Install pa11y-ci (vendored lockfile) and Chrome for Testing (pinned)
+      id: install
       shell: bash
-      # pa11y-ci@4 → pa11y@9 → puppeteer 24 (modern Chromium). pa11y-ci@3's
-      # bundled Chromium 91 predates CSS cascade layers (@layer, Chrome 99+),
-      # so Tailwind v4 utilities were silently dropped → bogus contrast fails
-      # on any layered stylesheet. The modern engine renders the page as real
-      # users see it. The pin is ALSO a security control: pa11y@9 confines the
-      # verify-token to the first (navigation) request via request interception;
-      # a future major that switched to setExtraHTTPHeaders would broadcast it to
-      # every cross-origin subresource — re-audit token scope before bumping.
-      # An EXACT version (v1.21.0; was the floating `@4`), so a new pa11y-ci release reaches no
-      # caller until it is pinned here: npm never lets a published version's tarball change, and
-      # npm checks it against the registry's integrity hash. Its own dependencies still resolve
-      # within their ranges at install time (README §Notes).
-      run: npm install -g pa11y-ci@4.1.1
+      # pa11y-ci@4 → pa11y@9 → puppeteer 24 (modern Chromium). pa11y-ci@3's bundled Chromium 91
+      # predates CSS cascade layers (@layer, Chrome 99+), so Tailwind v4 utilities were silently
+      # dropped → bogus contrast fails on any layered stylesheet. The versions are ALSO a security
+      # control: pa11y@9 confines the verify-token to the first (navigation) request via request
+      # interception; a pa11y that switched to setExtraHTTPHeaders would broadcast it to every
+      # cross-origin subresource. The real-install self-test measures that scope on every change to
+      # the lock (a11y-audit-selftest.yml).
+      # Every package comes from the lockfile beside this file (`npm ci --ignore-scripts`, each
+      # tarball checked against its sha512 integrity), into a private dir under RUNNER_TEMP; Chrome
+      # for Testing comes from security-baseline/tool-pins.txt through install-pinned.sh, its zip
+      # checked against a SHA-256 before it is extracted (v1.22.0; README §Notes).
+      run: bash "${{ github.action_path }}/scripts/install.sh"
     - name: Audit
       shell: bash
       env:
@@ -70,4 +71,11 @@ runs:
         FAIL_ON_VIOLATIONS: ${{ inputs.fail-on-violations }}
         MAX_URLS: ${{ inputs.max-urls }}
         VERIFY_TOKEN: ${{ inputs.verify-token }}
-      run: bash "${{ github.action_path }}/scripts/audit.sh"
+        # The install step's private dirs: pa11y-ci alone on this step's PATH, and the pinned Chrome
+        # for puppeteer, which then downloads nothing. `:?` because an empty PATH entry is the
+        # current directory.
+        PA11Y_BIN: ${{ steps.install.outputs.bin }}
+        PUPPETEER_EXECUTABLE_PATH: ${{ steps.install.outputs.chrome }}
+      run: |
+        : "${PUPPETEER_EXECUTABLE_PATH:?the install step named no Chrome}"
+        PATH="${PA11Y_BIN:?the install step named no pa11y-ci dir}:$PATH" bash "${{ github.action_path }}/scripts/audit.sh"

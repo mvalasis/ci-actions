@@ -1,0 +1,22 @@
+# osv-scanner reads this beside package-lock.json (security-baseline's self-scan, and the weekly
+# advisory check in .github/workflows/a11y-audit-selftest.yml). Every entry expires: when its
+# ignoreUntil passes the advisory reports again and the weekly check fails, so it is looked at again.
+# Remove an entry the day the lock stops resolving the package. selftest-pins.sh fails an entry
+# with no reason, no ignoreUntil, or an ignoreUntil more than 100 days out.
+
+# extract-zip 2.0.1 (the last release; no fixed version exists): two symlink path-traversal advisories.
+# In the lock only as a dependency of @puppeteer/browsers 2.13.2, whose install() is its only caller:
+# the browser download behind puppeteer's postinstall and `puppeteer browsers install`. a11y-audit runs
+# neither. npm ci runs with --ignore-scripts, and Chrome for Testing comes from
+# security-baseline/scripts/install-pinned.sh, SHA-256-checked and extracted with unzip; pa11y-ci and
+# pa11y never call install(). It leaves the tree with pa11y 10 (puppeteer 25, @puppeteer/browsers 3
+# dropped extract-zip), once a pa11y-ci release depends on it.
+[[IgnoredVulns]]
+id = "GHSA-7pqw-9j4j-h8q3"
+ignoreUntil = 2026-12-28T00:00:00Z
+reason = "extract-zip is reached only by @puppeteer/browsers install(), which a11y-audit never runs (npm ci --ignore-scripts; Chrome comes from install-pinned.sh). Reviewed 2026-09-28."
+
+[[IgnoredVulns]]
+id = "GHSA-jmr9-qjv8-65gv"
+ignoreUntil = 2026-12-28T00:00:00Z
+reason = "extract-zip is reached only by @puppeteer/browsers install(), which a11y-audit never runs (npm ci --ignore-scripts; Chrome comes from install-pinned.sh). Reviewed 2026-09-28."

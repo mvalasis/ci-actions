@@ -42,6 +42,11 @@ name: lint
 # directory lands (entrypoints are discovered from `action.yml`, not a list) and
 # when the linter itself changes. ci-actions is public, so runner minutes on
 # GitHub-hosted standard runners are free.
+#
+# pins-offline (v1.22.0): selftest-pins.sh's offline legs on every push and PR. They read files
+# across the repo (every action.yml, every workflow, every npm lock, a11y-audit's install), while
+# security-baseline-selftest.yml, which also runs them, triggers only on security-baseline/**: a
+# change that installed a tool around its pin anywhere else went unchecked.
 
 on:
   push:
@@ -69,3 +74,13 @@ jobs:
 
       - name: No async stdout, dead or missing crash guards, secrets in argv, or stdout opened by path, in action entrypoints
         run: node .github/scripts/lint-entrypoint-output.mjs
+
+  pins-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Every tool pinned, every npm lock hashed, nothing installed around them (offline)
+        run: bash security-baseline/scripts/selftest-pins.sh --offline
