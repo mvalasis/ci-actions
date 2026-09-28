@@ -80,7 +80,7 @@ install step before anything runs, in every mode. **New inputs:** `semgrep-sha25
 `osv-sha256`); a caller overriding a `*-version` must set the matching digest, or the step fails.
 No caller overrides a version (checked across the fleet's workflows), so none has to change;
 `semgrep-version` now defaults to `1.178.0`, what callers already resolved. `selftest-pins.sh` holds
-the pins to every `action.yml` default and the installer to the real assets (17 targeted mutants
+the pins to every `action.yml` default and the installer to the real assets (20 targeted mutants
 each turn it red), and `security-baseline-selftest.yml`'s `pinned-installs` job runs the action with
 a wrong digest end to end. **Caller-visible:** the same tool versions, each checked first; semgrep's
 dependencies no longer land in the runner's user site-packages. Nothing newly blocks.

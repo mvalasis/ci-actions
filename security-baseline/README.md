@@ -780,9 +780,10 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   leaving a binary already in place as it was; a moved version with its right digest, and the pin
   spelled `sha256:<HEX>`, install. On Linux x86_64 (CI) the semgrep legs: a moved version with no
   digest is refused before a venv exists, another wheel's digest is refused by pip and links
-  nothing, the lock installs a semgrep that runs, and the override path installs. 17 targeted
-  mutants of the installer, the pins, the lock and the three `action.yml` files each turn it red;
-  one, the archive installed in place of its binary, survived until the ELF check was added.
+  nothing, the lock installs a semgrep that runs, and the override path installs. 20 targeted
+  mutants of the installer, the pins, the lock and the three `action.yml` files each turn it red
+  (the semgrep path's three on a Linux runner); one, the archive installed in place of its binary,
+  survived until the ELF check was added.
   The workflow's `pinned-installs` job first runs the action itself with a wrong
   `gitleaks-sha256` on a fresh runner and asserts the step failed after semgrep was installed and
   before any gitleaks was; `self-scan-smoke` installs every pin through `action.yml`.
