@@ -114,14 +114,54 @@ const LAMPAKIA_MAP = parseEndpointMap('#checkout-form => /api/checkout/create-or
   // map selector matching an element OUTSIDE any form (fully JS-driven surface)
   const html = `<div id="checkout-app"><div id="turnstile-checkout"></div></div>`;
   const map = parseEndpointMap('#turnstile-checkout => /api/checkout/create-order mode=json expect=turnstile_failed');
-  const { surfaces } = A(html, { url: 'https://www.lampakia.gr/checkout/', map });
+  const { surfaces, gatedForms } = A(html, { url: 'https://www.lampakia.gr/checkout/', map });
   check('formless mapped surface still probed (json token default turnstileToken)', surfaces.length === 1 && surfaces[0].tokenField === 'turnstileToken');
+  check('…and counts as one gated form', gatedForms === 1, `gatedForms=${gatedForms}`);
 }
 {
   // an empty sitekey string in an unrelated blob must NOT mask/false-fire next to a real one
   const html = `<form id="checkout-form"><div id="turnstile-checkout"></div></form><script>window.cfg={sitekey:""};</script><script>const turnstileSiteKey = "${REAL_KEY}";</script>`;
   const { findings } = A(html, { url: 'https://www.lampakia.gr/checkout/', map: LAMPAKIA_MAP });
   check('empty script match ignored when a non-empty sitekey exists', !findings.some((x) => x.sev === SEV.CRIT), JSON.stringify(findings));
+}
+
+console.log('\n# one form, several map entries (the lampakia checkout: the order + the abandoned-cart ping)');
+{
+  // Two gated JSON endpoints behind one client-rendered form, the second mapped through a widget
+  // container inside it; a hidden input stands in for the form's context. A third entry maps
+  // another form and must stay off this one.
+  const html = `<form id="checkout-form"><input type="hidden" name="brand" value="lampakia"><div id="turnstile-checkout"></div><div id="turnstile-cart-track"></div></form><form id="other-form"></form><script>const turnstileSiteKey = "${REAL_KEY}";</script>`;
+  const map = parseEndpointMap([
+    '#checkout-form => /api/checkout/create-order mode=json token=turnstileToken expect=turnstile_failed',
+    '#turnstile-cart-track => /api/cart/track mode=json token=cartToken expect=cart_gate',
+    '#other-form => /api/other mode=json expect=turnstile_failed',
+  ].join('\n'));
+  const { findings, surfaces, gatedForms } = A(html, { url: 'https://www.lampakia.gr/checkout/', map });
+  const mine = surfaces.filter((s) => s.form === 'form#checkout-form');
+  check('every entry matching the form is a probe target of that form, in map order', mine.map((s) => s.endpoint).join(' ') === 'https://www.lampakia.gr/api/checkout/create-order https://www.lampakia.gr/api/cart/track', JSON.stringify(surfaces));
+  check("each target keeps its own entry's token + expect", mine[0]?.tokenField === 'turnstileToken' && mine[0]?.expect === 'turnstile_failed' && mine[1]?.tokenField === 'cartToken' && mine[1]?.expect === 'cart_gate', JSON.stringify(mine));
+  check("the later entry carries the form's hidden inputs", mine[1]?.fields?.brand === 'lampakia' && mine[1]?.mapped === true, JSON.stringify(mine[1]));
+  check('an entry for another form stays off this one, and nothing is probed twice', surfaces.length === 3 && surfaces[2].form === 'form#other-form', JSON.stringify(surfaces));
+  check('gatedForms counts forms, not endpoints (2 forms, 3 targets)', gatedForms === 2, `gatedForms=${gatedForms}`);
+  check('a real key on a doubly-mapped form → no finding', findings.length === 0, JSON.stringify(findings));
+}
+{
+  const html = `<form id="checkout-form"><div id="turnstile-checkout"></div></form><script>const turnstileSiteKey = "1x00000000000000000000AA";</script>`;
+  const { findings, surfaces } = A(html, { map: parseEndpointMap('#checkout-form => /api/a mode=json\n#checkout-form => /api/b mode=json') });
+  check('a test sitekey is ONE critical however many entries map its form', sevOf(findings, 'sitekey-real').length === 1 && surfaces.length === 2, JSON.stringify(findings));
+}
+{
+  // the epn shape, form mode: a later entry without token=/fields= must still reach the bot gate
+  const html = `<form data-epn-form="contact" action="/api/contact"><input type="hidden" name="formType" value="contact"><div class="cf-turnstile" data-sitekey="${REAL_KEY}"></div></form>`;
+  const map = parseEndpointMap('[data-epn-form="contact"] => /api/contact expect=turnstile_failed\n.cf-turnstile => /api/callback expect=turnstile_failed');
+  const { findings, surfaces } = A(html, { map });
+  check("form mode: the later entry gets the widget's token field and the routing field", surfaces.length === 2 && surfaces[1].tokenField === 'cf-turnstile-response' && surfaces[1].fields.formType === 'contact' && surfaces[1].widgetType === 'turnstile', JSON.stringify(surfaces));
+  check('…and no widget-not-static INFO for a form whose widget is static', !ids(findings).includes('widget-not-static'), JSON.stringify(findings));
+}
+{
+  const map = parseEndpointMap('#checkout-form => https://[bad/api mode=json\n#checkout-form => /api/cart/track mode=json');
+  const { findings, surfaces } = A('<form id="checkout-form"></form>', { url: 'https://www.lampakia.gr/checkout/', map });
+  check('an entry whose endpoint is no URL is named in a WARN, and the next entry is still probed', surfaces.length === 1 && surfaces[0].endpoint === 'https://www.lampakia.gr/api/cart/track' && findings.some((x) => x.id === 'endpoint-unknown' && x.sev === SEV.WARN && x.msg.includes('=> https://[bad/api')), JSON.stringify({ findings, surfaces }));
 }
 
 console.log('\n# probe bodies');
@@ -180,6 +220,8 @@ const PAGES = {
   '/page-jsdriven.html': `<html><body><form id="checkout-form"><div id="turnstile-checkout"></div></form><script>const turnstileSiteKey = "${REAL_KEY}";</script></body></html>`,
   // the epn shape: a hidden routing field the handler checks BEFORE the bot gate
   '/page-routed.html': `<html><body><form data-epn-form="contact" method="post" action="/api/routed-reject"><input type="hidden" name="formType" value="contact"><div class="cf-turnstile" data-sitekey="${REAL_KEY}"></div></form></body></html>`,
+  // one client-rendered form fronting two gated endpoints (the lampakia checkout shape)
+  '/page-two-endpoints.html': `<html><body><form id="checkout-form"><input type="hidden" name="formType" value="contact"><div id="turnstile-checkout"></div><div id="turnstile-cart-track"></div></form><script>const turnstileSiteKey = "${REAL_KEY}";</script></body></html>`,
   // a test key carrying a planted workflow command: sitekey-real quotes the raw key, newline included
   '/page-hostile.html': '<html><body><form action="/api/reject"><div class="cf-turnstile" data-sitekey="1x00000000000000000000AA&#10;::error title=forged::pwned-key"></div></form></body></html>',
 };
@@ -278,6 +320,26 @@ function runCli(extraEnv) {
   });
   check('e2e routed: hidden formType reaches the bot gate → exit 0', r.code === 0, `${r.stderr} ${r.summary}`);
   check('e2e routed: gate signature present in reject', r.summary.includes('hard reject') && r.summary.includes('signature "turnstile_failed" present'), r.summary);
+}
+// one form, two entries: the second (a widget container inside the form, form mode) needs the
+// form's hidden routing field to reach its bot gate — probed as a formless surface it would
+// bounce off the router without the signature, a false CRITICAL
+{
+  const r = await runCli({
+    URLS: `${BASE}/page-two-endpoints.html`, FAIL_ON_CRITICAL: 'true',
+    FORM_ENDPOINTS: '#checkout-form => /api/reject mode=json token=turnstileToken expect=turnstile_failed\n#turnstile-cart-track => /api/routed-reject expect=turnstile_failed',
+  });
+  check('e2e two endpoints on one form: both reach their gate → exit 0', r.code === 0, `${r.stderr} ${r.summary}`);
+  check('e2e two endpoints on one form: page line counts 1 form, 2 endpoints', r.summary.includes('· 1 gated form(s) · 2 endpoints'), r.summary);
+  check('e2e two endpoints on one form: both probed, all four POSTs hard-rejected with the signature', r.summary.includes(`**${BASE}/api/reject**`) && r.summary.includes(`**${BASE}/api/routed-reject**`) && r.summary.split('signature "turnstile_failed" present').length === 5, r.summary);
+}
+// …and a skip-verifying SECOND endpoint on the form still blocks
+{
+  const r = await runCli({
+    URLS: `${BASE}/page-two-endpoints.html`, FAIL_ON_CRITICAL: 'true',
+    FORM_ENDPOINTS: '#checkout-form => /api/reject mode=json token=turnstileToken expect=turnstile_failed\n#checkout-form => /api/accept mode=json',
+  });
+  check('e2e skip-verify behind the second entry: exit 1, ACCEPTED reported for that endpoint', r.code === 1 && r.summary.includes(`${BASE}/api/accept (tokenless POST) — endpoint ACCEPTED`), `${r.stderr} ${r.summary}`);
 }
 // submit-probe off → sitekey checks only, skip-verify endpoint NOT probed
 {

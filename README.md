@@ -67,6 +67,23 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.23.0** — `form-protection` probes every `form-endpoints` entry that matches a form, not only
+the first. One form can front more than one gated endpoint: lampakia's `#checkout-form` places the
+order through `/api/checkout/create-order` and, from lampakia 1.0.83, sends the abandoned-cart ping
+through `/api/cart/track`, each behind its own Turnstile widget. Until now the first matching entry
+was the form's, and a later one was probed only by the pass for surfaces outside any form: without
+the form's hidden inputs or its widget's token field, with a false `widget-not-static` INFO on a
+form whose widget is static, and with the page's inline-script sitekey graded a second time (a test
+key counted as two criticals). A later form-mode entry whose handler reads a hidden routing field
+before its bot gate bounced off the router, which under `expect=` read as a false CRITICAL. Now each
+matching entry is a probe target of its form, in map order, and the form's sitekey is graded once.
+The page line counts forms and adds `· N endpoints` when a form maps more than one. An entry whose
+endpoint is not a URL gets an `endpoint-unknown` WARN that names it, and the form's other entries are
+still probed. **Caller-visible:** nothing for a form that one entry maps, which is every form of
+both callers today (epn-astro's two selectors never share a form; lampakia maps one), and the
+v1.22.0 fixtures pass unchanged. The new fixtures, and what turns them red: `form-protection/README.md`
+§Self-test. No input changed. Nothing newly blocks a current caller.
+
 **v1.22.0** — `a11y-audit` installs every
 package from a vendored lockfile and runs a Chrome checked against a SHA-256. v1.21.0 pinned
 `pa11y-ci@4.1.1` itself, but its dependencies (pa11y, puppeteer, cheerio, lodash and the rest)

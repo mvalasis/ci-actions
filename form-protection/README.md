@@ -9,7 +9,7 @@ and asserts the protection is REAL on both ends:
 |---|---|---|
 | `sitekey-real` | **CRITICAL** | `data-sitekey` missing/empty or a known **test/placeholder key** (Turnstile `1x`/`2x`/`3x` force-keys + the `0x000…0` placeholder, reCAPTCHA `6LeIxAcT…` universal test pair, hCaptcha `10000000-ffff-…` test keys; extend via `test-sitekeys`). A test key passes every client — the widget is decorative. |
 | `server-rejects` | **CRITICAL** | the resolved submit endpoint **accepts** (2xx) a tokenless POST or a junk-token POST — the server never calls siteverify (skip-verify). With `expect=` set, a reject **without** the bot-gate's signature is also CRITICAL: the reject came from field validation, so the gate never fired. |
-| `endpoint-unknown` | WARN | widget form with no `<form action>` and no `form-endpoints` match — probe skipped, add a mapping. |
+| `endpoint-unknown` | WARN | widget form with no `<form action>` and no `form-endpoints` match — probe skipped, add a mapping. Also a matching entry whose endpoint is not a URL (the finding names it). |
 | `no-gated-form` | WARN | a wired page has no widget form and no map match — widget removed / selector drift / wrong URL. |
 | `probe-inconclusive` | WARN | endpoint answered 3xx (PRG ambiguity) or 5xx — verification unconfirmed. |
 | `widget-not-static` | INFO | mapped surface whose widget is client-rendered; static sitekey check skipped (an inline-script `sitekey`/`turnstileSiteKey = "…"` literal is still classified when present). |
@@ -45,7 +45,11 @@ Mirrors `seo-aeo`: `urls` / `sitemap-url`, `fail-on-critical` (default
   ```
 
   The selector matches the form element **or anything inside it** (a widget
-  container id works). `mode=json` posts a JSON body (default: urlencoded).
+  container id works). **Every entry that matches a form is probed**, in map
+  order, so a form that posts to two gated endpoints carries two lines (since
+  v1.23.0). Each probe gets the form's hidden inputs and its widget's token
+  field, and the form's sitekey is graded once. `mode=json` posts a JSON body
+  (default: urlencoded).
   `token` names the token field for the junk-token probe (defaults:
   `cf-turnstile-response`/`g-recaptcha-response`/`h-captcha-response` by widget
   type in form mode, `turnstileToken` in json mode). `expect` is the bot-gate's
@@ -63,6 +67,9 @@ Mirrors `seo-aeo`: `urls` / `sitemap-url`, `fail-on-critical` (default
   `/api/contact`, reject = `403 {"ok":false,"error":"turnstile_failed"}`).
 - **lampakia-astro** — `/checkout/` (client-rendered widget, JSON endpoint
   `/api/checkout/create-order`, `token=turnstileToken expect=turnstile_failed`).
+  From lampakia 1.0.83 the same `#checkout-form` also fronts the abandoned-cart
+  ping `/api/cart/track` (its own invisible widget, same token field and
+  signature): a second entry on the one form.
 
 ## Where to read the result — job log, annotations, step summary
 
@@ -98,11 +105,16 @@ one. A client-rendered widget's sitekey is only checked when an inline-script
 literal exposes it. Without `expect=`, a non-2xx from ANY layer reads as a
 reject — set the signature wherever you know it. Endpoints that only accept
 authenticated/stateful POSTs may need `submit-probe: false` + a manual note.
+Each probed endpoint takes two POSTs at least 0.7 s apart, all from one runner
+IP: a per-IP rate rule spanning several of them (lampakia's 5 per 10 s over its
+checkout and cart routes) must allow two per endpoint, or its 429 reads as a
+reject without the signature.
 
 ## Self-test
 
 `node scripts/selftest.mjs` — engine fixtures (sitekey classification, map
-parsing, epn/lampakia-shaped pages, verdict table) plus a local `node:http`
+parsing, epn/lampakia-shaped pages, one form carrying several entries, verdict
+table) plus a local `node:http`
 server e2e that runs the real CLI subprocess against fixture pages and
 reject/accept/wrong-layer endpoints, asserting summaries AND exit codes.
 No external network. CI: `.github/workflows/form-protection-selftest.yml`
@@ -116,3 +128,8 @@ gives it — the case that crashes an `appendFileSync('/dev/stdout')` fallback o
 annotates as `::warning`; an unwritable summary still reaches the log under the caller's exit
 setting; and the early exits that run before the first `await` do not crash. 24 targeted mutants
 each turn it red.
+
+The several-entries fixtures (v1.23.0) include an e2e whose second entry reaches its bot gate only
+with the form's hidden routing field. The v1.22.0 engine turns 13 of their assertions red, and so
+does each of 12 targeted mutants (first entry only, later entries probed twice, a sitekey graded per
+entry, map order, a lost hidden field or token default, the counts).

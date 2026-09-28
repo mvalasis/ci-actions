@@ -182,11 +182,11 @@ function finish(code) {
       note(`- ⚠️ ${safe(url)} — HTTP ${r.status} (page missing?) — nothing to check here; fix the wired URL`);
       warn++; continue;
     }
-    const { findings, surfaces: pageSurfaces } = analyzeForms({ requestUrl: url, html: r.body, endpointMap: ENDPOINT_MAP, extraTestKeys: EXTRA_TEST_KEYS });
+    const { findings, surfaces: pageSurfaces, gatedForms } = analyzeForms({ requestUrl: url, html: r.body, endpointMap: ENDPOINT_MAP, extraTestKeys: EXTRA_TEST_KEYS });
     tally(findings, url);
     surfaces.push(...pageSurfaces);
     const icon = findings.some((x) => x.sev === SEV.CRIT) ? ICON.critical : findings.some((x) => x.sev === SEV.WARN) ? ICON.warn : ICON.ok;
-    note(`- ${icon} [${safe(url)}](${safe(url)})  \`HTTP ${r.status}\` · ${pageSurfaces.length} gated form(s)`);
+    note(`- ${icon} [${safe(url)}](${safe(url)})  \`HTTP ${r.status}\` · ${gatedForms} gated form(s)${pageSurfaces.length > gatedForms ? ` · ${pageSurfaces.length} endpoints` : ''}`);
     if (findings.filter((x) => x.sev !== SEV.OK).length) renderFindings(findings, '  ');
     else if (pageSurfaces.length) note(`  - ✅ ${pageSurfaces.map((s) => `${safe(s.form, 60)} → ${safe(s.endpoint, 100)}`).join(' · ')}`);
   }

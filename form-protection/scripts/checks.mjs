@@ -52,7 +52,9 @@ export function classifySitekey(raw, extra = []) {
 
 // One entry per line: `<css-selector> => <endpoint> [mode=json] [token=<field>] [expect=<substring>]`
 //   selector — matches the form element itself OR any element inside it (so a
-//              widget container id like #turnstile-checkout works too)
+//              widget container id like #turnstile-checkout works too). Every
+//              entry that matches a form is probed: a form fronting two gated
+//              endpoints carries two lines.
 //   endpoint — absolute URL or path (resolved against the page URL)
 //   mode     — form (default, urlencoded) | json
 //   token    — token field name for the junk-token probe (default: per widget
@@ -139,14 +141,17 @@ function resolveUrl(endpoint, base) {
   try { return new URL(endpoint, base).href; } catch { return null; }
 }
 
-// Analyze one fetched page. Returns { findings, surfaces } where each surface
-// is a probe target: { form, page, endpoint, mode, tokenField, expect,
-// widgetType, mapped }. Endpoints are NOT deduped here — the CLI dedupes
-// across pages before probing.
+// Analyze one fetched page. Returns { findings, surfaces, gatedForms } where
+// each surface is a probe target: { form, page, endpoint, mode, tokenField,
+// expect, widgetType, mapped }, and gatedForms counts the forms (and formless
+// mapped surfaces) they came from — a form mapped to two endpoints is one form
+// with two surfaces. Endpoints are NOT deduped here — the CLI dedupes across
+// pages before probing.
 export function analyzeForms({ requestUrl, html, endpointMap = [], extraTestKeys = [] }) {
   const $ = load(html);
   const findings = [];
   const surfaces = [];
+  let gatedForms = 0;
   const scriptKeys = sitekeysFromScripts($);
   const usedEntries = new Set();
 
@@ -165,7 +170,12 @@ export function analyzeForms({ requestUrl, html, endpointMap = [], extraTestKeys
     (nonEmpty.length ? nonEmpty : scriptKeys).forEach((k) => gradeKey(k, where));
   };
 
-  const mapEntryFor = (formEl) => endpointMap.find((e) => {
+  // Every entry that matches the form, in map order. One form can front several
+  // gated endpoints (lampakia's checkout places the order and sends the
+  // abandoned-cart ping, each behind its own widget): each gets a probe that
+  // carries this form's hidden inputs and widget token field, while the form's
+  // sitekey is graded once. A later entry left to pass 2 would get neither.
+  const mapEntriesFor = (formEl) => endpointMap.filter((e) => {
     if (e.error) return false;
     try { return $(formEl).is(e.selector) || $(formEl).find(e.selector).length > 0; } catch { return false; }
   });
@@ -174,9 +184,9 @@ export function analyzeForms({ requestUrl, html, endpointMap = [], extraTestKeys
   $('form').each((_, formEl) => {
     const $form = $(formEl);
     const widget = $form.find(WIDGET_UNION).first();
-    const entry = mapEntryFor(formEl);
-    if (entry) usedEntries.add(entry);
-    if (!widget.length && !entry) return; // plain form — not this gate's business
+    const entries = mapEntriesFor(formEl);
+    entries.forEach((e) => usedEntries.add(e));
+    if (!widget.length && !entries.length) return; // plain form — not this gate's business
 
     const where = `${describeForm($, formEl)} on ${requestUrl}`;
     let widgetType = null;
@@ -192,15 +202,6 @@ export function analyzeForms({ requestUrl, html, endpointMap = [], extraTestKeys
       else findings.push(f('widget-not-static', SEV.INFO, `${where} — mapped for probing but no bot widget (or sitekey) in the static HTML; widget is client-rendered, static sitekey-real check skipped`));
     }
 
-    // No/empty action ≠ "posts to the page": on a static host that masks the
-    // probe entirely, so treat it as unmapped and ask for a form-endpoints entry.
-    const action = ($form.attr('action') || '').trim();
-    const endpoint = entry ? resolveUrl(entry.endpoint, requestUrl)
-      : (action ? resolveUrl(action, requestUrl) : null);
-    if (!endpoint) {
-      findings.push(f('endpoint-unknown', SEV.WARN, `${where} — no <form action> and no form-endpoints entry matches; server-rejects probe skipped (add a form-endpoints mapping)`));
-      return;
-    }
     // Static control fields (routing discriminators like formType) that a
     // handler may check BEFORE its bot gate — without them a minimal probe
     // bounces off the router and never reaches the verification layer. Hidden
@@ -211,15 +212,33 @@ export function analyzeForms({ requestUrl, html, endpointMap = [], extraTestKeys
       const n = $(inp).attr('name');
       if (n && !tokenNames.has(n)) hiddenFields[n] = $(inp).attr('value') ?? '';
     });
-    surfaces.push({
-      form: describeForm($, formEl), page: requestUrl, endpoint,
-      mode: entry?.mode || 'form',
-      tokenField: entry?.token || (widgetType && TOKEN_FIELD[widgetType]) || '',
-      expect: entry?.expect || '',
-      fields: { ...hiddenFields, ...(entry?.fields || {}) },
-      widgetType: widgetType || 'client-rendered',
-      mapped: !!entry,
-    });
+    // One probe target per matching entry; with none, the form's own action
+    // (the null). No/empty action ≠ "posts to the page": on a static host that
+    // masks the probe entirely, so treat it as unmapped and ask for a
+    // form-endpoints entry.
+    const action = ($form.attr('action') || '').trim();
+    let probed = false;
+    for (const entry of entries.length ? entries : [null]) {
+      const endpoint = entry ? resolveUrl(entry.endpoint, requestUrl)
+        : (action ? resolveUrl(action, requestUrl) : null);
+      if (!endpoint) {
+        findings.push(f('endpoint-unknown', SEV.WARN, entry
+          ? `${where} — form-endpoints entry "${entry.selector} => ${entry.endpoint}" does not resolve to a URL; its server-rejects probe skipped`
+          : `${where} — no <form action> and no form-endpoints entry matches; server-rejects probe skipped (add a form-endpoints mapping)`));
+        continue;
+      }
+      surfaces.push({
+        form: describeForm($, formEl), page: requestUrl, endpoint,
+        mode: entry?.mode || 'form',
+        tokenField: entry?.token || (widgetType && TOKEN_FIELD[widgetType]) || '',
+        expect: entry?.expect || '',
+        fields: { ...hiddenFields, ...(entry?.fields || {}) },
+        widgetType: widgetType || 'client-rendered',
+        mapped: !!entry,
+      });
+      probed = true;
+    }
+    if (probed) gatedForms++;
   });
 
   // 2. map entries that match the page OUTSIDE any <form> (JS-driven surfaces
@@ -239,6 +258,7 @@ export function analyzeForms({ requestUrl, html, endpointMap = [], extraTestKeys
       expect: entry.expect, fields: entry.fields || {},
       widgetType: 'client-rendered', mapped: true,
     });
+    gatedForms++;
   }
 
   // 3. nothing gated at all on a page the caller explicitly listed → drift signal
@@ -246,7 +266,7 @@ export function analyzeForms({ requestUrl, html, endpointMap = [], extraTestKeys
     findings.push(f('no-gated-form', SEV.WARN, `${requestUrl} — no bot-widget form and no form-endpoints match on this page (widget removed, selector drifted, or the wrong URL is wired)`));
   }
 
-  return { findings, surfaces };
+  return { findings, surfaces, gatedForms };
 }
 
 // ---------- probe verdicts ----------
