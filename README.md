@@ -61,6 +61,24 @@ callers back at the last-good release; they pick it up on their next run).
 (`tag.gpgsign`). Without it, the move fails for lack of a message, or turns `v1`
 into an annotated tag that `git tag --points-at v1` no longer lists its anchor beside.
 
+**Moving `v1` onto an immutable anchor needs a peel — `HEAD` does not.** A `v1.x.y` tag is an
+annotated tag OBJECT; `v1` has always been a lightweight ref straight to a commit. `git tag -f
+--no-sign v1 v1.2.0` does **not** peel: it points `v1` at the annotated tag object itself (type
+`tag`), not the commit it wraps. Point at the commit explicitly with `git tag -f --no-sign v1
+"v1.2.0^{}"` — the quotes are required in zsh, where a bare `^{}` is glob/brace syntax and
+silently expands to nothing (no error, nothing moves). Verify the ref's TYPE after moving it, not
+just its sha: `git cat-file -t v1` must print `commit`.
+
+**Alternate transport, when a plain `git push`/`git tag` can't reach GitHub:** the same release
+can be cut through the REST API. Create the immutable annotated tag object with `POST
+/repos/<owner>/<repo>/git/tags` (`tag`, `message`, `object` = the target commit sha, `type` =
+`commit`), which returns the new tag object's own sha; then publish the ref with `POST
+/repos/<owner>/<repo>/git/refs` (`ref` = `refs/tags/v1.x.y`, `sha` = the tag object's sha from the
+previous call). An API-minted tag object gets a different sha than a local `git tag -a` of the
+same content would — don't keep both; delete the local tag and re-fetch so there is exactly one
+anchor. This transport mints the `v1.x.y` anchor only; moving the floating `v1` ref itself stays a
+plain `git tag -f` / `git push -f`, never a tag-object creation.
+
 A normal release = **one tag move**, not a commit in any caller repo. As of
 2026-06-29 every caller (`a11y-audit`, `seo-aeo`, `security-baseline`,
 `linkcheck`, `verify-homepage`) pins `@v1`. Where `v1` points is read live, never
