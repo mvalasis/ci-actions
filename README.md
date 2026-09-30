@@ -85,7 +85,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.24.1** (tag not yet cut) — test-only: v1.24.0's own self-test went red on its first push. The
+**v1.24.1** — test-only: v1.24.0's own self-test went red on its first push. The
 `isolate-files` leg for a file whose run is killed pinned `exit 1`, which is what `sh` gives where it
 execs the command (macOS); on the Linux runner, dash relays the kill as `exit 137` (`Killed`). The
 action counted the file as failing and blocked on both, as the leg intends: only the assertion was
@@ -93,7 +93,7 @@ platform-specific. It now accepts either, and was run against a non-exec `dash` 
 reproduce the runner's shape. No input or behaviour changed. `v1` moves onto v1.24.1 and never onto
 v1.24.0, whose anchor stays as the feature commit's marker: do not move `v1` onto it.
 
-**v1.24.0** (tag not yet cut) — `test-suite` can run each PHPUnit test file alone: `isolate-files`,
+**v1.24.0** (shipped with v1.24.1; `v1` never pointed at it) — `test-suite` can run each PHPUnit test file alone: `isolate-files`,
 with its own `fail-on-isolation`. PHPUnit loads every test file before it runs any, so a file that
 needs a harness only another file requires passes in the full suite and under `--order-by=random`,
 and fails alone. On 2026-09-28, six epn-billing files and two epn-jobs files in `mvalasis/epn.one`
