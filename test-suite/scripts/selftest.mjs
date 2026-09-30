@@ -406,9 +406,12 @@ console.log('\n# E2E — isolate-files runs each PHPUnit test file alone');
   const exit1 = runCli({ ...ISO, ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true', STUB_ALONE: 'exit1' });
   check('a file that fails alone with an assertion (PHPUnit exit 1) is named, with its defect line',
     exit1.exit === 1 && /^│ tests\/BorrowedHarnessTest\.php — exit 1 — Failed asserting that false is true\.$/m.test(exit1.stdout), exit1.stdout);
+  // The override runs through `sh -c`. Where sh execs the command (macOS) the child's signal is the
+  // run's and there is no exit status, which the action reports as 1; where it does not (dash on
+  // the Linux runner) sh relays the kill as 137. The file must be counted as failing either way.
   const killed = runCli({ ...ISO, ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true', STUB_ALONE: 'signal' });
-  check('a file whose run is killed (no exit status) counts as failing, never as passing',
-    killed.exit === 1 && /^│ tests\/BorrowedHarnessTest\.php — exit 1 — /m.test(killed.stdout) && /fail when run alone: tests\/BorrowedHarnessTest\.php$/m.test(killed.stdout), killed.stdout);
+  check('a file whose run is killed counts as failing, never as passing',
+    killed.exit === 1 && /^│ tests\/BorrowedHarnessTest\.php — exit (?:1|137) — /m.test(killed.stdout) && /fail when run alone: tests\/BorrowedHarnessTest\.php$/m.test(killed.stdout), killed.stdout);
 
   // Faults block whenever a check the caller made blocking could not run.
   const sinkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-iso-summary-dir-'));

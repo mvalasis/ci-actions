@@ -63,7 +63,7 @@
 // then `process.exit(...)`. They are exempt because they CANNOT hit the bug:
 // measured output is 4296–20998 bytes (contract-check 5907, seo-aeo 5387,
 // form-protection 5660, deps-currency 20998 since v1.19.5's exit-128 cases,
-// security-baseline 18307 since v1.19.5's exit-128 legs, test-suite 9091
+// security-baseline 18307 since v1.19.5's exit-128 legs, test-suite 9074
 // since v1.24.0's isolate-files legs, verify-homepage 4296 since v1.19.1's
 // report-routing legs) — at least three times under the 65,536-byte pipe buffer.
 // Do not "fix" them; the exemption is the finding, not an oversight.
