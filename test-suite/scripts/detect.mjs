@@ -160,3 +160,70 @@ export function verdict(exitCode, counts) {
   if (counts && counts.failed != null && counts.failed > 0) return STATUS.FAIL;
   return STATUS.FAIL; // any non-zero exit is a failure
 }
+
+// ---------- each test file alone (isolate-files, PHPUnit) ----------
+// PHPUnit LOADS every test file before it RUNS any, so a function or class that one file's harness
+// defines is present for every test in the run, whatever the order. A file that forgot to require
+// the harness it needs passes in the full suite and fails alone; --order-by=random reorders
+// execution, not loading, so only running each file on its own can show it.
+
+// POSIX single-quoting for one word of a shell command line (the test-command override runs via
+// a shell, and a test file's path is repo-controlled).
+export const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+
+// The files `--list-test-files` names, in its order: PHPUnit prints its banner, then
+// "Available test files:" and one " - <absolute path>" line per file. null when that header is
+// missing (not PHPUnit, or a PHPUnit without the option), so the caller fails closed rather than
+// running no file and calling that clean.
+export function parseTestFileList(output) {
+  const lines = String(output || '').split(/\r?\n/);
+  const at = lines.findIndex((l) => /^Available test files:\s*$/.test(l));
+  if (at < 0) return null;
+  const files = [];
+  for (const l of lines.slice(at + 1)) {
+    const m = l.match(/^ - (.+?)\s*$/);
+    if (m) files.push(m[1]);
+    else if (l.trim()) break;
+  }
+  return files;
+}
+
+// How to list the test files and run one of them with the command the suite ran: the test-command
+// override is a shell string, so the option or the quoted path is appended to it; a resolved argv
+// takes them as arguments, after `--` for a composer script. null for a stack with no per-file mode.
+// `probe` lists what a per-file run would load. It must be that one file: a command that already
+// names a path (`php phpunit.phar tests`) runs that path too, so every "alone" run would be the
+// whole suite and pass.
+export function isolationPlan({ stack, testCommand, argv, runner }) {
+  if (stack !== 'php') return null;
+  if (testCommand) {
+    return {
+      label: testCommand,
+      list: { shell: `${testCommand} --list-test-files` },
+      probe: (f) => ({ shell: `${testCommand} ${shellQuote(f)} --list-test-files` }),
+      file: (f) => ({ shell: `${testCommand} ${shellQuote(f)}` }),
+    };
+  }
+  if (!Array.isArray(argv) || !argv.length) return null;
+  const base = runner === 'composer-script' ? [...argv, '--'] : [...argv];
+  return {
+    label: argv.join(' '),
+    list: { argv: [...base, '--list-test-files'] },
+    probe: (f) => ({ argv: [...base, f, '--list-test-files'] }),
+    file: (f) => ({ argv: [...base, f] }),
+  };
+}
+
+// The line that says WHY a file failed alone. PHPUnit prints each defect as "N) Class::method"
+// followed by its message ("Error: Call to undefined function wp_json_encode()"); without one, the
+// last non-empty line (the "Tests: …" summary, or whatever a crash printed last).
+export function defectLine(output) {
+  const lines = String(output || '').split(/\r?\n/);
+  const at = lines.findIndex((l) => /^\d+\) \S/.test(l));
+  if (at >= 0) {
+    const next = lines.slice(at + 1).find((l) => l.trim());
+    if (next) return next.trim();
+  }
+  const rest = lines.filter((l) => l.trim());
+  return rest.length ? rest[rest.length - 1].trim() : '';
+}

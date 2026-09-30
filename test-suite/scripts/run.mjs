@@ -7,13 +7,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { STATUS, safe, resolveCommand, parseCounts, verdict } from './detect.mjs';
+import {
+  STATUS, safe, resolveCommand, parseCounts, verdict, parseTestFileList, isolationPlan, defectLine,
+} from './detect.mjs';
 
 const env = process.env;
 const WD = path.resolve(env.WORKING_DIRECTORY || '.');
 const STACK = (env.STACK || 'auto').trim();
 const TEST_COMMAND = (env.TEST_COMMAND || '').trim();
 const FAIL_ON_FAIL = (env.FAIL_ON_FAIL || 'false').trim() === 'true';
+const ISOLATE = (env.ISOLATE_FILES || 'false').trim() === 'true';
+const FAIL_ON_ISOLATION = (env.FAIL_ON_ISOLATION || 'false').trim() === 'true';
 
 // The step summary is written only when there is one; a local run prints the job-log mirror (say(),
 // below) and nothing else. `/dev/stdout` as the summary (the old fallback, and a local idiom) means
@@ -31,6 +35,11 @@ const ICON = { pass: '✅', fail: '❌', 'no-tests': '⚠️', 'no-stack': '⚠�
 const flush = () => { if (summaryFile) fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); };
 
 const MODE = FAIL_ON_FAIL ? 'block-on-fail' : 'report-only';
+const ISO_MODE = ISOLATE ? ` · isolate-files=${FAIL_ON_ISOLATION ? 'block' : 'report-only'}` : '';
+// A fault means a check did not run, so it blocks whenever a check the caller made blocking could
+// not run: the suite under fail-on-fail, or isolate-files under fail-on-isolation. Unset inputs
+// leave it equal to FAIL_ON_FAIL.
+const FAULT_BLOCKS = FAIL_ON_FAIL || (ISOLATE && FAIL_ON_ISOLATION);
 const WD_REL = safe(path.relative(process.cwd(), WD) || '.', 120);
 const TAIL_LINES = 20;
 const tailOf = (out, n = TAIL_LINES) => String(out).split('\n').filter((l) => l.trim()).slice(-n);
@@ -97,21 +106,70 @@ function runShell(cmd, cwd) {
   return { exit: r.status == null ? 1 : r.status, out, missing: false, signal: r.signal || null };
 }
 
+// isolate-files: PHPUnit LOADS every test file before it RUNS any, so what one file's harness
+// defines is there for all of them, whatever the order, and a file that forgot to require the
+// harness it needs passes in the full suite. `--list-test-files` names exactly the files the run
+// loads; each is then run alone, exit code authoritative. A listing that names no file is a fault,
+// never "nothing failed". So is a per-file run that would load more than its file: a test-command
+// that names a path of its own (`php phpunit.phar tests`) keeps loading it beside every file.
+function runIsolation(plan) {
+  const exec = (c) => (c.shell ? runShell(c.shell, WD) : runCommand(c.argv, WD));
+  const real = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(WD, p); } };
+  say(`test-suite: isolate-files — listing with ${safe(plan.label, 160)} --list-test-files, then running each file alone`);
+  const listed = exec(plan.list);
+  const files = parseTestFileList(listed.out);
+  if (listed.exit !== 0 || !files || !files.length) {
+    const why = !files ? `it exited ${listed.exit} with no "Available test files:" list` : !files.length ? 'it listed no test file' : `it exited ${listed.exit}`;
+    return { state: 'error', files: 0, failing: [], reason: `${plan.label} --list-test-files did not list the test files: ${why}. isolate-files needs a PHPUnit that has --list-test-files` };
+  }
+  const probed = parseTestFileList(exec(plan.probe(files[0])).out);
+  if (!probed || probed.length !== 1 || real(probed[0]) !== real(files[0])) {
+    return { state: 'error', files: 0, failing: [], reason: `${plan.label} with one test file appended would load ${probed ? probed.length : 'an unlisted set of'} files, not that one: the command already selects tests of its own, a path or a directory, so no run would be alone. Drop them from test-command` };
+  }
+  const base = real(WD);
+  const failing = [];
+  for (const f of files) {
+    const r = exec(plan.file(f));
+    if (r.exit !== 0) failing.push({ file: path.relative(base, f) || f, exit: r.exit, why: defectLine(r.out) });
+  }
+  return { state: failing.length ? 'fail' : 'pass', files: files.length, failing };
+}
+
+// The summary section, and the job log's list of files that fail alone (behind the gutter: a test
+// file's path and its output are repo-controlled).
+function renderIsolation(iso) {
+  note('**Each test file alone** (`isolate-files`)');
+  note('');
+  if (iso.state === 'skipped') { note(`- ⚠️ skipped — ${safe(iso.reason, 240)}`); note(''); return; }
+  if (iso.state === 'error') { note(`- ❌ ${safe(iso.reason, 240)}`); note(''); return; }
+  if (iso.state === 'pass') { note(`- ✅ each of ${iso.files} test file(s) passes alone`); note(''); return; }
+  note(`- ❌ ${iso.failing.length} of ${iso.files} test file(s) fail alone. Each passed in the full suite, so it depends on something another test file loads or leaves behind: PHPUnit loads every file before it runs any, which neither the full suite nor \`--order-by=random\` can show.`);
+  note('');
+  note('| file | exit | why |');
+  note('| --- | ---: | --- |');
+  for (const f of iso.failing) note(`| \`${safe(f.file, 120)}\` | ${f.exit} | ${safe(f.why, 200)} |`);
+  note('');
+  say(`::group::test files that fail alone — ${iso.failing.length} of ${iso.files}`);
+  for (const f of iso.failing) say(`${GUTTER}${safe(f.file, 160)} — exit ${f.exit} — ${safe(f.why, 240)}`);
+  say('::endgroup::');
+}
+
 (async () => {
   note('## 🧪 test-suite — per-stack test run');
   note('');
   note(`- mode: ${FAIL_ON_FAIL ? '**BLOCK on test failure**' : 'report-only (never blocks)'}`);
+  if (ISOLATE) note(`- isolate-files: ${FAIL_ON_ISOLATION ? '**BLOCK on a file that fails alone**' : 'report-only (never blocks)'}`);
   note(`- working dir: \`${WD_REL}\``);
 
   if (!fs.existsSync(WD)) {
     note(`- ❌ working-directory \`${safe(WD)}\` does not exist`);
     note('');
     note('**status: error**');
-    note(FAIL_ON_FAIL ? 'BLOCKED — working-directory missing.' : 'report-only — would BLOCK under fail-on-fail.');
-    finish('error', `working-directory ${safe(WD)} does not exist${FAIL_ON_FAIL ? '' : ' — report-only, would BLOCK under fail-on-fail:true'}`, FAIL_ON_FAIL ? 1 : 0);
+    note(FAULT_BLOCKS ? 'BLOCKED — working-directory missing.' : 'report-only — would BLOCK under fail-on-fail.');
+    finish('error', `working-directory ${safe(WD)} does not exist${FAULT_BLOCKS ? '' : ' — report-only, would BLOCK under fail-on-fail:true'}`, FAULT_BLOCKS ? 1 : 0);
   }
 
-  let label, runner, stack, exit, out;
+  let label, runner, stack, exit, out, argvRun = null;
 
   if (TEST_COMMAND) {
     // Explicit override — stack detection is for the label only.
@@ -121,7 +179,7 @@ function runShell(cmd, cwd) {
     runner = 'override';
     note(`- stack: ${stack === 'none' ? 'none (override)' : `**${stack}**`} · command: \`${safe(TEST_COMMAND, 160)}\` (override)`);
     note('');
-    say(`test-suite: mode=${MODE} · working-dir=${WD_REL} · stack=${stack} (override) · command=${safe(TEST_COMMAND, 160)}`);
+    say(`test-suite: mode=${MODE}${ISO_MODE} · working-dir=${WD_REL} · stack=${stack} (override) · command=${safe(TEST_COMMAND, 160)}`);
     const r = runShell(TEST_COMMAND, WD);
     exit = r.exit; out = r.out;
   } else {
@@ -166,15 +224,15 @@ function runShell(cmd, cwd) {
       if (pm !== 'npm' && !onPath(pm)) { argv = ['npm', 'run', 'test']; note(`- ℹ️ \`${pm}\` not on PATH — degraded to \`npm run test\``); }
     }
     // Echoed AFTER the PM-degrade check so the job log names the command actually executed.
-    say(`test-suite: mode=${MODE} · working-dir=${WD_REL} · stack=${stack}${res.pm ? ` (${res.pm})` : ''} · command=${safe(argv.join(' '), 160)}`);
+    say(`test-suite: mode=${MODE}${ISO_MODE} · working-dir=${WD_REL} · stack=${stack}${res.pm ? ` (${res.pm})` : ''} · command=${safe(argv.join(' '), 160)}`);
     const r = runCommand(argv, WD);
-    exit = r.exit; out = r.out;
+    exit = r.exit; out = r.out; argvRun = argv;
     if (r.missing) {
       note(`- ❌ test runner not found on PATH (\`${safe(argv[0])}\`) — install it in a prior step (e.g. \`${stack === 'node' ? 'npm ci' : 'composer install'}\`)`);
       note('');
       note('**status: error**');
-      note(FAIL_ON_FAIL ? 'BLOCKED — test runner missing.' : 'report-only — would BLOCK under fail-on-fail.');
-      finish('error', `test runner not found on PATH (${safe(argv[0])}) — install it in a prior step${FAIL_ON_FAIL ? '' : ' · report-only, would BLOCK under fail-on-fail:true'}`, FAIL_ON_FAIL ? 1 : 0);
+      note(FAULT_BLOCKS ? 'BLOCKED — test runner missing.' : 'report-only — would BLOCK under fail-on-fail.');
+      finish('error', `test runner not found on PATH (${safe(argv[0])}) — install it in a prior step${FAULT_BLOCKS ? '' : ' · report-only, would BLOCK under fail-on-fail:true'}`, FAULT_BLOCKS ? 1 : 0);
     }
   }
 
@@ -209,10 +267,22 @@ function runShell(cmd, cwd) {
   }
   echoTail(tail);
 
+  // ---- each test file alone (isolate-files) ----
+  // Only after a GREEN suite: a red one is already the verdict, and a file that fails alone beside
+  // it would say nothing the failure does not.
+  let iso = null;
+  if (ISOLATE) {
+    const plan = isolationPlan({ stack, testCommand: TEST_COMMAND, argv: argvRun, runner });
+    if (!plan) iso = { state: 'error', reason: `it runs PHPUnit test files one at a time, and stack ${stack} has none — set \`stack: php\` for a PHPUnit suite, or drop isolate-files` };
+    else if (status !== STATUS.PASS) iso = { state: 'skipped', reason: 'the suite failed, so its files were not run alone' };
+    else iso = runIsolation(plan);
+    renderIsolation(iso);
+  }
+
   // ---- verdict ----
   const failedN = counts.failed != null ? counts.failed : (status === STATUS.FAIL ? '≥1' : 0);
-  note(`**status: ${status}**`);
   if (status === STATUS.FAIL) {
+    note(`**status: ${status}**`);
     if (FAIL_ON_FAIL) {
       note(`BLOCKED — ${failedN} test failure(s) (exit ${exit}). Fix the failing tests above.`);
       finish(status, `BLOCKED — ${failedN} test failure(s) · ${countsLine} · exit ${exit}`, 1);
@@ -220,15 +290,34 @@ function runShell(cmd, cwd) {
     note(`report-only — ${failedN} test failure(s) (exit ${exit}) would BLOCK under \`fail-on-fail: true\`.`);
     finish(status, `report-only — ${failedN} test failure(s) · ${countsLine} · exit ${exit} — would BLOCK under fail-on-fail:true`, 0);
   }
-  note(`PASS — suite green${counts.passed != null ? ` (${counts.passed} passed${counts.skipped ? `, ${counts.skipped} skipped` : ''})` : ''}.`);
-  finish(status, `PASS — suite green · ${countsLine} · exit ${exit}`, 0);
+  if (iso && (iso.state === 'fail' || iso.state === 'error')) {
+    const isoStatus = iso.state === 'fail' ? STATUS.FAIL : STATUS.ERROR;
+    const named = iso.state === 'fail'
+      ? iso.failing.slice(0, 10).map((f) => safe(f.file, 120)).join(', ') + (iso.failing.length > 10 ? `, and ${iso.failing.length - 10} more` : '')
+      : '';
+    const what = iso.state === 'fail'
+      ? `the suite is green (${countsLine}) but ${iso.failing.length} of ${iso.files} test file(s) fail when run alone: ${named}`
+      : `the suite is green (${countsLine}) but isolate-files could not run: ${safe(iso.reason, 240)}`;
+    note(`**status: ${isoStatus}**`);
+    if (FAIL_ON_ISOLATION) {
+      note(`BLOCKED — ${what}.`);
+      finish(isoStatus, `BLOCKED — ${what}`, 1);
+    }
+    note(`report-only — ${what}. This would BLOCK under \`fail-on-isolation: true\`.`);
+    finish(isoStatus, `report-only — ${what} — would BLOCK under fail-on-isolation:true`, 0);
+  }
+  const isoPass = iso && iso.state === 'pass' ? ` · each of ${iso.files} test file(s) passes alone` : '';
+  note(`**status: ${status}**`);
+  note(`PASS — suite green${counts.passed != null ? ` (${counts.passed} passed${counts.skipped ? `, ${counts.skipped} skipped` : ''})` : ''}${isoPass ? `, and each of ${iso.files} test file(s) passes alone` : ''}.`);
+  finish(status, `PASS — suite green · ${countsLine} · exit ${exit}${isoPass}`, 0);
 })().catch((e) => {
   note(`- ❌ test-suite crashed: ${safe(String(e && e.stack || e), 400)}`);
   note('');
   note('**status: error**');
   // An unwritable summary lands here too, and finish()'s flush then throws again, inside this
   // handler: unguarded, node exits 1 with a bare stack whatever fail-on-fail says. By then finish()
-  // has put the crash line in the log, so the exit is all that is left to do.
-  const code = FAIL_ON_FAIL ? 1 : 0;
+  // has put the crash line in the log, so the exit is all that is left to do. A caller that asked
+  // isolate-files to block is owed a block too: a crash means it was not verified.
+  const code = FAULT_BLOCKS ? 1 : 0;
   try { finish('error', `test-suite crashed: ${safe(String(e && e.message || e), 200)}`, code); } catch { process.exit(code); }
 });

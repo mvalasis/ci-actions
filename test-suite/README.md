@@ -123,6 +123,51 @@ The action **runs** the suite — it does **not** install dependencies or the ru
 | `stack` | no | `auto` | `auto` \| `node` \| `php` \| `none`. Explicit value skips detection. |
 | `test-command` | no | `''` | Override the resolved command entirely (run via shell). |
 | `fail-on-fail` | no | `false` | `true` = BLOCK on a test failure; `false` = report-only. |
+| `isolate-files` | no | `false` | `true` = after a green suite, run each PHPUnit test file alone and name every file that fails ([below](#each-test-file-alone--isolate-files-phpunit)). PHP only. |
+| `fail-on-isolation` | no | `false` | `true` = BLOCK when a file fails alone or the files cannot be listed; `false` = report-only. Independent of `fail-on-fail`. |
+
+## Each test file alone — `isolate-files` (PHPUnit)
+
+PHPUnit **loads every test file before it runs any**. A function or class that one file's harness
+defines is therefore there for every test in the run, whatever the order: a file that forgot to
+require the harness it needs passes in the full suite and fails when run by itself.
+`--order-by=random` and `reverse` reorder execution, not loading, so they cannot show it either.
+Found 2026-09-28 in `mvalasis/epn.one`: eight files across two plugins exited non-zero alone and 0
+together, behind green enforcing jobs.
+
+With `isolate-files: 'true'`, after a **green** suite the action asks PHPUnit which files the run
+loads (`<command> --list-test-files`, the discovery the suite itself used) and runs each one alone
+(`<command> <file>`), exit code authoritative. Every file that fails alone is named, with its exit
+code and the line PHPUnit printed for its first defect:
+
+```
+test-suite: isolate-files — listing with php phpunit.phar --list-test-files, then running each file alone
+::group::test files that fail alone — 2 of 22
+│ tests/EJActivationSchemaTest.php — exit 2 — Error: Call to undefined function wp_json_encode
+│ tests/EJMigrationDdlTest.php — exit 2 — Error: Call to undefined function wp_json_encode
+::endgroup::
+test-suite: ❌ status=fail — BLOCKED — the suite is green (…) but 2 of 22 test file(s) fail when run alone: tests/EJActivationSchemaTest.php, tests/EJMigrationDdlTest.php
+```
+
+- **Its own switch.** `fail-on-isolation` (default `false`, report-only) is independent of
+  `fail-on-fail`, so a suite that already blocks can take this check report-mode-first.
+- **Only after a green suite.** A red suite is already the verdict, so its files are not run alone;
+  the summary says so.
+- **A listing that names no file is a fault, never a pass**: `status=error`, blocking under
+  `fail-on-isolation`. The runner must have `--list-test-files` (PHPUnit 12 does).
+- **The `test-command` must not select tests of its own.** The option and the quoted path are
+  appended to it, and PHPUnit runs every path it is given: `php phpunit.phar tests` plus a file
+  runs the whole suite again, so every file would "pass alone". Before running any file the action
+  lists what one per-file run would load (`<command> <file> --list-test-files`), and anything but
+  that one file is a fault (`status=error`) naming the problem. A plain PHPUnit invocation
+  (`php phpunit.phar`, `vendor/bin/phpunit`) is what it needs; a resolved `composer test` gets its
+  arguments after `--`.
+- **PHP stack only** (`stack: php`). On any other stack the check cannot run, which is a fault
+  like the two above.
+- **A fault blocks when a check you made blocking could not run.** A missing working-directory, a
+  missing runner or a crash exits 1 under `fail-on-isolation` as well as under `fail-on-fail`; the
+  never-block floors (no stack, no tests configured) still exit 0.
+- **Cost:** one PHPUnit start per test file, plus one listing, on top of the suite.
 
 ## Where to read the result — job log *and* step summary
 
@@ -186,6 +231,30 @@ and a log byte-identical to the Actions run's. Each case runs with stdout as a s
 socket stdout makes the `/dev/stdout` open fail (ENXIO), so if that failure were swallowed, a
 socket-only leg would pass on the CI runner against a duplicate print. An unwritable summary (a
 directory) is asserted to leave the verdict and the fault in the log and exit under `fail-on-fail`.
+
+`isolate-files` runs end to end over `selftest/php-isolation`, whose `phpunit-stub.mjs` prints
+PHPUnit's own shapes for a two-file suite that is green together while `BorrowedHarnessTest.php`
+dies alone; like PHPUnit it runs every path it is given. The legs cover:
+- unset, with output as before;
+- report-only and blocking, each naming the file with its defect line, and blocking with
+  `fail-on-fail` off;
+- the fix, where every file passes alone;
+- a red suite, where no file runs alone;
+- faults, in both modes and never a pass: a listing that fails, one that names no file, one that
+  names files but exits 1, a `test-command` that already names a path, and a node suite;
+- a file that fails with PHPUnit's exit 1, and one whose run is killed, both counted as failing;
+- a crash and a missing working-directory, which block under `fail-on-isolation` with
+  `fail-on-fail` off;
+- a hostile defect line, kept off line-start.
+
+The pure helpers are pinned too, including a path with a quote, `$(…)` and backticks run through a
+real `sh`. Seventeen mutants of the new code each turn a leg red: the author's eight, the five an
+adversarial review found surviving (a listing's exit ignored, an empty listing, PHPUnit's exit 1
+and a killed run read as passing, a crash that ignores `fail-on-isolation`), and four for the probe
+and fault rules. The offline legs set the env directly, so CI adds `isolate-files-wiring`, which
+calls the action through `action.yml` on that fixture three times. With the inputs on it must fail;
+with them unset it must pass; and with them on again after the fixture's file is fixed it must pass,
+so the failure is the check and not a crash.
 
 ```bash
 node test-suite/scripts/selftest.mjs    # exits non-zero on any regression

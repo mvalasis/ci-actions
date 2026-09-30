@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import {
   STATUS, safe, detectStack, detectNodePM, hasRealTestScript,
   resolveNodeCommand, resolvePhpCommand, resolveCommand, parseCounts, verdict,
+  shellQuote, parseTestFileList, isolationPlan, defectLine,
 } from './detect.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -312,6 +313,118 @@ console.log('\n# unwritable step summary — the verdict and the fault in the lo
     check(`${mode}: exit ${exit}, not an unhandled throw`, r.exit === exit && !/^\s+at /m.test(r.stderr), `exit=${r.exit} stderr=${JSON.stringify(r.stderr.slice(0, 200))}`);
   }
   fs.rmSync(sinkDir, { recursive: true, force: true });
+}
+
+console.log('\n# isolate-files — the pure helpers');
+{
+  const listing = 'PHPUnit 12.5.30 by Sebastian Bergmann and contributors.\n\nAvailable test files:\n - /r/tests/ATest.php\n - /r/tests/B Test.php\n';
+  const l = parseTestFileList(listing);
+  check('--list-test-files output → its files, in order', JSON.stringify(l) === JSON.stringify(['/r/tests/ATest.php', '/r/tests/B Test.php']), JSON.stringify(l));
+  check('no "Available test files:" header → null (not PHPUnit, or a PHPUnit without the option)', parseTestFileList('Unknown option "--list-test-files"') === null);
+  check('the header with no file under it → [] (a fault to the caller, never "nothing failed")', JSON.stringify(parseTestFileList('Available test files:\n')) === '[]');
+  // Through a real shell: a path with a quote, a substitution and backticks must come back verbatim.
+  const odd = "tests/it's $(echo injected) `echo x` \"q\"Test.php";
+  const echoed = spawnSync('sh', ['-c', `printf %s ${shellQuote(odd)}`], { encoding: 'utf8' });
+  check('shellQuote survives sh unchanged (no substitution runs)', echoed.stdout === odd, JSON.stringify(echoed.stdout));
+  const o = isolationPlan({ stack: 'php', testCommand: 'php phpunit.phar' });
+  check('override → the option and the quoted file are appended to the shell command',
+    o.list.shell === 'php phpunit.phar --list-test-files' && o.file('/r/a b.php').shell === "php phpunit.phar '/r/a b.php'", JSON.stringify(o.list));
+  check('override probe → lists what one per-file run would load', o.probe('/r/a b.php').shell === "php phpunit.phar '/r/a b.php' --list-test-files", o.probe('/r/a b.php').shell);
+  const v = isolationPlan({ stack: 'php', argv: ['vendor/bin/phpunit'], runner: 'phpunit' });
+  check('resolved vendor/bin/phpunit → appended as arguments',
+    v.list.argv.join(' ') === 'vendor/bin/phpunit --list-test-files' && v.file('/r/x.php').argv.join(' ') === 'vendor/bin/phpunit /r/x.php'
+    && v.probe('/r/x.php').argv.join(' ') === 'vendor/bin/phpunit /r/x.php --list-test-files', JSON.stringify(v.list));
+  const c = isolationPlan({ stack: 'php', argv: ['composer', 'run', '--no-interaction', 'test'], runner: 'composer-script' });
+  check('composer script → the arguments go after --', c.list.argv.join(' ') === 'composer run --no-interaction test -- --list-test-files'
+    && c.probe('/r/x.php').argv.join(' ') === 'composer run --no-interaction test -- /r/x.php --list-test-files', JSON.stringify(c.list));
+  check('node stack → no plan', isolationPlan({ stack: 'node', testCommand: 'npm test' }) === null);
+  check('a PHPUnit defect block → its message line',
+    defectLine('There was 1 error:\n\n1) ATest::test_x\nError: Call to undefined function wp_json_encode()\n\n/r/ATest.php:3') === 'Error: Call to undefined function wp_json_encode()');
+  check('no defect block → the last non-empty line', defectLine('PHP Fatal error:  x\n\n') === 'PHP Fatal error:  x');
+}
+
+console.log('\n# E2E — isolate-files runs each PHPUnit test file alone');
+{
+  // The fixture's full suite is green and BorrowedHarnessTest.php fails alone: the defect this
+  // input exists for (a file that passes only because a sibling file's harness is loaded too).
+  const ISO = { WORKING_DIRECTORY: path.join(FIX, 'php-isolation'), STACK: 'php', TEST_COMMAND: `"${process.execPath}" phpunit-stub.mjs`, FAIL_ON_FAIL: 'true' };
+
+  const off = runCli(ISO);
+  check('unset (the default) → exit 0 and status=pass, as before: no file is run alone',
+    off.exit === 0 && /status=pass — PASS — suite green · 2 passed, 0 failed, 2 total · exit 0$/m.test(off.stdout) && !/isolate-files/.test(off.stdout + off.summary), off.stdout);
+
+  const ro = runCli({ ...ISO, ISOLATE_FILES: 'true' });
+  check('a file that fails alone, report-only → exit 0', ro.exit === 0, `exit=${ro.exit}`);
+  check('… status=fail naming the file, and it says it would block',
+    /status=fail — report-only — the suite is green \(2 passed, 0 failed, 2 total\) but 1 of 2 test file\(s\) fail when run alone: tests\/BorrowedHarnessTest\.php — would BLOCK under fail-on-isolation:true$/m.test(ro.stdout), ro.stdout);
+  check('… the job log gives the file its exit and the defect line, behind the gutter',
+    /^│ tests\/BorrowedHarnessTest\.php — exit 2 — Error: Call to undefined function wp_json_encode$/m.test(ro.stdout), ro.stdout);
+  check('… the mode line says isolate-files is report-only', /^test-suite: mode=block-on-fail · isolate-files=report-only · /m.test(ro.stdout), ro.stdout);
+  check('… the step summary tables the file, its exit and why',
+    /\| `tests\/BorrowedHarnessTest\.php` \| 2 \| Error: Call to undefined function wp_json_encode \|/.test(ro.summary) && /status: fail/.test(ro.summary), ro.summary);
+  check('… the passing file is not named', !/AloneTest/.test(ro.stdout + ro.summary), ro.stdout);
+
+  const block = runCli({ ...ISO, ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true' });
+  check('fail-on-isolation → exit 1, BLOCKED, naming the file',
+    block.exit === 1 && /status=fail — BLOCKED — the suite is green .* fail when run alone: tests\/BorrowedHarnessTest\.php$/m.test(block.stdout), block.stdout);
+  const blockAlone = runCli({ ...ISO, FAIL_ON_FAIL: 'false', ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true' });
+  check('… independent of fail-on-fail (blocks with it false)', blockAlone.exit === 1, `exit=${blockAlone.exit}`);
+
+  const fixed = runCli({ ...ISO, ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true', STUB_FIXED: '1' });
+  check('every file passes alone → exit 0, and the verdict counts the files',
+    fixed.exit === 0 && /status=pass — PASS — suite green · 2 passed, 0 failed, 2 total · exit 0 · each of 2 test file\(s\) passes alone$/m.test(fixed.stdout), fixed.stdout);
+
+  const red = runCli({ ...ISO, ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true', STUB_SUITE: 'fail' });
+  check('a red suite → no file is run alone, and the suite\'s own verdict stands',
+    red.exit === 1 && /status=fail — BLOCKED — 1 test failure/.test(red.stdout) && !/listing with/.test(red.stdout) && /skipped — the suite failed/.test(red.summary), red.stdout);
+
+  const nolist = runCli({ ...ISO, ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true', STUB_LIST: 'fail' });
+  check('files that cannot be listed → status=error, exit 1 under fail-on-isolation (never "nothing failed")',
+    nolist.exit === 1 && /status=error — BLOCKED — the suite is green .* isolate-files could not run: .*--list-test-files did not list the test files: it exited 2 with no/.test(nolist.stdout), nolist.stdout);
+  const nolistRo = runCli({ ...ISO, ISOLATE_FILES: 'true', STUB_LIST: 'fail' });
+  check('… and exit 0 report-only', nolistRo.exit === 0 && /status=error — report-only — /.test(nolistRo.stdout), nolistRo.stdout);
+
+  const node = runCli({ WORKING_DIRECTORY: path.join(FIX, 'node-green'), FAIL_ON_FAIL: 'true', ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true' });
+  check('a node suite → isolate-files cannot run there: status=error, BLOCKED under fail-on-isolation',
+    node.exit === 1 && /status=error — BLOCKED — the suite is green \(3 passed.*isolate-files could not run: .*stack node has none/.test(node.stdout), node.stdout);
+  const nodeRo = runCli({ WORKING_DIRECTORY: path.join(FIX, 'node-green'), FAIL_ON_FAIL: 'true', ISOLATE_FILES: 'true' });
+  check('… and exit 0 report-only, still status=error', nodeRo.exit === 0 && /status=error — report-only — .*stack node has none/.test(nodeRo.stdout), nodeRo.stdout);
+
+  // A test-command that names a path of its own keeps loading it beside every file, so each
+  // "alone" run is the whole suite and passes: the probe must refuse it.
+  const pathCmd = runCli({ ...ISO, TEST_COMMAND: `"${process.execPath}" phpunit-stub.mjs tests`, ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true' });
+  check('a test-command that already names a path → status=error, BLOCKED (never "each file passes alone")',
+    pathCmd.exit === 1 && /status=error — BLOCKED — the suite is green .* isolate-files could not run: .* with one test file appended would load 2 files, not that one: the command already selects tests of its own/.test(pathCmd.stdout) && !/passes alone/.test(pathCmd.stdout), pathCmd.stdout);
+
+  const empty = runCli({ ...ISO, ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true', STUB_LIST: 'empty' });
+  check('a listing with the header and no file → status=error, exit 1 (not "each of 0 files passes")',
+    empty.exit === 1 && /status=error — BLOCKED — .*it listed no test file/.test(empty.stdout), empty.stdout);
+  const listExit = runCli({ ...ISO, ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true', STUB_LIST: 'exit1' });
+  check('a listing that names files but exits 1 → status=error, exit 1',
+    listExit.exit === 1 && /status=error — BLOCKED — .*did not list the test files: it exited 1\. /.test(listExit.stdout), listExit.stdout);
+
+  const exit1 = runCli({ ...ISO, ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true', STUB_ALONE: 'exit1' });
+  check('a file that fails alone with an assertion (PHPUnit exit 1) is named, with its defect line',
+    exit1.exit === 1 && /^│ tests\/BorrowedHarnessTest\.php — exit 1 — Failed asserting that false is true\.$/m.test(exit1.stdout), exit1.stdout);
+  const killed = runCli({ ...ISO, ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true', STUB_ALONE: 'signal' });
+  check('a file whose run is killed (no exit status) counts as failing, never as passing',
+    killed.exit === 1 && /^│ tests\/BorrowedHarnessTest\.php — exit 1 — /m.test(killed.stdout) && /fail when run alone: tests\/BorrowedHarnessTest\.php$/m.test(killed.stdout), killed.stdout);
+
+  // Faults block whenever a check the caller made blocking could not run.
+  const sinkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-iso-summary-dir-'));
+  const crash = runCli({ ...ISO, FAIL_ON_FAIL: 'false', ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true', STUB_FIXED: '1', GITHUB_STEP_SUMMARY: sinkDir });
+  fs.rmSync(sinkDir, { recursive: true, force: true });
+  check('a crash (unwritable summary) exits 1 under fail-on-isolation even with fail-on-fail off',
+    crash.exit === 1 && /status=error — test-suite crashed: EISDIR/.test(crash.stdout) && !/^\s+at /m.test(crash.stderr), `exit=${crash.exit} ${crash.stdout}`);
+  const noWd = runCli({ WORKING_DIRECTORY: path.join(FIX, 'no-such-dir'), FAIL_ON_FAIL: 'false', ISOLATE_FILES: 'true', FAIL_ON_ISOLATION: 'true' });
+  check('a missing working-directory exits 1 under fail-on-isolation even with fail-on-fail off',
+    noWd.exit === 1 && /status=error — working-directory .* does not exist$/m.test(noWd.stdout), noWd.stdout);
+  const noWdRo = runCli({ WORKING_DIRECTORY: path.join(FIX, 'no-such-dir'), FAIL_ON_FAIL: 'false' });
+  check('… and, with isolate-files unset, report-only exactly as before', noWdRo.exit === 0 && /would BLOCK under fail-on-fail:true$/m.test(noWdRo.stdout), noWdRo.stdout);
+
+  const hostile = runCli({ ...ISO, ISOLATE_FILES: 'true', STUB_WHY: '::error::forged annotation' });
+  check('a hostile defect line cannot reach line-start in the job log (it is shown, behind the gutter)',
+    forgedCommandLines(hostile.stdout).length === 0 && /^│ tests\/BorrowedHarnessTest\.php — exit 2 — ::error::forged annotation$/m.test(hostile.stdout), hostile.stdout);
 }
 
 console.log(failed === 0 ? '\n✅ all test-suite self-tests passed\n' : `\n❌ ${failed} self-test(s) failed\n`);

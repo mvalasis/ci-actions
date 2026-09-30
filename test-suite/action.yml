@@ -5,8 +5,9 @@ description: >-
   — auto-detecting the stack from the working dir. A repo with NO test config configured is PASS
   (green), never a block — so wiring this action onto a repo that has no tests yet stays green.
   Report-mode-first: parses pass/fail counts, emits a GitHub step-summary table, and exits
-  non-zero ONLY when a test failed AND `fail-on-fail` is true. Air-gapped: runs only the repo's
-  own test command (no SaaS, no telemetry).
+  non-zero ONLY when a test failed AND `fail-on-fail` is true (or, with `isolate-files`, a PHPUnit
+  test file failed when run alone AND `fail-on-isolation` is true). Air-gapped: runs only the
+  repo's own test command (no SaaS, no telemetry).
 
 inputs:
   working-directory:
@@ -33,6 +34,24 @@ inputs:
       first: wiring a caller never newly-blocks until it flips this to true after the suite is green.
     required: false
     default: 'false'
+  isolate-files:
+    description: >-
+      true = after a GREEN suite, list the test files PHPUnit loads (`<command> --list-test-files`)
+      and run each one ALONE (`<command> <file>`), naming every file that fails on its own. PHPUnit
+      loads every test file before it runs any, so a file that needs a harness only another file
+      requires passes in the full suite and under --order-by=random, and fails alone. PHP stack
+      only, and the command must not name test paths itself (every per-file run would then load
+      them too); both are faults, never a pass. false (default) = off.
+    required: false
+    default: 'false'
+  fail-on-isolation:
+    description: >-
+      true = BLOCK (exit non-zero) when a test file fails alone or isolate-files cannot run (the
+      files cannot be listed, the command selects tests of its own, the stack is not PHP, or the
+      action faults); false (default) = report-only. Independent of fail-on-fail, so an enforcing
+      suite can take this check report-mode-first.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -44,4 +63,6 @@ runs:
         STACK: ${{ inputs.stack }}
         TEST_COMMAND: ${{ inputs.test-command }}
         FAIL_ON_FAIL: ${{ inputs.fail-on-fail }}
+        ISOLATE_FILES: ${{ inputs.isolate-files }}
+        FAIL_ON_ISOLATION: ${{ inputs.fail-on-isolation }}
       run: node "${{ github.action_path }}/scripts/run.mjs"

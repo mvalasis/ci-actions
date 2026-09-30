@@ -85,6 +85,23 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.24.0** (tag not yet cut) — `test-suite` can run each PHPUnit test file alone: `isolate-files`,
+with its own `fail-on-isolation`. PHPUnit loads every test file before it runs any, so a file that
+needs a harness only another file requires passes in the full suite and under `--order-by=random`,
+and fails alone. On 2026-09-28, six epn-billing files and two epn-jobs files in `mvalasis/epn.one`
+exited non-zero alone and 0 together, behind green enforcing jobs. After a green suite the action
+lists the files with `--list-test-files` and runs each one alone, naming every file that fails with
+its exit and its first defect line. A listing that names no file is a fault, not a pass, and so is
+a `test-command` that already names a path: `php phpunit.phar tests` plus a file runs the whole
+suite, so every file would pass "alone". An adversarial review found that false green before
+release; the action now lists what one per-file run would load and refuses anything but that file.
+**Caller-visible:** nothing unless a caller sets `isolate-files: 'true'`. Both inputs default off,
+and with them unset or `false` the job log, step summary and exit are byte-identical to v1.23.0's,
+measured over 36 cases: nine fixtures (node green, red and no-tests, a composer suite, no stack, a
+missing directory, a PHP override green and red, an `exit 137` override), each under both
+`fail-on-fail` values, with the inputs unset and set to `false`. Self-test and mutants:
+`test-suite/README.md` §Offline self-test.
+
 **v1.23.0** — `form-protection` probes every `form-endpoints` entry that matches a form, not only
 the first. One form can front more than one gated endpoint: lampakia's `#checkout-form` places the
 order through `/api/checkout/create-order` and, from lampakia 1.0.83, sends the abandoned-cart ping

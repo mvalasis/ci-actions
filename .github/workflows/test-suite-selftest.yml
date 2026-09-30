@@ -40,3 +40,55 @@ jobs:
         with:
           working-directory: .
           fail-on-fail: 'false'
+
+  # isolate-files through the REAL action.yml wiring. The offline legs set ISOLATE_FILES /
+  # FAIL_ON_ISOLATION directly, so a typo in action.yml's env mapping would switch the feature off
+  # without one of them noticing, and a caller would read green over a file that fails alone. On the
+  # same fixture: blocking with the inputs on, green with them unset — and green with them on once
+  # the fixture's file no longer fails alone, so the block is the check and not a crash (a crash
+  # fails both).
+  isolate-files-wiring:
+    runs-on: ubuntu-latest
+    needs: [engine-selftest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: ./test-suite
+        id: on
+        continue-on-error: true
+        with:
+          working-directory: test-suite/scripts/selftest/php-isolation
+          stack: php
+          test-command: node phpunit-stub.mjs
+          fail-on-fail: 'true'
+          isolate-files: 'true'
+          fail-on-isolation: 'true'
+      - uses: ./test-suite
+        id: off
+        continue-on-error: true
+        with:
+          working-directory: test-suite/scripts/selftest/php-isolation
+          stack: php
+          test-command: node phpunit-stub.mjs
+          fail-on-fail: 'true'
+      - name: Fix the fixture — its file no longer fails alone
+        run: sed -i 's/fails-alone/passes-alone/' test-suite/scripts/selftest/php-isolation/tests/BorrowedHarnessTest.php
+      - uses: ./test-suite
+        id: fixed
+        continue-on-error: true
+        with:
+          working-directory: test-suite/scripts/selftest/php-isolation
+          stack: php
+          test-command: node phpunit-stub.mjs
+          fail-on-fail: 'true'
+          isolate-files: 'true'
+          fail-on-isolation: 'true'
+      - name: isolate-files blocked on the file that fails alone, and only on it
+        env:
+          ON: ${{ steps.on.outcome }}
+          OFF: ${{ steps.off.outcome }}
+          FIXED: ${{ steps.fixed.outcome }}
+        run: |
+          echo "on: $ON (want failure) · off: $OFF (want success) · fixed: $FIXED (want success)"
+          test "$ON" = failure && test "$OFF" = success && test "$FIXED" = success
