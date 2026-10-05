@@ -85,7 +85,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.25.0** (tag not yet cut) — `security-baseline` gains **`wp-rest-gate-case`** (T1, promotable WARN, CWE-178): a
+**v1.25.0** — `security-baseline` gains **`wp-rest-gate-case`** (T1, promotable WARN, CWE-178): a
 WordPress REST gate that tests the route case-sensitively. Core matches a request to its route with
 `/i`, so `/wp-json/My-Plugin/v1/x` and `?rest_route=/MY-PLUGIN/v1/x` reach the handler registered as
 `my-plugin/v1/x`, while a `rest_pre_dispatch` (or `rest_request_before_callbacks`,
