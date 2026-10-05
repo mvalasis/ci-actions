@@ -46,7 +46,10 @@ commit spelled out, one per line: `git -C ~/dev/ci-actions tag -f --no-sign v1 <
 ~/dev/ci-actions push -f origin v1`. Either way it verifies the move and writes the release commit
 after. Landing commits that an open PR carries is a merge: for v1.22.0 the classifier refused the
 agent's `git push origin HEAD:main` as a merge without review until the operator answered "Land PR
-#14?", asked the same way.
+#14?", asked the same way. A word given before CI finished did not carry over: for v1.25.1, "land it
+and release once CI is green" let the agent's push to `main` through, then the classifier refused
+the agent's next command as a merge without review, and the operator cut the anchor and moved `v1`
+from the terminal with the commands handed over.
 
 **A move ships every version staged below it.** `v1 HEAD` carries everything on
 `main`, including entries below whose tag is not yet cut. Cut each one's anchor on
