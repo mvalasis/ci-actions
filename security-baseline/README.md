@@ -17,7 +17,7 @@ silently un-enforce every repo.
 | Tier | Behaviour | Checks |
 |---|---|---|
 | **T0 — CRITICAL** | always blocks (when `fail-on-critical`, the default) | `sast-critical` (semgrep community ERROR on the diff — *today's block, unchanged*); `secret-pattern` (gitleaks pattern on the diff — *today's block, unchanged*); `secret-verified` (trufflehog `--only-verified` on the **diff range** — NEW; a provider just authenticated it → ~zero FP) |
-| **T1 — promotable WARN** | reports; a caller ELEVATES any id to CRITICAL via `critical-checks` | `sca-critical`, `sca-high` (osv-scanner); the custom **WP/PHP** rules (`wp-nonce-missing`, `wp-cap-missing`, `wp-sql-unprepared`, `wp-unserialize`, `wp-file-include`, `wp-rest-error-detail`, `wp-rest-error-detail-laundered`, `wp-weak-crypto`, `turnstile-test-key`); the custom **Astro/TS/RN** rules (`ts-dangerous-html`, `ts-eval`, `ts-child-process`, `ts-public-secret-leak`, `ts-ssrf`, `ts-open-redirect`, `ts-secret-in-log`, `rn-insecure-storage`, `rn-cleartext-http`); the **GitHub-Actions** rules (`gha-unpinned-action`, `gha-script-injection`, `gha-pr-target`); `dockerfile-lint`; `argv-secret` (a secret spelled into a child's argv — §argv-secret) |
+| **T1 — promotable WARN** | reports; a caller ELEVATES any id to CRITICAL via `critical-checks` | `sca-critical`, `sca-high` (osv-scanner); the custom **WP/PHP** rules (`wp-nonce-missing`, `wp-cap-missing`, `wp-sql-unprepared`, `wp-unserialize`, `wp-file-include`, `wp-rest-error-detail`, `wp-rest-error-detail-laundered`, `wp-weak-crypto`, `turnstile-test-key`); the custom **Astro/TS/RN** rules (`ts-dangerous-html`, `ts-eval`, `ts-child-process`, `ts-public-secret-leak`, `ts-ssrf`, `ts-open-redirect`, `ts-secret-in-log`, `rn-insecure-storage`, `rn-cleartext-http`); the **GitHub-Actions** rules (`gha-unpinned-action`, `gha-script-injection`, `gha-pr-target`); `dockerfile-lint`; `argv-secret` (a secret spelled into a child's argv — §argv-secret); `wp-rest-gate-case` (a REST gate that tests the route case-sensitively — §wp-rest-gate-case) |
 | **T2 — advisory** | reports (WARN/INFO); never promotable | `sca-moderate`/`sca-low` (INFO); `wp-unescaped-output` (syntactic XSS — too FP-heavy to promote); `wp-rest-wp-error-detail` (`WP_Error::get_error_message()` in a REST/AJAX body — usually the *intended* client message, so advisory-only); `ts-cors-wildcard`; `secrets-history` (full-history baseline — clearing needs a history rewrite, so it can **never** be a merge precondition — and what the diff's secret legs find in a commit the base already holds: trufflehog since v1.19.7, gitleaks since v1.19.8) |
 
 The CRITICAL core is exactly what a clean repo always passes; **a failure there is always a real
@@ -213,6 +213,7 @@ it looked and found nothing, or it **could not look**:
 | trufflehog | exit other than 0 — it runs with `--fail-on-scan-errors`, since without it a `--since-commit` it cannot resolve exits 0 having scanned nothing; a JSON result line cut short; on the diff, no commit to stop a walk at (`git merge-base` of the base and a walk's tip failed, timed out or was killed; for a second tip, only a clean "they share no commit" walks it to its root instead), a range git cannot list (`git rev-list`), or a checkout it cannot clone, each checked before trufflehog runs; a finding whose commit's ancestry git cannot tell (the key blocks as new). With several walks the reason names the first that failed and its tip (v1.19.7), or the merge whose own changes it walked; and what the range's merges add that could not be read (§What a merge adds, v1.20.0); a walk whose log git cannot finish in the clone (trufflehog's own, run first because trufflehog exits 0 having read nothing on it; §The scanners' own logs, v1.20.1) |
 | osv-scanner | exit other than 0, 1 or 128; exit 1 with no results; 128 with `Error during extraction` on stderr (a lockfile it could not parse), or with a tracked npm/composer lockfile and no `Scanned … found N packages` line (one it did not read, such as a `bun.lockb`). Otherwise 128 is nothing to audit: no lockfile, or every lockfile read and empty (v1.19.5; measured on v2.4.0) |
 | hadolint | no JSON array; exit other than 0 or 1 (1 = a rule fired) |
+| wp-rest-gate-case | the `git grep` for the hooks, or for the hooked callbacks' bodies, failed: an exit other than 0, or 1 with a `fatal`/`error` line on stderr (1 alone is "no match"); a PHP file it found but could not grade: unreadable, over 2 MB, or one the parser gave up on (brackets nested over 256 deep). What it did grade is still reported (v1.25.0) |
 | git | the diff that lists the changed files failed: a `base-ref` or PR base that does not resolve, which gitleaks would read as an empty range and exit 0 on; `git ls-files` failed |
 
 Each failure belongs to a **leg** (one scanner pass: semgrep's community, rule-pack and GitHub-Actions
@@ -543,6 +544,66 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   a `-H` — and nothing else fired.
 - **Promote** it with `critical-checks: argv-secret` once a run is clean.
 
+## wp-rest-gate-case — a REST gate a re-cased route walks past
+
+WordPress matches a request to its REST route **case-insensitively**.
+`WP_REST_Server::match_request_to_handler()` narrows the routes by namespace with a case-sensitive
+prefix test, falls back to every route when none matches, then runs
+`preg_match('@^' . $route . '$@i', $path)`. So `/wp-json/My-Plugin/v1/x` and
+`?rest_route=/MY-PLUGIN/v1/x` both reach the handler registered as `my-plugin/v1/x`. A plugin that
+guards its namespace in a `rest_pre_dispatch`, `rest_request_before_callbacks` or
+`rest_authentication_errors` filter by testing the route case-sensitively reads "not our namespace"
+and lets the re-cased request through to the handler, past its secret or login check (CWE-178). The
+fleet shipped it twice: a CF7 proxy gate, then a second plugin's namespace gate.
+
+- **What it flags.** Inside a function hooked to one of those three filters (`add_filter` or
+  `add_action`, a plugin-boilerplate loader's `->add_filter`, a closure, an arrow function, an
+  `[$this, 'm']` / `'Class::m'` / first-class callable), a case-sensitive comparison of a
+  route-derived string with anything that may hold letters. Route-derived: `$request->get_route()`,
+  `$_SERVER['REQUEST_URI']` / `['PATH_INFO']`, anything subscripted or fetched by `'rest_route'`, and
+  a variable assigned from one. Comparisons: `===` `==` `!==` `!=`, `str_starts_with` /
+  `str_ends_with` / `str_contains`, `strpos` / `strstr` / `strcmp` / `strncmp`, `substr_compare`
+  without its case-insensitive flag, `in_array` / `array_search` / `array_key_exists`, `preg_match`
+  without `/i`, `switch` / `match`. One level of helper is followed. A lower-cased route compared
+  with a literal holding capitals is reported too: it never matches, so that gate never applies.
+- **What it leaves alone.** A route passed through a case fold: `strtolower`, `mb_strtolower`,
+  `wc_strtolower`, `sanitize_key`, `sanitize_title`, or `strtoupper` / `mb_convert_case` (only the
+  first five make a literal with capitals dead code); a case-insensitive comparator (`stripos`, `stristr`,
+  `strcasecmp`, a `/i` regex or one starting `(?i)`, `substr_compare` with a literal `true`); a value
+  with no letters (`'/'`, `''`, `rest_get_url_prefix()`,
+  `wp-json`, a prefix core's rewrite already matches case-sensitively); and a test that **fails
+  closed**, whose match exempts (`if (match) return $result;`) or whose mismatch denies
+  (`if (!match) return new WP_Error(…)`, or `$result = new WP_Error(…); return $result;`), so a
+  re-cased route is refused rather than let through. A shape whose direction cannot be read (a
+  ternary, an assignment, any other reassignment of what the branch returns) is reported.
+- **The fix.** Lower-case the route before the test:
+  `str_starts_with( strtolower( $request->get_route() ), '/my-plugin/' )`. Prefer
+  `$request->get_route()` to `REQUEST_URI`, which has bypasses lower-casing does not close (a
+  `?rest_route=` request never contains `/wp-json/`). Better still, check in each route's
+  `permission_callback`, which runs only for the route it guards.
+- **Waive one, with a reason:** `// lint-allow-wp-rest-gate-case: <why>` on the flagged line or in
+  the comment lines directly above it; a bare pragma does not count.
+- **What it grades.** Tracked PHP outside WP core, `vendor/`, WooCommerce, `node_modules/` and test
+  or fixture corpora. A gate's registration, body and helper can sit in three files, so the tree is
+  searched (`git grep`) on every run that touches PHP. On the **diff** a finding is kept when any of
+  those files changed; a diff with no PHP in it grades nothing. A search that fails could not look,
+  and so does a file it found but could not grade (unreadable, over 2 MB, brackets nested over 256
+  deep): that FAULTs once the check is promoted. A callback it cannot resolve to a body is a scanner
+  note.
+- **Not seen** (stated, not implied): a callback or a hook name held in a variable, or a
+  named-argument registration; a route kept in an object property or an array element
+  (`$ctx['route']`); `$wp->request`; a helper more than one call deep, one called on another object
+  (`$this->router->is_ours()`), or one whose name more than three functions share; a route test
+  inside a `permission_callback`; `isset($map[$route])` and `$map[$route] ?? …`. A regex built at run
+  time, a case-insensitive flag held in a variable, and a case-folding wrapper not listed above are
+  graded as case-sensitive, so they can fire.
+- **Measured before it shipped (2026-10-05)** over every caller's tracked PHP: no false positive;
+  the CF7 gate's `stripos` fix and a JWT plugin's gate stay silent. All 1,666 PHP files of three
+  WordPress trees parse, in under a second together, and an adversarial review's pathological
+  inputs (unbalanced and deeply nested brackets, one gate registered thousands of times) each finish
+  in under 2 s.
+- **Promote** it with `critical-checks: wp-rest-gate-case` once a run is clean.
+
 ## Honest limits
 
 - **gitleaks' range lists base commits past a clock skew; what it finds there is history (v1.19.8).**
@@ -650,6 +711,18 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   pass, the skipped corpora); and, end to end, an untouched workflow reported on a diff run, an
   untouched script only under full scope, a selftest fixture never, and a promoted finding
   annotating `header ← variable` with no value. 20 targeted mutants each turn it red.
+  Its **wp-rest-gate-case** leg (v1.25.0) grades the three fixtures in `rules/selftest/rest-gate-case/`
+  (the two shipped shapes; every spelling of a case-sensitive route test; lower-cased,
+  case-insensitive, letter-free, fail-closed and waived gates, silent) and a gate split over three
+  files. End to end, on a repo of its own: a re-registered gate whose body the diff never touched is
+  reported, an untouched one only under full scope, a test file never; a promoted finding blocks with
+  one `::error` each; a refused `git grep`, or one exiting 1 with a `fatal` line, FAULTs once promoted
+  and is listed before; a refused body search still reports what it graded; a hooked file over 2 MB
+  FAULTs once promoted; and a diff with no PHP is never searched. It also pins each shape the
+  pre-release review found mis-graded, and bounds the pathological inputs' run time; and the
+  Greek-path case above commits a Greek-named gate it must report on a diff and a full run (its own
+  `git grep` reads `-z`; without it the gate was dropped and the run passed). 26 targeted mutants
+  each turn it red.
   Its **could-not-look** legs (v1.19.0) feed `outcome.mjs` canned scanner processes (every exit code,
   signal and report shape in §When a scanner cannot look, both ways) and pin every rule pack's
   `metadata.checkId` to its leg. End to end, on a stub set where every scanner is clean (asserted
@@ -853,7 +926,9 @@ and the `gha-unpinned-action` post-filter (see §First-party ownership); kept ou
 because it is an ownership question, not a severity one. `scripts/argv-secret.mjs` — the pure
 `argv-secret` matcher and file selection, shared with the repo lint; `scripts/js-scrub.mjs` — the
 JavaScript comment/literal scrubber it and the lint run (both moved out of the lint in v1.17.0, so a
-change to either is a release). `scripts/outcome.mjs` — pure classification of each finished
+change to either is a release). `scripts/rest-gate-case.mjs` — the pure `wp-rest-gate-case` matcher:
+a small PHP tokenizer, the callbacks hooked to the REST filters, one level of helper; `scan.mjs`
+finds and reads the files. `scripts/outcome.mjs` — pure classification of each finished
 scanner process (looked, or could not look and why) and the map of legs to the checks each can emit
 (§When a scanner cannot look). `scripts/scan.mjs` — CLI: resolves the diff base, runs the
 scanners, normalizes their output into `{checkId, rule, file, line, msg}` findings, tiers + promotes

@@ -20,6 +20,7 @@ import { spawnSync } from 'node:child_process';
 import { SEV, evaluate, parsePromote, groupByCheck, sevRank, CHECKS, safe, redact, annotations, canBeCritical, faultAnnotation, shortSha } from './tiers.mjs';
 import { firstPartyOwners, filterFirstPartyGha } from './firstparty.mjs';
 import { argvTargets, findArgvSecrets, argvFinding } from './argv-secret.mjs';
+import { HOOK_GREP, restGateCandidate, findRestGateCase, restGateFinding } from './rest-gate-case.mjs';
 import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, gitLogOutcome, scrub, errorLine } from './outcome.mjs';
 
 const env = process.env;
@@ -711,6 +712,73 @@ function collectArgvSecret() {
   return out;
 }
 
+// ---------- wp-rest-gate-case (a REST gate a re-cased route walks past) — zero egress ----------
+// The matcher is rest-gate-case.mjs. A gate is graded as a whole — its registration, its callback
+// and one level of helper may sit in three files — so the tracked tree is searched every run and the
+// diff scope keeps a finding when any of those files changed. A diff that touches no PHP grades
+// nothing. git grep exits 1 for "no match"; any other failure is could-not-look, never "no gate", and
+// so is a file it found but could not grade (unreadable, over 2 MB, or one the parser gave up on).
+function collectRestGateCase() {
+  const out = [];
+  const leg = LEGS.restGateCase;
+  if (DIFF && !(CHANGED || []).some((f) => /\.php$/i.test(f))) return out;
+  const grep = (re, what) => {
+    const r = run('git', ['grep', '-l', '-z', '-I', '-i', '-E', re, '--', '*.php'], { timeout: 60000 });
+    if (r.status === 1 && !r.error && !r.signal && !/^(fatal|error)\b/im.test(r.stderr || '')) return [];
+    if (r.status !== 0 || r.error || r.signal) {
+      couldNotLook(leg, `git grep for ${what} failed, exit ${r.status}${errorLine(r.stderr) ? `: ${scrub(errorLine(r.stderr))}` : ''}`);
+      return null;
+    }
+    return r.stdout.split('\0').filter(Boolean);
+  };
+  const unread = [], big = [];
+  let failed = false;
+  const read = (files) => {
+    const got = [];
+    for (const file of files || []) {
+      if (!restGateCandidate(file)) continue;
+      try {
+        const st = fs.lstatSync(file);
+        if (!st.isFile()) continue;   // a tracked symlink is not followed out of the tree
+        if (st.size > 2 * 1024 * 1024) { big.push(file); continue; }
+        const src = fs.readFileSync(file, 'utf8');
+        if (!src.includes('\0')) got.push({ file, src });
+      } catch { unread.push(file); }
+    }
+    return got;
+  };
+  const hooked = grep(HOOK_GREP, 'the REST hooks');
+  if (hooked === null) return out;
+  const sources = read(hooked);
+  if (sources.length === 0) return out;
+  // The files that may define these functions — PHP names are case-insensitive, hence -i above.
+  const resolve = (names) => {
+    const files = new Set();
+    const word = names.filter((n) => /^[A-Za-z_\x80-￿][A-Za-z0-9_\x80-￿]*$/.test(n));
+    for (let i = 0; i < word.length && !failed; i += 100) {
+      const got = grep(`function[[:space:]]+&?[[:space:]]*(${word.slice(i, i + 100).join('|')})[[:space:]]*\\(`, 'the gate functions');
+      if (got === null) { failed = true; break; }
+      got.forEach((f) => files.add(f));
+    }
+    return read([...files]);
+  };
+  // A resolve that failed is could-not-look (set in grep); what was graded is still reported.
+  const { hits, notes, unparsed } = findRestGateCase(sources, { resolve });
+  const changed = new Set(DIFF ? CHANGED : []);
+  for (const hit of hits) {
+    if (DIFF && ![hit.file, hit.gateFile, ...hit.regFiles].some((f) => changed.has(f))) continue;
+    out.push(restGateFinding(hit));
+  }
+  for (const n of notes) infra.push(`wp-rest-gate-case: ${n}`);
+  const ungraded = [...unread, ...big, ...unparsed];
+  if (ungraded.length) {
+    const why = [[unread, 'unreadable'], [big, 'over 2 MB'], [unparsed, 'unparseable']].filter(([l]) => l.length).map(([l, w]) => `${l.length} ${w}`).join(', ');
+    const n = ungraded.length;
+    couldNotLook(leg, `${n} PHP file${n === 1 ? ' that may hold a REST gate was' : 's that may hold a REST gate were'} not graded — ${why}: ${ungraded.slice(0, 3).map((f) => safe(f, 80)).join(', ')}${n > 3 ? ', …' : ''}`);
+  }
+  return out;
+}
+
 // Report lines already echoed to the job log, so the crash path's re-flush echoes only the new ones.
 // The log goes first: when the summary write is what throws, the report is already readable.
 let echoed = 0;
@@ -741,6 +809,7 @@ function flush() {
     [collectOsv, ENABLE_SCA ? [LEGS.osv] : []],
     [collectHadolint, [LEGS.hadolint]],
     [collectArgvSecret, [LEGS.argvSecret]],
+    [collectRestGateCase, [LEGS.restGateCase]],
   ];
   let findings = [];
   for (const [collect, legs] of collectors) {

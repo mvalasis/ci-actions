@@ -85,6 +85,32 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.25.0** (tag not yet cut) — `security-baseline` gains **`wp-rest-gate-case`** (T1, promotable WARN, CWE-178): a
+WordPress REST gate that tests the route case-sensitively. Core matches a request to its route with
+`/i`, so `/wp-json/My-Plugin/v1/x` and `?rest_route=/MY-PLUGIN/v1/x` reach the handler registered as
+`my-plugin/v1/x`, while a `rest_pre_dispatch` (or `rest_request_before_callbacks`,
+`rest_authentication_errors`) filter comparing the route with `===`, `str_starts_with`, `strpos` or
+a regex without `/i` reads "not our namespace" and lets the request through, past its secret or
+login check. The fleet shipped it twice, a CF7 proxy gate and then a second plugin's namespace gate,
+and nothing would have caught the third. The matcher is `security-baseline/scripts/rest-gate-case.mjs`,
+pure Node with no new tool: a small PHP tokenizer, the callbacks hooked to those three filters
+(closures, methods, a loader's `->add_filter`), and one level of helper. It leaves alone a
+lower-cased route, a case-insensitive comparator, a value with no letters and a test that fails
+closed (a re-cased route refused, not let through), and `lint-allow-wp-rest-gate-case: <reason>`
+waives one. A gate's registration, body and helper can sit in three files, so `scan.mjs` searches
+the tracked PHP with `git grep` on every run that touches PHP and keeps a diff finding when any of
+the three changed; a search that fails, or a file it found and could not grade, is could-not-look, a
+FAULT once the check is promoted. Measured before release over every caller's tracked PHP: no false
+positive. An adversarial review before release found a vulnerable shape read as fail-closed
+(`$result = new WP_Error(…); return $result;`), quadratic time on unbalanced brackets and on a gate
+registered thousands of times, and ungraded files reported only as notes; each is fixed and pinned.
+`scripts/selftest.mjs` gains unit and end-to-end legs (three fixture files, a gate split over three
+files, diff and full scope, promotion, a refused search, an ungraded file, the review's shapes, and
+a Greek-named gate in v1.24.2's case, since the leg's own `git grep` is a path listing that must
+read `-z`) and 26 targeted mutants each turn it red. **Caller-visible:** a ⚠️ `wp-rest-gate-case` group on a run that finds one
+— WARN, so it blocks nobody until a caller lists it in `critical-checks`. No input and no existing
+verdict changed. The `v1` move newly-blocks nobody.
+
 **v1.24.2** — a changed file with a non-ASCII name, such as a Greek one on the fleet's Greek sites,
 was dropped unseen by every diff-scoped leg of `security-baseline` and by `pull-tier`'s input match.
 Both read `git diff --name-only` without `-z`, and git's default `core.quotePath` prints such a path

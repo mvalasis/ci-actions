@@ -19,6 +19,7 @@ import {
 import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, gitLogOutcome, scrub, errorLine } from './outcome.mjs';
 import { firstPartyOwners, ownerOf, parseOwners, refFromText, readLineFromDisk, filterFirstPartyGha } from './firstparty.mjs';
 import { findArgvSecrets, argvLang, argvTargets, argvFinding } from './argv-secret.mjs';
+import { findRestGateCase, restGateCandidate, restGateFinding } from './rest-gate-case.mjs';
 
 // The checkIds a scanner adapter in scan.mjs actually emits (kept in sync by the coverage
 // assertion below — a new CHECKS id must be either wired here or explicitly RESERVED).
@@ -29,7 +30,7 @@ const EMITTED = new Set([
   'wp-rest-error-detail', 'wp-rest-error-detail-laundered', 'wp-weak-crypto', 'turnstile-test-key', 'wp-unescaped-output', 'wp-rest-wp-error-detail',
   'ts-dangerous-html', 'ts-eval', 'ts-child-process', 'ts-public-secret-leak', 'ts-ssrf',
   'ts-open-redirect', 'ts-secret-in-log', 'rn-insecure-storage', 'rn-cleartext-http', 'ts-cors-wildcard',
-  'gha-unpinned-action', 'gha-script-injection', 'gha-pr-target', 'dockerfile-lint', 'argv-secret',
+  'gha-unpinned-action', 'gha-script-injection', 'gha-pr-target', 'dockerfile-lint', 'argv-secret', 'wp-rest-gate-case',
 ]);
 
 let failed = 0;
@@ -463,8 +464,13 @@ console.log('\n# which legs can take the verdict away (canBeCritical + LEGS)');
     canBeCritical(LEGS.community.checks) && canBeCritical(LEGS.gitleaks.checks) && canBeCritical(LEGS.trufflehog.checks));
   check('a T1 leg only warns until the caller promotes one of ITS checks',
     !canBeCritical(LEGS.custom.checks) && canBeCritical(LEGS.custom.checks, ['wp-rest-error-detail']) && !canBeCritical(LEGS.custom.checks, ['sca-critical']));
-  check('osv-scanner, hadolint, argv-secret, gha: WARN until promoted', !canBeCritical(LEGS.osv.checks) && canBeCritical(LEGS.osv.checks, ['sca-critical'])
-    && !canBeCritical(LEGS.hadolint.checks) && !canBeCritical(LEGS.argvSecret.checks) && canBeCritical(LEGS.argvSecret.checks, ['argv-secret']) && !canBeCritical(LEGS.gha.checks));
+  check('osv-scanner, hadolint, argv-secret, gha, wp-rest-gate-case: WARN until promoted', !canBeCritical(LEGS.osv.checks) && canBeCritical(LEGS.osv.checks, ['sca-critical'])
+    && !canBeCritical(LEGS.hadolint.checks) && !canBeCritical(LEGS.argvSecret.checks) && canBeCritical(LEGS.argvSecret.checks, ['argv-secret']) && !canBeCritical(LEGS.gha.checks)
+    && !canBeCritical(LEGS.restGateCase.checks) && canBeCritical(LEGS.restGateCase.checks, ['wp-rest-gate-case']));
+  // The rule packs' `^wp-` family would claim it too: then a semgrep failure would fault a caller who
+  // promoted only the REST gate check, which semgrep never runs.
+  check('wp-rest-gate-case belongs to its own leg, never to the semgrep rule packs',
+    !LEGS.custom.checks.includes('wp-rest-gate-case') && !canBeCritical(LEGS.custom.checks, ['wp-rest-gate-case']) && JSON.stringify(LEGS.restGateCase.checks) === '["wp-rest-gate-case"]');
   check('a T2 leg can never block, not even "promoted" (the history baselines)',
     !canBeCritical(LEGS.gitleaksHistory.checks, ['secrets-history']) && !canBeCritical(LEGS.trufflehogHistory.checks, ['secrets-history']));
   check('the changed-file list can always block (it feeds sast-critical)', canBeCritical(LEGS.diff.checks));
@@ -480,7 +486,7 @@ console.log('\n# which legs can take the verdict away (canBeCritical + LEGS)');
   check('every emitted checkId belongs to a leg', [...EMITTED].every((id) => claimed.has(id)), [...EMITTED].filter((id) => !claimed.has(id)).join(','));
   check('every leg check is a real CHECKS id', [...claimed].every((id) => Object.prototype.hasOwnProperty.call(CHECKS, id)));
   check('the changed-file list claims every diff-scoped leg\'s checks',
-    [LEGS.community, LEGS.custom, LEGS.hadolint, LEGS.argvSecret].every((l) => l.checks.every((id) => LEGS.diff.checks.includes(id))));
+    [LEGS.community, LEGS.custom, LEGS.hadolint, LEGS.argvSecret, LEGS.restGateCase].every((l) => l.checks.every((id) => LEGS.diff.checks.includes(id))));
 
   const fa = faultAnnotation('semgrep community SAST', 'semgrep exit 2: x');
   check('faultAnnotation: one ::error, a fixed title, the leg and why', fa === '::error title=security-baseline could not look::semgrep community SAST could not look — semgrep exit 2: x', fa);
@@ -572,6 +578,117 @@ console.log('\n# argv-secret — a secret spelled into a child\'s argv (argv-sec
   const ann = annotation({ ...fnd, sev: SEV.CRIT });
   check('its annotation names the check, header, variable, file and line',
     ann === '::error file=.github/workflows/deploy.yml,line=3,title=security-baseline argv-secret::argv-secret -H Authorization ← secrets.DEPLOY_API_KEY at .github/workflows/deploy.yml:3', ann);
+}
+
+console.log('\n# wp-rest-gate-case — a REST gate a re-cased route walks past (rest-gate-case.mjs)');
+{
+  // The fixtures mark each expected finding with `// ruleid: wp-rest-gate-case` on the line above it.
+  // They live under rules/selftest/, which scan.mjs never grades, so they are graded here under a
+  // synthetic path; the marker regex is strict, so a typo in one cannot pass as an expected silence.
+  const dir = new URL('../rules/selftest/rest-gate-case/', import.meta.url);
+  const grade = (name) => {
+    const src = fs.readFileSync(new URL(name, dir), 'utf8');
+    const want = []; src.split('\n').forEach((l, i) => { if (/^\s*\/\/ ruleid: wp-rest-gate-case\s*$/.test(l)) want.push(i + 2); });
+    const { hits, notes } = findRestGateCase([{ file: `plugin/${name}`, src }]);
+    const got = [...new Set(hits.map((h) => h.line))].sort((a, b) => a - b);
+    return { want, got, hits, notes, detail: `want ${JSON.stringify(want)} got ${JSON.stringify(got)}` };
+  };
+  const pos = grade('positive.php'), byp = grade('bypass.php'), neg = grade('negative.php');
+  check('positive.php: the two shapes this fleet shipped, each found at its marked line', pos.want.length === 3 && JSON.stringify(pos.got) === JSON.stringify(pos.want), pos.detail);
+  check('bypass.php: every spelling of a case-sensitive route test is found, nothing else', byp.want.length >= 20 && JSON.stringify(byp.got) === JSON.stringify(byp.want), byp.detail);
+  check('negative.php: lower-cased, case-insensitive, letter-free, fail-closed, waived — silent', neg.want.length === 0 && neg.got.length === 0, neg.detail);
+  check('every callback in the fixtures resolved to a body (no "could not be resolved" note)', [pos, byp, neg].every((g) => g.notes.length === 0), JSON.stringify([pos, byp, neg].map((g) => g.notes)));
+
+  const one = (src, opts) => findRestGateCase([{ file: 'p/gate.php', src: `<?php\n${src}` }], opts).hits;
+  const gateOn = (cond, body = "return new WP_Error( 'x', 'x', array( 'status' => 403 ) );") =>
+    `add_filter( 'rest_pre_dispatch', function ( $result, $server, $request ) {\n\tif ( ${cond} ) {\n\t\t${body}\n\t}\n\treturn $result;\n}, 10, 3 );`;
+  check('the CF7 shape: strpos === 0 on the route, the gate applied on a match', one(gateOn("0 === strpos( $request->get_route(), '/contact-form-7/' ) && ! ok()")).length === 1);
+  check('…lower-cased first: silent', one(gateOn("0 === strpos( strtolower( $request->get_route() ), '/contact-form-7/' ) && ! ok()")).length === 0);
+  check('…with stripos: silent', one(gateOn("0 === stripos( $request->get_route(), '/contact-form-7/' ) && ! ok()")).length === 0);
+  check('…against a letter-free value (the prefix /, an empty route): silent', one(gateOn("$request->get_route() === '/' || '' === $request->get_route()")).length === 0);
+  check('fail-closed: a MISMATCH denies, so a re-cased route is refused, never let through — silent',
+    one(gateOn("! str_starts_with( $request->get_route(), '/sb-ns/' )")).length === 0);
+  check('…the same test whose MISMATCH exempts — found', one(gateOn("! str_starts_with( $request->get_route(), '/sb-ns/' )", 'return $result;')).length === 1);
+  check('a lower-cased route compared with a literal holding capitals is dead code — found, as dead',
+    (one(gateOn("str_starts_with( strtolower( $request->get_route() ), '/SB-NS/' ) && ! ok()")) || [])[0]?.kind === 'dead');
+  // A denying body, so the hook test is what keeps it silent: the same body on rest_pre_dispatch fires.
+  const onHook = (hook) => one(`add_filter( '${hook}', function ( $result ) {\n\tif ( str_starts_with( $_SERVER['REQUEST_URI'], '/wp-json/sb/' ) && ! ok() ) {\n\t\twp_die();\n\t}\n\treturn $result;\n} );`).length;
+  check('a hook outside the three (rest_api_init, rest_pre_serve_request) is not a gate; the same body on rest_pre_dispatch is',
+    onHook('rest_api_init') === 0 && onHook('rest_pre_serve_request') === 0 && onHook('rest_pre_dispatch') === 1);
+  const waived = (pragma) => one(gateOn("str_starts_with( $request->get_route(), '/sb-ns/' ) && ! ok()").replace('\tif (', `\t${pragma}\n\tif (`)).length;
+  check('a pragma with a reason, on the line above, waives it; a bare one does not',
+    waived('// lint-allow-wp-rest-gate-case: the handler re-checks the secret') === 0 && waived('// lint-allow-wp-rest-gate-case:') === 1 && waived('// unrelated') === 1);
+  const sameLine = (pragma) => one(gateOn("str_starts_with( $request->get_route(), '/sb-ns/' ) && ! ok()").replace('! ok() ) {\n', `! ok() ) { ${pragma}\n`)).length;
+  check('…and on the flagged line itself, a reason required there too',
+    sameLine('// lint-allow-wp-rest-gate-case: the handler re-checks the secret') === 0 && sameLine('// lint-allow-wp-rest-gate-case:') === 1 && sameLine('') === 1);
+  // Shapes the review found (v1.25.0, before release): each was mis-graded, now each is pinned.
+  const D = "new WP_Error( 'x', 'x', array( 'status' => 403 ) )";
+  const shapes = [
+    ['`$result = new WP_Error(…); return $result;` on a match is a bypass, not fail-closed', 1, `0 === strpos( $request->get_route(), '/sb-ns/' ) && ! ok()`, `$result = ${D};\n\t\treturn $result;`],
+    ['…on a mismatch it fails closed', 0, `! str_starts_with( $request->get_route(), '/sb-ns/' )`, `$result = ${D};\n\t\treturn $result;`],
+    ['a log line before an exemption on a match still fails closed', 0, `str_starts_with( $request->get_route(), '/sb-other/' )`, "error_log( 'x' );\n\t\treturn $result;"],
+    ['a scoped (?i:…) leaves the rest of the pattern case-sensitive', 1, `preg_match( '#^/sb-ns/(?i:v1)/#', $request->get_route() ) && ! ok()`],
+    ['a leading global (?i) is case-insensitive', 0, `preg_match( '#^(?i)/sb-ns/#', $request->get_route() ) && ! ok()`],
+    ["substr_compare's flag held in a variable is not known to be on", 1, `0 === substr_compare( $request->get_route(), '/sb-ns/', 0, 7, $ci ) && ! ok()`],
+    ['substr_compare with a literal true is case-insensitive', 0, `0 === substr_compare( $request->get_route(), '/sb-ns/', 0, 7, true ) && ! ok()`],
+    ['a method name is case-insensitive in PHP: Get_Route()', 1, `str_starts_with( $request->Get_Route(), '/sb-ns/' ) && ! ok()`],
+    ['strtoupper folds; against capitals it is no dead code', 0, `str_starts_with( strtoupper( $request->get_route() ), '/SB-NS/' ) && ! ok()`],
+    ['wc_strtolower folds', 0, `str_starts_with( wc_strtolower( $request->get_route() ), '/sb-ns/' ) && ! ok()`],
+    ['a count computed from the route is not the route', 0, `( $n = count( explode( '/', $request->get_route() ) ) ) && $n === SB_MAX && ! ok()`],
+  ];
+  const shapeOf = (cond, body) => one(body ? gateOn(cond, body) : gateOn(cond)).length;
+  const wrong = shapes.filter(([, want, cond, body]) => shapeOf(cond, body) !== want);
+  check(`the ${shapes.length} shapes the review found are each graded right`, wrong.length === 0, wrong.map(([n]) => n).join(' | '));
+  check('a count assigned from the route, then compared with a constant, is silent',
+    one(`add_filter( 'rest_pre_dispatch', function ( $result, $server, $request ) {\n\t$depth = count( explode( '/', $request->get_route() ) );\n\tif ( $depth === SB_MAX && ! ok() ) {\n\t\treturn ${D};\n\t}\n\treturn $result;\n}, 10, 3 );`).length === 0);
+  check('a PHP attribute holding `]` in a string does not swallow the gate after it',
+    one(`#[Attr('a]b')]\nfunction sb_x() {}\n${gateOn("str_starts_with( $request->get_route(), '/sb/' ) && ! ok()")}`).length === 1);
+  // A file it cannot grade is named, never a silent clean; a pathological one stays fast.
+  const thrown = findRestGateCase([{ file: 'p/t.php', src: { toString() { throw new Error('boom'); } } }]);
+  check('a file the parser throws on is returned as unparsed', JSON.stringify(thrown.unparsed) === '["p/t.php"]' && thrown.hits.length === 0, JSON.stringify(thrown));
+  const deep = findRestGateCase([{ file: 'p/deep.php', src: `<?php\n${gateOn('f('.repeat(300) + '$request->get_route()' + ')'.repeat(300) + " === '/sb/'")}` }]);
+  check('brackets nested over 256 deep: unparsed, not graded for minutes', JSON.stringify(deep.unparsed) === '["p/deep.php"]', JSON.stringify(deep.unparsed));
+  let t0 = Date.now();
+  const unbalanced = findRestGateCase([{ file: 'p/u.php', src: `<?php add_filter( 'rest_pre_dispatch', function ( $r ) { ${'('.repeat(20000)}${']'.repeat(20000)} } );` }]);
+  const unbalancedMs = Date.now() - t0;
+  check('20k unmatched `(` then 20k `]`: unparsed in under 2 s (it took 5.7 s quadratic)', unbalancedMs < 2000 && JSON.stringify(unbalanced.unparsed) === '["p/u.php"]', `${unbalancedMs} ms`);
+  const gateFn = `function sb_many( $result, $server, $request ) {\n${"\tif ( str_starts_with( $request->get_route(), '/sb/' ) && ! ok() ) { return new WP_Error( 'x' ); }\n".repeat(300)}\treturn $result;\n}\n`;
+  t0 = Date.now();
+  const many = findRestGateCase([{ file: 'p/many.php', src: `<?php\n${"add_filter( 'rest_pre_dispatch', 'sb_many', 10, 3 );\n".repeat(3000)}${gateFn}` }, { file: 'p/also.php', src: "<?php\nadd_filter( 'rest_pre_dispatch', 'sb_many', 10, 3 );\n" }]);
+  const manyMs = Date.now() - t0;
+  check('one gate registered 3,001 times is graded once: fast, each line once, both registering files kept',
+    manyMs < 3000 && many.hits.length === 300 && many.hits.every((h) => JSON.stringify(h.regFiles) === '["p/many.php","p/also.php"]'), `${manyMs} ms, ${many.hits.length} hits, ${JSON.stringify((many.hits[0] || {}).regFiles)}`);
+
+  // A gate is graded as a whole: its registration, its body and one helper may sit in three files.
+  const reg = { file: 'p/boot.php', src: "<?php\nadd_filter( 'rest_pre_dispatch', array( 'SB_Gate', 'check' ), 10, 3 );\n" };
+  const cls = { file: 'p/inc/class-sb-gate.php', src: "<?php\nclass SB_Gate {\n\tpublic static function check( $result, $server, $request ) {\n\t\tif ( ! self::ours( $request->get_route() ) ) {\n\t\t\treturn $result;\n\t\t}\n\t\treturn ok() ? $result : new WP_Error( 'x', 'x' );\n\t}\n\tprivate static function ours( $route ) {\n\t\treturn str_starts_with( $route, '/sb-ns/' );\n\t}\n}\n" };
+  const asked = [];
+  const split = findRestGateCase([reg], { resolve: (names) => { asked.push(names); return [reg, cls]; } });
+  check('cross-file: the callback is resolved through resolve(), and its helper\'s test found where it is',
+    split.hits.length === 1 && split.hits[0].file === 'p/inc/class-sb-gate.php' && split.hits[0].line === 10 && split.hits[0].helper === 'ours'
+    && split.hits[0].regFile === 'p/boot.php' && split.hits[0].gateFile === 'p/inc/class-sb-gate.php', JSON.stringify(split.hits));
+  check('cross-file: resolve() is asked for the callback, then for what it calls', asked.length === 2 && asked[0].includes('check') && asked[1].includes('ours'), JSON.stringify(asked));
+  const lost = findRestGateCase([reg]);
+  check('a callback that resolves to no body is a scanner note, never a silent clean', lost.hits.length === 0 && lost.notes.length === 1 && /could not be resolved/.test(lost.notes[0]), JSON.stringify(lost.notes));
+  check('resolve() is never handed a third-party or test file to grade',
+    findRestGateCase([reg], { resolve: () => [{ ...cls, file: 'vendor/x/class-sb-gate.php' }, { ...cls, file: 'tests/class-sb-gate.php' }] }).hits.length === 0);
+
+  const C = restGateCandidate;
+  check('graded: a plugin or theme PHP file', C('wp-content/plugins/sb/includes/class-rest.php') && C('src/wp-content/themes/t/functions.php'));
+  check('not graded: WP core, Composer, WooCommerce, node_modules, a test or fixture corpus, non-PHP',
+    [C('wp-includes/rest-api/class-wp-rest-server.php'), C('wp-admin/x.php'), C('vendor/a/b.php'), C('wp-content/plugins/woocommerce/x.php'),
+      C('node_modules/x/y.php'), C('tests/test-gate.php'), C('plugin/GateTest.php'), C('rules/selftest/rest-gate-case/positive.php'), C('plugin/gate.js')].every((v) => !v));
+
+  // What the engine receives: T1 WARN, promotable, a CWE, and an annotation naming hook, gate and test.
+  const fnd = restGateFinding(pos.hits[0]);
+  check('wp-rest-gate-case is T1 and promotable', CHECKS['wp-rest-gate-case'] && CHECKS['wp-rest-gate-case'].tier === 'T1' && isPromotable('wp-rest-gate-case'));
+  check('unpromoted: WARN, never blocks', evaluate([fnd]).blocked === false && evaluate([fnd]).warn === 1);
+  check('promoted via critical-checks: CRITICAL, blocks', evaluate([fnd], { promote: ['wp-rest-gate-case'] }).blocked === true);
+  check('the finding: CWE-178, the fixture path and line, a message that says how to fix it',
+    fnd.checkId === 'wp-rest-gate-case' && fnd.cwe === 'CWE-178' && fnd.file === 'plugin/positive.php' && fnd.line === pos.want[0] && /strtolower both sides/.test(fnd.msg), JSON.stringify(fnd));
+  const ann = annotation({ ...fnd, sev: SEV.CRIT });
+  check('its annotation names the check, hook, gate and comparison, file and line',
+    ann === `::error file=plugin/positive.php,line=${pos.want[0]},title=security-baseline wp-rest-gate-case::wp-rest-gate-case rest_pre_dispatch guard ${pos.hits[0].op} at plugin/positive.php:${pos.want[0]}`, ann);
 }
 
 console.log('\n# scan.mjs end to end — the job log carries the report; secret values reach neither output');
@@ -810,6 +927,7 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     putGr('app/σελίδα.php', '<?php // fixture\n');
     putGr('scripts/έλεγχος.sh', '#!/bin/sh\ncurl -H "X-Api-Key: $GREEK_API_KEY" "$u"\n');
     putGr('δοκιμή/Dockerfile', 'FROM alpine:latest\n');
+    putGr('app/πύλη.php', "<?php\nadd_filter( 'rest_pre_dispatch', function ( $result, $server, $request ) {\n\tif ( 0 === strpos( $request->get_route(), '/gr-gate/' ) && ! gr_ok() ) {\n\t\treturn new WP_Error( 'forbidden', 'Forbidden.', array( 'status' => 403 ) );\n\t}\n\treturn $result;\n}, 10, 3 );\n");
     gitGr('add', '.'); gitGr('commit', '-q', '-m', 'greek names');
     const grDiff = gitGr('diff', '--name-only', 'HEAD~1...HEAD').stdout || '';
     check('(G) control: git, as the scan runs it, prints the Greek paths C-quoted when not given -z (else every Greek-path assertion below is vacuous)',
@@ -825,9 +943,14 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('(G) diff scope: hadolint is handed the changed Dockerfile under a Greek directory', grd.argvs.includes('--format json δοκιμή/Dockerfile'), JSON.stringify(grd.argvs));
     check('(G) diff scope: argv-secret grades the changed Greek-named script',
       grd.stdout.includes('- ⚠️ scripts/έλεγχος.sh:2 — -H X-Api-Key expands GREEK_API_KEY'), verdict(grd));
+    // wp-rest-gate-case reads its own `git grep -l -z` listing (v1.25.0), matched against the -z diff.
+    check('(G) diff scope: wp-rest-gate-case grades the changed Greek-named REST gate, and could look',
+      grd.stdout.includes('- ⚠️ app/πύλη.php:3 — ') && !grd.stdout.includes('wp-rest-gate-case REST route casing — '), verdict(grd));
     const grf = grScan({ SCAN_SCOPE: 'full' });
     check('(G) full scope: hadolint, from its own tracked-file listing, is handed the Dockerfile under a Greek directory',
       grf.argvs.includes('--format json δοκιμή/Dockerfile'), JSON.stringify(grf.argvs));
+    check('(G) full scope: wp-rest-gate-case finds the Greek-named REST gate from its own tracked-file search',
+      grf.stdout.includes('- ⚠️ app/πύλη.php:3 — ') && !grf.stdout.includes('wp-rest-gate-case REST route casing — '), verdict(grf));
 
     // (H) The registry fetch for the default p/security-audit fails.
     // semgrep 1.178.0's own answer, measured: exit 7 and two error entries.
@@ -1860,6 +1983,87 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
       fs.readdirSync(tmp).join(','));
     check('every trufflehog clone directory is removed afterwards, the failed clone\'s too', fs.readdirSync(tmp).filter((d) => d.startsWith('sb-trufflehog-')).length === 0,
       fs.readdirSync(tmp).join(','));
+
+    // ---- wp-rest-gate-case end to end: a repo of its own, the clean stubs, the real git ----
+    // A gate's registration, body and helper may sit in different files, so the tracked tree is read
+    // every run and the diff keeps a finding when any of its files changed: here a commit that only
+    // re-registers a gate whose body it never touches.
+    const rg = path.join(tmp, 'rest-gate-repo');
+    fs.mkdirSync(rg);
+    const rgGit = (...a) => spawnSync('git', ['-c', 'user.name=selftest', '-c', 'user.email=selftest@example.invalid', '-c', 'commit.gpgsign=false', ...a], { cwd: rg, env: base, encoding: 'utf8' });
+    const rgPut = (rel, text) => { fs.mkdirSync(path.dirname(path.join(rg, rel)), { recursive: true }); fs.writeFileSync(path.join(rg, rel), text); };
+    const P = 'wp-content/plugins/sb';
+    const closureGate = (test) => `<?php\nadd_filter( 'rest_pre_dispatch', function ( $result, $server, $request ) {\n\tif ( ${test} && ! sb_ok() ) {\n\t\treturn new WP_Error( 'forbidden', 'Forbidden.', array( 'status' => 403 ) );\n\t}\n\treturn $result;\n}, 10, 3 );\n`;
+    rgGit('init', '-q');
+    rgPut(`${P}/old-gate.php`, closureGate("str_starts_with( $request->get_route(), '/sb-old/' )"));
+    rgPut(`${P}/boot.php`, "<?php\nadd_filter( 'rest_pre_dispatch', array( 'SB_Split_Gate', 'check' ), 10, 3 );\n");
+    rgPut(`${P}/includes/class-sb-split-gate.php`, "<?php\nclass SB_Split_Gate {\n\tpublic static function check( $result, $server, $request ) {\n\t\tif ( ! str_starts_with( $request->get_route(), '/sb-split/' ) ) {\n\t\t\treturn $result;\n\t\t}\n\t\treturn sb_ok() ? $result : new WP_Error( 'forbidden', 'Forbidden.' );\n\t}\n}\n");
+    rgGit('add', '.'); rgGit('commit', '-q', '-m', 'base');
+    rgPut(`${P}/boot.php`, "<?php\nadd_filter( 'rest_pre_dispatch', array( 'SB_Split_Gate', 'check' ), 5, 3 );\n");
+    rgPut(`${P}/new-gate.php`, closureGate("0 === strpos( $request->get_route(), '/sb-new/' )"));
+    rgPut(`${P}/fixed-gate.php`, closureGate("0 === strpos( strtolower( $request->get_route() ), '/sb-fixed/' )"));
+    rgPut(`${P}/tests/test-gate.php`, closureGate("str_starts_with( $request->get_route(), '/sb-test/' )"));
+    rgGit('add', '.'); rgGit('commit', '-q', '-m', 'change');
+    check('wp-rest-gate-case fixture repo has two commits (else every assertion below is vacuous)', (rgGit('rev-list', '--count', 'HEAD').stdout || '').trim() === '2');
+    const rgLines = (r) => r.stdout.split('\n').filter((l) => /wp-rest-gate-case/.test(l)).join(' | ');
+    const SPLIT = `${P}/includes/class-sb-split-gate.php:4`, NEW = `${P}/new-gate.php:3`, OLD = `${P}/old-gate.php:3`;
+    const listedAt = (r, at) => r.stdout.includes(`- ⚠️ ${at} — `) || r.stdout.includes(`- ❌ ${at} — `);
+
+    const ra = broken({}, { GITHUB_ACTIONS: 'true' }, rg);
+    check('wp-rest-gate-case diff: a T1 WARN group with the new gate and the re-registered one, and a PASS',
+      ra.status === 0 && ra.stdout.includes('### ⚠️ `wp-rest-gate-case` · T1 · 2 finding(s)') && listedAt(ra, NEW) && listedAt(ra, SPLIT)
+      && ra.stdout.includes('\nPASS — no critical findings.\n') && commands(ra.stdout).length === 0, `${verdict(ra)} ${rgLines(ra)}`);
+    check('wp-rest-gate-case diff: an untouched gate is not graded, a lower-cased one is silent, a test file never graded',
+      ra.stdout.length > 0 && !ra.stdout.includes('old-gate.php') && !ra.stdout.includes('fixed-gate.php') && !ra.stdout.includes('test-gate.php'), rgLines(ra));
+    check('wp-rest-gate-case diff: the finding names hook, gate and comparison, with its fix',
+      ra.stdout.includes(`- ⚠️ ${SPLIT} — check on rest_pre_dispatch compares the route case-sensitively str_starts_with;`) && /strtolower both sides/.test(ra.stdout), rgLines(ra));
+
+    const rf = broken({}, { SCAN_SCOPE: 'full' }, rg);
+    check('wp-rest-gate-case full scope: the untouched gate too — never the test file',
+      rf.status === 0 && rf.stdout.includes('### ⚠️ `wp-rest-gate-case` · T1 · 3 finding(s)') && listedAt(rf, OLD) && !rf.stdout.includes('test-gate.php'), rgLines(rf));
+
+    const rp = broken({}, { GITHUB_ACTIONS: 'true', CRITICAL_CHECKS: 'wp-rest-gate-case' }, rg);
+    check('wp-rest-gate-case promoted: BLOCK, one ::error per finding naming hook, gate and comparison', rp.status === 1 && rp.stdout.includes('\nBLOCKED — 2 critical finding(s).')
+      && JSON.stringify(commands(rp.stdout).sort()) === JSON.stringify([
+        `::error file=${P}/includes/class-sb-split-gate.php,line=4,title=security-baseline wp-rest-gate-case::wp-rest-gate-case rest_pre_dispatch check str_starts_with at ${SPLIT}`,
+        `::error file=${P}/new-gate.php,line=3,title=security-baseline wp-rest-gate-case::wp-rest-gate-case rest_pre_dispatch closure strpos at ${NEW}`,
+      ]), `${verdict(rp)} ${JSON.stringify(commands(rp.stdout))}`);
+
+    // A git grep that fails is could-not-look, never "no gate here": a FAULT once the caller promoted
+    // the check, a listed WARN-leg note before that.
+    const refuseGrep = gitShim(['grep'], 'echo "fatal: grep refused by the selftest" >&2; exit 128');
+    const hookGrepFails = '- ❌ wp-rest-gate-case REST route casing — git grep for the REST hooks failed, exit 128: fatal: grep refused by the selftest\n';
+    const rx = broken({}, { GITHUB_ACTIONS: 'true', CRITICAL_CHECKS: 'wp-rest-gate-case', ...refuseGrep }, rg);
+    check('wp-rest-gate-case, promoted, git grep refused: FAULT, naming the git call, and an ::error saying it could not look',
+      rx.status === 1 && rx.stdout.includes(hookGrepFails) && rx.stdout.includes('\nFAULT — 1 scanner leg(s) that could have blocked could not look (wp-rest-gate-case REST route casing).')
+      && commands(rx.stdout).includes('::error title=security-baseline could not look::wp-rest-gate-case REST route casing could not look — git grep for the REST hooks failed, exit 128: fatal: grep refused by the selftest'), verdict(rx));
+    const ry = broken({}, refuseGrep, rg);
+    check('wp-rest-gate-case, unpromoted, git grep refused: listed, not a fault — PASS',
+      ry.status === 0 && ry.stdout.includes('- ⚠️ wp-rest-gate-case REST route casing — git grep for the REST hooks failed, exit 128: fatal: grep refused by the selftest (its checks only warn for this caller: reported, not a fault)')
+      && ry.stdout.includes('\nPASS — no critical findings. 1 scanner leg(s) that only warn here could not look (above).'), verdict(ry));
+    // The second search, for the callbacks' bodies, fails: what was graded is still reported.
+    const refuseDefs = gitShim(['grep'], `case "$*" in *function*) echo "fatal: grep refused by the selftest" >&2; exit 128 ;; esac\nexec '${realGit}' "$@"`);
+    const rz = broken({}, { CRITICAL_CHECKS: 'wp-rest-gate-case', ...refuseDefs }, rg);
+    check('wp-rest-gate-case, the body search refused: the closure gate still BLOCKS, the leg is named as could-not-look',
+      rz.status === 1 && rz.stdout.includes('\nBLOCKED — 1 critical finding(s).') && listedAt(rz, NEW) && !listedAt(rz, SPLIT)
+      && rz.stdout.includes('- ❌ wp-rest-gate-case REST route casing — git grep for the gate functions failed, exit 128: fatal: grep refused by the selftest\n'), `${verdict(rz)} ${rgLines(rz)}`);
+    // A diff that touches no PHP grades nothing — not even a search, so the refusing git is never asked.
+    rgPut('README.md', 'docs\n'); rgGit('add', '.'); rgGit('commit', '-q', '-m', 'docs');
+    const rn = broken({}, { CRITICAL_CHECKS: 'wp-rest-gate-case', ...refuseGrep }, rg);
+    check('wp-rest-gate-case: a diff with no PHP in it is not searched — PASS, nothing could-not-look',
+      rn.status === 0 && rn.stdout.includes('\nPASS — no critical findings.\n') && !rn.stdout.includes('could not look') && !rn.stdout.includes('`wp-rest-gate-case` · '), verdict(rn));
+    // exit 1 is "no match" only without an error: git grep's exit 1 with a fatal line could not look.
+    const grepFatal1 = gitShim(['grep'], 'echo "fatal: grep failed in the selftest" >&2; exit 1');
+    const r1 = broken({}, { CRITICAL_CHECKS: 'wp-rest-gate-case', SCAN_SCOPE: 'full', ...grepFatal1 }, rg);
+    check('wp-rest-gate-case: git grep exit 1 WITH a fatal line could not look — FAULT once promoted, never "no gate here"',
+      r1.status === 1 && r1.stdout.includes('- ❌ wp-rest-gate-case REST route casing — git grep for the REST hooks failed, exit 1: fatal: grep failed in the selftest\n'), verdict(r1));
+    // A file the search found but nothing graded — here one over 2 MB — could not look either.
+    rgPut(`${P}/huge.php`, `<?php\nadd_filter( 'rest_pre_dispatch', 'sb_huge_gate', 10, 3 );\n/* ${'x'.repeat(2 * 1024 * 1024)} */\n`);
+    rgGit('add', '.'); rgGit('commit', '-q', '-m', 'huge');
+    const rh = broken({}, { CRITICAL_CHECKS: 'wp-rest-gate-case' }, rg);
+    check('wp-rest-gate-case: a hooked file over 2 MB is not graded, and says so — FAULT once promoted, not a PASS',
+      rh.status === 1 && rh.stdout.includes(`- ❌ wp-rest-gate-case REST route casing — 1 PHP file that may hold a REST gate was not graded — 1 over 2 MB: ${P}/huge.php\n`)
+      && rh.stdout.includes('\nFAULT — 1 scanner leg(s) that could have blocked could not look (wp-rest-gate-case REST route casing).'), `${verdict(rh)} ${rgLines(rh)}`);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

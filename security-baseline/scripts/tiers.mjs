@@ -35,6 +35,7 @@ export const CHECKS = {
   'wp-rest-error-detail-laundered': { tier: 'T1', sev: SEV.WARN }, // laundered CWE-209 (taint/heuristic); separate id so promoting wp-rest-error-detail doesn't auto-promote these
   'wp-weak-crypto':     { tier: 'T1', sev: SEV.WARN },
   'turnstile-test-key': { tier: 'T1', sev: SEV.WARN },
+  'wp-rest-gate-case':  { tier: 'T1', sev: SEV.WARN },  // a REST gate that tests the route case-sensitively — WP routes match /i (rest-gate-case.mjs)
 
   // ---- T1: promotable WARN (custom Astro/TS/RN rules) ----
   'ts-dangerous-html':    { tier: 'T1', sev: SEV.WARN },

@@ -18,7 +18,7 @@ const ids = (re) => Object.keys(CHECKS).filter((k) => re.test(k));
 // its leg, so a pack cannot gain a rule family its leg does not claim.
 export const LEGS = {
   community: { name: 'semgrep community SAST', checks: ['sast-critical'] },
-  custom: { name: 'semgrep WP/PHP + Astro/TS rule packs', checks: ids(/^(wp|ts|rn)-|^turnstile-test-key$/) },
+  custom: { name: 'semgrep WP/PHP + Astro/TS rule packs', checks: ids(/^(wp|ts|rn)-|^turnstile-test-key$/).filter((id) => id !== 'wp-rest-gate-case') },
   gha: { name: 'semgrep GitHub-Actions rule pack', checks: ids(/^gha-/) },
   // secrets-history: what the diff range found in a commit the base already holds (v1.19.8).
   gitleaks: { name: 'gitleaks secret scan', checks: ['secret-pattern', 'secrets-history'] },
@@ -29,11 +29,12 @@ export const LEGS = {
   osv: { name: 'osv-scanner dependency audit', checks: ids(/^sca-/) },
   hadolint: { name: 'hadolint Dockerfile lint', checks: ['dockerfile-lint'] },
   argvSecret: { name: 'argv-secret', checks: ['argv-secret'] },
+  restGateCase: { name: 'wp-rest-gate-case REST route casing', checks: ['wp-rest-gate-case'] },
 };
 // The changed-file list feeds every diff-scoped leg; a diff that fails leaves all of them grading nothing.
 LEGS.diff = {
   name: 'changed-file list',
-  checks: [...new Set([...LEGS.community.checks, ...LEGS.custom.checks, ...LEGS.hadolint.checks, ...LEGS.argvSecret.checks])],
+  checks: [...new Set([...LEGS.community.checks, ...LEGS.custom.checks, ...LEGS.hadolint.checks, ...LEGS.argvSecret.checks, ...LEGS.restGateCase.checks])],
 };
 
 // Every reason below reaches the report through safe(), which strips parentheses and brackets, so
