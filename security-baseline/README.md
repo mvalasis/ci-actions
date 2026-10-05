@@ -561,6 +561,13 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   Replayed over every range the callers recorded to 2026-09-26 (1,757 branch updates in GitHub's
   activity log and 85 `pull_request` ranges, 1,490 of them still in history), git's list held no
   base commit: the cutoff has not yet reached a caller.
+- **Until v1.24.2 a changed file with a non-ASCII name was never graded on a diff run.** The
+  changed-file list read `git diff --name-only` without `-z`, and git's default `core.quotePath`
+  prints a path holding a non-ASCII byte C-quoted (`"app/\317\203….php"`): the extension tests and
+  `fs.existsSync` dropped it, so semgrep community SAST, the rule packs, hadolint and argv-secret
+  never saw a Greek-named file, and the run passed. hadolint's full-tree `git ls-files` dropped a
+  Dockerfile under a Greek directory the same way. Every git path listing in `scan.mjs` now reads
+  `-z`; a full-scope semgrep run, which walks `.` itself, was never affected.
 - **No reachability.** OSS semgrep + osv-scanner are syntactic / present-in-tree; there is no
   dataflow-reachability (a Pro/cloud feature, air-gap-forbidden). A dep CVE means "present", not
   "exploitable" — the report says so.
@@ -633,6 +640,11 @@ the shape `a11y-audit` (v1.15.1) and `linkcheck` (v1.15.2) moved to.
   commands (stdout a socket, as node's child_process gives it — the case that crashed the old
   `/dev/stdout` fallback on Linux), report-mode annotating as `::warning`, and an unwritable summary
   still reaching the log under the caller's exit setting. 19 targeted mutants each turn it red.
+  Its **Greek-path** case (v1.24.2) commits a PHP file, a script and a Dockerfile under Greek names,
+  asserts first that git prints them C-quoted without `-z` (else the case is vacuous), then that on
+  a diff run semgrep's community and rule-pack runs and hadolint are each handed them (stubs that log
+  their argv) and argv-secret reports the script, and that hadolint's full-tree listing finds the
+  Dockerfile. 3 targeted mutants each turn it red.
   Its **argv-secret** leg asserts that every shape the fleet shipped fires and the `-H @file` fix,
   comment lines and a reasoned pragma do not; the file selection (languages, the always-on `.github`
   pass, the skipped corpora); and, end to end, an untouched workflow reported on a diff run, an

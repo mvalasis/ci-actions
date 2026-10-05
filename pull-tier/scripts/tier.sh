@@ -117,7 +117,10 @@ case "$EVENT_NAME" in
 esac
 case "$base" in ""|0000000000000000000000000000000000000000) decide true "no known base for '$EVENT_NAME' (first push / new branch)" ;; esac
 git cat-file -e "$base^{commit}" 2>/dev/null || decide true "base $base is not in this checkout (shallow clone?)"
-changed=$(git diff --name-only "$base" "$HEAD_SHA" 2>/dev/null) || decide true "git diff $base..$HEAD_SHA failed"
+# -z (v1.24.2): without it git's default core.quotePath prints a path with a non-ASCII byte
+# C-quoted, `"src/lib/\316\273.ts"`, which no glob matches, so a changed Greek-named pull
+# input forced no pull. NULs become newlines for the loop below (pipefail keeps git's exit).
+changed=$(git diff --name-only -z "$base" "$HEAD_SHA" 2>/dev/null | tr '\0' '\n') || decide true "git diff $base..$HEAD_SHA failed"
 if [ -n "$PATHS" ] && [ -n "$changed" ]; then
   while IFS= read -r f; do
     [ -n "$f" ] || continue

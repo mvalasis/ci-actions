@@ -105,16 +105,20 @@ function resolveBase() {
 }
 const BASE = resolveBase();
 const DIFF = SCAN_SCOPE === 'diff' && BASE;
+// The changed files are read with -z (v1.24.2), as every git path listing in this file is. Without
+// it git's default core.quotePath prints a path holding a non-ASCII byte C-quoted, `"app/\316\261.php"`:
+// no extension test matches it and no file exists by that name, so every diff-scoped leg dropped a
+// Greek-named file unseen.
 function changedFiles() {
   if (!DIFF) return null; // full tree
-  const r = run('git', ['diff', '--name-only', '--diff-filter=d', `${BASE}...HEAD`], { timeout: 30000 });
+  const r = run('git', ['diff', '--name-only', '-z', '--diff-filter=d', `${BASE}...HEAD`], { timeout: 30000 });
   // A diff that failed is not a diff with nothing in it: every diff-scoped leg would grade an empty
   // list and call it clean. (A base named by base-ref or the PR is not verified to exist.)
   if (r.status !== 0 || r.error) {
     couldNotLook(LEGS.diff, `git diff ${safe(BASE, 60)}...HEAD failed, exit ${r.status}${errorLine(r.stderr) ? `: ${scrub(errorLine(r.stderr))}` : ''}`);
     return [];
   }
-  return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+  return r.stdout.split('\0').filter(Boolean);
 }
 const CHANGED = changedFiles();
 const byExt = (files, exts) => (files || []).filter((f) => exts.some((e) => f.toLowerCase().endsWith(e)) && fs.existsSync(f));
@@ -657,9 +661,9 @@ function collectHadolint() {
   const dfChanged = DIFF ? (CHANGED || []).filter((f) => /(^|\/)Dockerfile(\.|$)|\.dockerfile$/i.test(f) && fs.existsSync(f)) : [];
   let targets = dfChanged;
   if (!DIFF) {
-    const ls = run('git', ['ls-files'], { timeout: 30000 });
+    const ls = run('git', ['ls-files', '-z'], { timeout: 30000 });
     if (ls.status !== 0 || ls.error) { couldNotLook(LEGS.hadolint, `git ls-files failed, exit ${ls.status} — no Dockerfile was listed`); return out; }
-    targets = ls.stdout.split('\n').filter((f) => /(^|\/)Dockerfile(\.|$)/i.test(f) && fs.existsSync(f)).slice(0, 20);
+    targets = ls.stdout.split('\0').filter((f) => /(^|\/)Dockerfile(\.|$)/i.test(f) && fs.existsSync(f)).slice(0, 20);
   }
   if (targets.length === 0) return out;
   if (!have(BIN.hadolint)) { couldNotLook(LEGS.hadolint, 'hadolint not installed, with a Dockerfile in scope'); return out; }

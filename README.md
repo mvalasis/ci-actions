@@ -85,6 +85,23 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.24.2** (tag not yet cut) — a changed file with a non-ASCII name, such as a Greek one on the fleet's Greek sites,
+was dropped unseen by every diff-scoped leg of `security-baseline` and by `pull-tier`'s input match.
+Both read `git diff --name-only` without `-z`, and git's default `core.quotePath` prints such a path
+C-quoted, `"app/\317\203….php"`: no extension test or glob matches past the quotes, and no file
+exists by that name. So on a diff run semgrep community SAST (T0), the WP/PHP and Astro/TS rule
+packs, hadolint and argv-secret never graded the file and the run still passed; hadolint's own
+full-tree `git ls-files` dropped a Dockerfile under a Greek directory the same way; and `pull-tier`
+forced no pull for a changed pull input with a Greek name (its marker check still ran). Every git
+path listing in both now reads `-z`, as osv-scanner's and argv-secret's `git ls-files -z` already
+did. Each self-test commits Greek-named files, asserts first that git prints them quoted, then that
+each leg is handed them (stubs that log their argv, argv-secret by its finding, `pull-tier` by its
+reason); 3 targeted mutants in `scan.mjs` and 2 in `tier.sh` each turn it red. **Caller-visible:** a
+diff touching a non-ASCII-named file is graded now, so a finding in one appears, and blocks if it is
+T0 or promoted. Measured over the 12 callers' local checkouts (2026-10-05): only prevedourougr
+tracks non-ASCII code paths, two `.astro` pages graded by the T1 Astro/TS pack, and it promotes
+`argv-secret` alone, so the `v1` move newly-blocks nobody. No input changed.
+
 **v1.24.1** — test-only: v1.24.0's own self-test went red on its first push. The
 `isolate-files` leg for a file whose run is killed pinned `exit 1`, which is what `sh` gives where it
 execs the command (macOS); on the Linux runner, dash relays the kill as `exit 137` (`Killed`). The
@@ -1506,6 +1523,9 @@ incrementally and `actions/cache` had already restored the last pulled state.
 
 `mode: record` writes the marker after a successful pull — put it inside a path
 the caller caches (`content-cache/pull-marker.json` by default).
+
+The changed files are read with `git diff -z` (v1.24.2): without it git prints a
+non-ASCII path C-quoted, and a changed pull input with a Greek name matched no glob.
 
 ```yaml
       - name: Pull tier

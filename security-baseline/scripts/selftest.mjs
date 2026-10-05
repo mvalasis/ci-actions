@@ -796,6 +796,39 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('(G) trufflehog walks HEAD back to the base (BASE_REF HEAD~1), both handed over as shas',
       new RegExp(`(^| )--branch ${revOf('HEAD')} --since-commit ${revOf('HEAD~1')}( |$)`, 'm').test(thArgv), thArgv);
 
+    // (G) Greek paths (v1.24.2). git's default core.quotePath prints a path with a non-ASCII byte
+    // C-quoted, `"app/\317\203….php"`, unless asked for -z: read without it, the changed-file list
+    // and hadolint's full-tree listing named files that do not exist, with an extension that ends in
+    // `"`, so every diff-scoped leg dropped a Greek-named file unseen and the run still passed. Each
+    // stub here logs the paths it was handed, so a file it never saw cannot pass for a clean one.
+    const gr = path.join(tmp, 'greek-paths');
+    fs.mkdirSync(gr);
+    const gitGr = (...a) => spawnSync('git', ['-c', 'user.name=selftest', '-c', 'user.email=selftest@example.invalid', '-c', 'commit.gpgsign=false', ...a], { cwd: gr, env: base, encoding: 'utf8' });
+    const putGr = (rel, text) => { fs.mkdirSync(path.dirname(path.join(gr, rel)), { recursive: true }); fs.writeFileSync(path.join(gr, rel), text); };
+    gitGr('init', '-q');
+    putGr('README.md', 'base\n'); gitGr('add', '.'); gitGr('commit', '-q', '-m', 'base');
+    putGr('app/σελίδα.php', '<?php // fixture\n');
+    putGr('scripts/έλεγχος.sh', '#!/bin/sh\ncurl -H "X-Api-Key: $GREEK_API_KEY" "$u"\n');
+    putGr('δοκιμή/Dockerfile', 'FROM alpine:latest\n');
+    gitGr('add', '.'); gitGr('commit', '-q', '-m', 'greek names');
+    const grDiff = gitGr('diff', '--name-only', 'HEAD~1...HEAD').stdout || '';
+    check('(G) control: git, as the scan runs it, prints the Greek paths C-quoted when not given -z (else every Greek-path assertion below is vacuous)',
+      grDiff.includes('"app/\\317\\203') && !grDiff.includes('app/σελίδα.php'), JSON.stringify(grDiff));
+    const grLog = path.join(tmp, 'greek-argv.log');
+    const logging = (name, answer) => stub(name, `printf '%s\\n' "$*" >> '${grLog}'\n${answer}`);
+    const grStubs = { SEMGREP_BIN: logging('semgrep-logging', `echo '{"results":[],"errors":[]}'`), HADOLINT_BIN: logging('hadolint-logging', 'echo "[]"') };
+    const grScan = (extra) => { fs.rmSync(grLog, { force: true }); const res = broken(grStubs, extra, gr); return { ...res, argvs: fs.existsSync(grLog) ? fs.readFileSync(grLog, 'utf8').split('\n').filter(Boolean) : [] }; };
+    const handed = (argvs, needle, file) => argvs.some((l) => l.includes(needle) && ` ${l} `.includes(` ${file} `));
+    const grd = grScan({});
+    check('(G) diff scope: semgrep community SAST is handed the changed Greek-named PHP file', handed(grd.argvs, '--severity', 'app/σελίδα.php'), JSON.stringify(grd.argvs));
+    check('(G) diff scope: the WP/PHP + Astro/TS rule packs are handed it too', handed(grd.argvs, 'wp-php.yaml', 'app/σελίδα.php'), JSON.stringify(grd.argvs));
+    check('(G) diff scope: hadolint is handed the changed Dockerfile under a Greek directory', grd.argvs.includes('--format json δοκιμή/Dockerfile'), JSON.stringify(grd.argvs));
+    check('(G) diff scope: argv-secret grades the changed Greek-named script',
+      grd.stdout.includes('- ⚠️ scripts/έλεγχος.sh:2 — -H X-Api-Key expands GREEK_API_KEY'), verdict(grd));
+    const grf = grScan({ SCAN_SCOPE: 'full' });
+    check('(G) full scope: hadolint, from its own tracked-file listing, is handed the Dockerfile under a Greek directory',
+      grf.argvs.includes('--format json δοκιμή/Dockerfile'), JSON.stringify(grf.argvs));
+
     // (H) The registry fetch for the default p/security-audit fails.
     // semgrep 1.178.0's own answer, measured: exit 7 and two error entries.
     const registryDown = JSON.stringify({ results: [], errors: [

@@ -57,6 +57,12 @@ run_tier "$TIER" decide EVENT_NAME=pull_request PR_BASE_SHA="$HEAD2"
 check "pull_request diffs against the PR base sha" "$(pull_is true && echo 0 || echo 1)"
 run_tier "$TIER" decide EVENT_NAME=pull_request PR_BASE_SHA="$HEAD3"
 check "pull_request with no input change and a fresh marker → pull=false" "$(pull_is false && echo 0 || echo 1)"
+# docs/ sorts first: the input is the diff's second path, so its NUL separator must survive too.
+mkdir -p docs; printf 'n\n' > docs/note.md; printf 'g\n' > 'src/lib/λεξικό.ts'; git add -A; git commit -qm "greek lib"; HEAD4=$(git rev-parse HEAD)
+quoted=$(env -i PATH="$PATH" HOME="$WORK" git diff --name-only "$HEAD3" "$HEAD4")
+check "control: git prints the Greek path C-quoted without -z (else the next check is vacuous)" "$(printf '%s\n' "$quoted" | grep -q '^"src/lib/[\]' && echo 0 || echo 1)"
+run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA="$HEAD3"
+check "a changed Greek-named pull input (src/lib/λεξικό.ts) → pull=true" "$(pull_is true && reason_has 'λεξικό.ts.*pull input' && echo 0 || echo 1)"
 
 echo; echo "# decide: the cache must vouch for itself"
 run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA=0000000000000000000000000000000000000000
@@ -64,22 +70,22 @@ check "all-zero base → pull=true" "$(pull_is true && reason_has 'no known base
 run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
 check "unknown base sha → pull=true" "$(pull_is true && echo 0 || echo 1)"
 rm src/content/posts/b.md
-run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA="$HEAD3"
+run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA="$HEAD4"
 check "fingerprint mismatch (a file gone) → pull=true" "$(pull_is true && reason_has 'fingerprint' && echo 0 || echo 1)"
 printf 'b\n' > src/content/posts/b.md
 old=$(( $(date +%s) - 9*86400 )); sed -i.bak "s/\"at\":[0-9]*/\"at\":$old/" content-cache/pull-marker.json; rm -f content-cache/pull-marker.json.bak
-run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA="$HEAD3"
+run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA="$HEAD4"
 check "9-day-old marker → pull=true" "$(pull_is true && reason_has 'old' && echo 0 || echo 1)"
-run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA="$HEAD3" MAX_AGE_DAYS=30
+run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA="$HEAD4" MAX_AGE_DAYS=30
 check "…unless max-age-days allows it" "$(pull_is false && echo 0 || echo 1)"
 rm content-cache/pull-marker.json
-run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA="$HEAD3"
+run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA="$HEAD4"
 check "no marker → pull=true" "$(pull_is true && reason_has 'no marker' && echo 0 || echo 1)"
 
 echo; echo "# crash guard: an abort resolves to pull=true, exit 0, and says so"
 sed 's|^MAX_AGE_DAYS="${MAX_AGE_DAYS:-8}"|MAX_AGE_DAYS="${DELIBERATELY_UNBOUND_XYZ}"|' "$TIER" > "$WORK/tier-unbound.sh"
 grep -q DELIBERATELY_UNBOUND_XYZ "$WORK/tier-unbound.sh"; check "fault injection applied" $?
-run_tier "$WORK/tier-unbound.sh" decide EVENT_NAME=push BEFORE_SHA="$HEAD3"
+run_tier "$WORK/tier-unbound.sh" decide EVENT_NAME=push BEFORE_SHA="$HEAD4"
 check "abort exits 0 with pull=true" "$([ "$RC" -eq 0 ] && pull_is true && echo 0 || echo 1)"
 check "…and the reason names the fault" "$(reason_has 'faulted' && grep -q 'FAULT' "$STDERR" && echo 0 || echo 1)"
 
