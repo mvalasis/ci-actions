@@ -34,6 +34,13 @@ parser. Classify every run as *looked* or *could-not-look*, and grade a could-no
 fault under the same `FAIL_ON_<X> ? 1 : 0` rule whenever that leg could have produced a blocking
 finding (a WARN-only leg that could not look is listed, never treated as a fault).
 
+**Every git path listing reads `-z`** (`diff --name-only`, `ls-files`, `grep -l`), split on `\0`.
+Without it git's default `core.quotePath` C-quotes a non-ASCII path, `"app/\317\203….php"`: no
+extension test matches and no file exists by that name, so the leg drops it and still passes
+(v1.24.2). A new leg with its own listing also joins the Greek-path case in
+`security-baseline/scripts/selftest.mjs` (a Greek-named file it must grade), as `wp-rest-gate-case`
+did in v1.25.0.
+
 **Known limit, not papered over:** for bash the crash-guard check matches any `trap … EXIT`, so a
 pure cleanup trap reads as a guard. A behavioural self-test that actually crashes the real
 entrypoint — not a static check — is what proves the guard fires. Mutation-test every new
