@@ -68,6 +68,17 @@ Rollout: start `fail-on-violations: false` (surface the backlog), fix it, then f
   symlink path-traversal advisories, no fixed release), reached only through `@puppeteer/browsers`'
   `install()`, which a11y-audit never runs; it leaves the tree once a pa11y-ci release moves to
   pa11y 10 (puppeteer 25 dropped it).
+- **An advisory with a fix outside its parent's range: `overrides`, not an exception** (v1.25.1).
+  When the fixed release exists but no release of the parent depends on it, `package.json`'s
+  `overrides` lifts the package to it, at an exact version like every dependency here
+  (`selftest-pins.sh` fails a range, or an override the lock does not install at that version), and
+  the lock is regenerated the usual way (below); an `osv-scanner.toml` exception is for an advisory
+  with no fixed release. Today: basic-ftp 6.2.1 (GHSA-c475-qrg2-pj4r, fixed in 6.2.1), under get-uri
+  6.0.5 ← pac-proxy-agent ← proxy-agent ← `@puppeteer/browsers`, where even get-uri's latest asks
+  for `^5.3.1`. Its 6.0.0 break is a safer default (no separate transfer host, against FTP bounce);
+  the `Client` API get-uri calls is unchanged. Nothing on the audit path loads it unless the runner
+  sets a `pac+` proxy URL: proxy-agent loads pac-proxy-agent, and get-uri with it, only for one.
+  The override comes out when get-uri's range reaches 6.
 - **Modern browser.** pa11y-ci 4.1.1 → pa11y 9.1.1 → puppeteer 24.43.1, driving Chrome for
   Testing 148. The earlier `pa11y-ci@3` shipped Chromium 91, which predates CSS cascade layers (`@layer`, Chrome
   99+); on any layered stylesheet — e.g. **Tailwind v4** — the utilities block was dropped,
@@ -150,9 +161,14 @@ reviewed at least that often, and one carrying none moves when osv.dev knows of 
    npm install --package-lock-only --ignore-scripts --no-audit --no-fund --before="$(date -u -v-7d +%F)"
    ```
    (GNU date: `date -u -d '7 days ago' +%F`.) Read what moved: `git diff package-lock.json`.
+   With the lock in place npm moves only what `package.json`'s change requires and keeps every
+   other locked version (v1.25.1: an override moved basic-ftp alone); move the lock aside first for
+   a full re-resolve, and then expect pa11y, puppeteer and the Chrome build to move with it.
 3. Advisories: `osv-scanner scan source --recursive .` (the pinned binary, or the osv.dev
    `querybatch` API). Drop the `osv-scanner.toml` entries the lock no longer needs; for one you
-   keep, say why again and move its `ignoreUntil` (100 days at most).
+   keep, say why again and move its `ignoreUntil` (100 days at most). An advisory fixed by a
+   release at least a week old that no parent's range reaches takes an `overrides` entry in
+   `package.json` (§Notes), then step 2 again; drop an override once a parent's range reaches it.
 4. The Chrome build: install the new lock in a scratch dir as the action does (`npm ci
    --ignore-scripts`) and read `node -p "require('./node_modules/puppeteer-core/lib/cjs/puppeteer/revisions.js').PUPPETEER_REVISIONS.chrome"`.
    If it moved, download

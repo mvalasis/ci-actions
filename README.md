@@ -85,6 +85,28 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.25.1** — `a11y-audit`'s lock moves basic-ftp from 5.3.1 to 6.2.1. The Monday run of
+`a11y-audit-selftest.yml` (2026-10-05) went red on GHSA-c475-qrg2-pj4r (HIGH: quadratic-time CPU in
+`Client.list()`'s Unix listing parser, fixed in 6.2.1), new on a package nothing here changed. It
+sits under get-uri 6.0.5 ← pac-proxy-agent ← proxy-agent ← `@puppeteer/browsers`, and no get-uri
+release takes basic-ftp 6 (the latest asks for `^5.3.1`), so `a11y-audit/package.json` gains
+`"overrides": {"basic-ftp": "6.2.1"}` and the lock was regenerated the README's way
+(`--before=2026-09-28`): basic-ftp is the one entry that moved; pa11y-ci 4.1.1, pa11y 9.1.1,
+puppeteer 24.43.1 and the Chrome build (148.0.7778.97) did not, so the verify-token scope stands as
+measured. basic-ftp 6.0.0's break is a safer default (no separate transfer host); the `Client` API
+get-uri calls is unchanged, and nothing on the audit path loads it unless the runner sets a `pac+`
+proxy URL. `selftest-pins.sh` now holds an override to the exact-version rule a dependency already
+followed: it fails a range, an override the lock installs at another version, and one for a package
+the lock does not install (4 mutants, each red). Before release: `selftest-pins.sh` (40 assertions,
+every lock entry a registry tarball with its sha512), osv.dev over all 162 locked packages (only the
+two reviewed extract-zip exceptions), the engine self-test, and `selftest-install.sh`'s token-scope
+and verdict leg run verbatim on macOS against the new lock and the same build's mac-arm64 Chrome for
+Testing (14 assertions); its Linux leg runs on CI. `a11y-audit`'s README gains the override rule
+(§Notes, §Refreshing the lockfile). **Caller-visible:** none; no input or verdict changed, and the
+`v1` move newly-blocks nobody. **Next:** basic-ftp published GHSA-5rfr-xx34-2xxv (medium, fixed in
+6.2.2) on 2026-10-04; when osv.dev carries it the Monday run goes red again, and from 2026-10-11,
+when 6.2.2 is a week old, the override moves to 6.2.2.
+
 **v1.25.0** — `security-baseline` gains **`wp-rest-gate-case`** (T1, promotable WARN, CWE-178): a
 WordPress REST gate that tests the route case-sensitively. Core matches a request to its route with
 `/i`, so `/wp-json/My-Plugin/v1/x` and `?rest_route=/MY-PLUGIN/v1/x` reach the handler registered as

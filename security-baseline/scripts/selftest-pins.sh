@@ -119,7 +119,7 @@ local_install="$(grep -nE 'npm (i|install)([[:space:]]|$)' "${surfaces[@]}" | gr
 check "no action.yml or workflow runs a local npm install (a committed lock goes through npm ci)${local_install:+: $local_install}" [ -z "$local_install" ]
 
 # Every committed npm lock (and any new one not yet ignored): a registry tarball and a sha512
-# integrity for each package, in step with its package.json, whose dependencies are exact.
+# integrity for each package, in step with its package.json, whose dependencies and overrides are exact.
 npm_locks="$(git -C "$root" ls-files -co --exclude-standard -- '*package-lock.json' 2>/dev/null)"
 check "the repo has npm locks to check (git ls-files found some)" [ -n "$npm_locks" ]
 for l in $npm_locks; do
@@ -142,6 +142,19 @@ for l in $npm_locks; do
 		if (JSON.stringify(root.dependencies || {}) !== JSON.stringify(deps)) out.push("the lock root and package.json list different dependencies");
 		for (const [n, r] of Object.entries(deps)) if (((lock.packages || {})[`node_modules/${n}`] || {}).version !== r) out.push(`the lock does not install ${n} ${r}`);
 		if (!Object.keys(deps).length) out.push("package.json has no dependencies");
+		const exactOverrides = (o, at) => {
+			for (const [n, r] of Object.entries(o)) {
+				if (r && typeof r === "object") exactOverrides(r, `${at}${n} > `);
+				else if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(r)) out.push(`package.json: override ${at}${n} ${r} is not an exact version`);
+			}
+		};
+		exactOverrides(pkg.overrides || {}, "");
+		for (const [n, r] of Object.entries(pkg.overrides || {})) {
+			if (typeof r !== "string") continue;
+			const at = Object.entries(lock.packages || {}).filter(([k]) => k.endsWith(`node_modules/${n}`));
+			if (!at.length) out.push(`package.json overrides ${n}, which the lock does not install`);
+			if (/^[0-9]+\.[0-9]+\.[0-9]+$/.test(r)) for (const [k, v] of at) if (v.version !== r) out.push(`the lock installs ${k} ${v.version}, not the override ${r}`);
+		}
 		console.log(out.join("; "));' "$root/$l" 2>&1)"
 	check "$l: every package a registry tarball with a sha512 integrity, in step with package.json's exact versions${problems:+ ($problems)}" [ -z "$problems" ]
 done
