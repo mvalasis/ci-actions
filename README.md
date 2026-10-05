@@ -85,7 +85,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.24.2** (tag not yet cut) — a changed file with a non-ASCII name, such as a Greek one on the fleet's Greek sites,
+**v1.24.2** — a changed file with a non-ASCII name, such as a Greek one on the fleet's Greek sites,
 was dropped unseen by every diff-scoped leg of `security-baseline` and by `pull-tier`'s input match.
 Both read `git diff --name-only` without `-z`, and git's default `core.quotePath` prints such a path
 C-quoted, `"app/\317\203….php"`: no extension test or glob matches past the quotes, and no file
