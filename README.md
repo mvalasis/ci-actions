@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.26.0** *(tag not yet cut)* — `verify-homepage` gains **`checks: affordance`**, an opt-in interaction-affordance
+**v1.26.0** *(anchor `62ae3ec`; `v1` moved onto it 2026-10-06)* — `verify-homepage` gains **`checks: affordance`**, an opt-in interaction-affordance
 check, report-only until a caller sets the new input `fail-on-affordance: true`. On 2026-10-06 epn-astro's `/contact/`
 and `/employers/` shipped a consent checkbox whose words sat outside any `<label>` (clicking them did nothing), whose
 `aria-label` said something else than the words, and a submit button and checkbox with no `cursor: pointer`; pa11y/axe
