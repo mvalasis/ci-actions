@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.28.0** *(tag not yet cut)* — `seo-aeo` gains **`external-webfont`** (T1, promotable WARN via `critical-checks`; default
+**v1.28.0** *(anchor `38139ce`; `v1` moved onto it 2026-10-06)* — `seo-aeo` gains **`external-webfont`** (T1, promotable WARN via `critical-checks`; default
 WARN, so the `v1` move newly-blocks nobody). HEADLESS-ASTRO §7d says webfonts are self-hosted, woff2 under the site's own
 origin. In the page-level matrix, on the JS-disabled
 HTML, it flags any `<link>` (`rel` stylesheet / preload / preconnect / dns-prefetch, which includes the
@@ -100,10 +100,10 @@ lookalike hosts, a hyperlink to the host, a commented-out `@import` and `<templa
 `seo-aeo/scripts/checks.mjs` (`externalWebfonts`, `T1_CHECKS`), `selftest.mjs` (positives, negatives, near-miss mutants,
 and an end-to-end default-WARN / promoted-BLOCK pair through the real `check.mjs`), `seo-aeo/README.md` and `action.yml`'s
 promotable list. **Caller-visible:** a new WARN line on any page that loads an external font, and nothing else.
-**Wiring:** callers may rehearse `critical-checks: external-webfont` with `fail-on-critical: false` first. **Staged,
-not tagged:** on release the `v1` move ships this entry with everything below it (see "A move ships every version staged below it").
+**Wiring:** callers may rehearse `critical-checks: external-webfont` with `fail-on-critical: false` first. **Released
+2026-10-06:** the one `v1` move shipped this entry and v1.27.0 below it.
 
-**v1.27.0** *(tag not yet cut)* — `verify-homepage` gains five opt-in check families, **`checks: focus | forms | target |
+**v1.27.0** *(anchor `355d29a`; shipped by the same `v1` move 2026-10-06)* — `verify-homepage` gains five opt-in check families, **`checks: focus | forms | target |
 motion | consent`**, each report-only until a caller sets its own new input `fail-on-focus | -forms | -target | -motion |
 -consent: true`. On 2026-10-06 the UI/UX gap review of EPN (`~/.claude/retros/UIUX-GAP-REVIEW-2026-10-06.md`) found
 defects in rendered behaviour that no gate in the fleet reads. Same shape as `affordance` (v1.26.0): one module per
