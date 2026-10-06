@@ -31,7 +31,12 @@ menu and responsive breakage until they were caught by eye across four devices
   argument as its same-origin filter). The T1 crawl is each repo's own
   `scripts/verify-homepage-t1.sh`, kept byte-identical fleet-wide.
 
-`render`+`nav` need a browser. The browser matrix is the
+- **affordance** (opt-in, v1.26.0) — does a control look and behave like what it
+  is? Checkbox/radio labelled, label-in-name, a click on the label text toggles
+  it, computed `cursor: pointer` on clickable controls. Report-only until a caller
+  sets `fail-on-affordance: true` — see [Affordance check](#affordance-check-opt-in-report-only-first).
+
+`render`+`nav`+`affordance` need a browser. The browser matrix is the
 costly part — **run it on the weekly schedule + at cutover, not per-push.**
 
 ## Use it (weekly + manual)
@@ -64,8 +69,9 @@ jobs:
 | `urls` | yes | — | Live URLs (production at cutover — **never a preview host**). |
 | `nav-file` | no | `scripts/verify-nav.json` | Nav inventory + landmarks, read from your checkout. Missing = nav skipped (render still runs). |
 | `viewports` | no | `desktop:1920x1080,laptop:1440x900,iphone:393x852,android:384x854` | `[name:]WxH`; width ≤600 emulates mobile. |
-| `checks` | no | `render,nav` | Any of `render`, `nav`. (`links` retired in v1.15.0 — fails the step.) |
-| `fail-on-structure` | no | `true` | `true` = BLOCK; `false` = report-only (WARN). |
+| `checks` | no | `render,nav` | Any of `render`, `nav`, `affordance` (opt-in — not in the default). (`links` retired in v1.15.0 — fails the step.) |
+| `fail-on-structure` | no | `true` | `true` = BLOCK; `false` = report-only (WARN). Governs `render` and `nav` only. |
+| `fail-on-affordance` | no | `false` | Governs `affordance` only. `true` = BLOCK on any finding, or on a fault in the check itself; `false` = report-only (WARN + `::warning` annotations). The opposite default of `fail-on-structure`, on purpose: a new check reports first. |
 | `max-urls` | no | `12` | Cap the rendered URL count. |
 | `verify-token` | no | `''` | `X-Verify-Source`, sent **only** to the target host (+ www/apex). |
 | `wait-ms` | no | `1200` | Settle time after load+networkidle. |
@@ -177,6 +183,63 @@ Corollary for markup: don't use landmark elements for non-landmark chrome. A
 drawer header/footer is a `<div>` (lampakia commit e2ff769). A citation `<footer>`
 is legitimate — scope the selector instead.
 
+## Affordance check (opt-in, report-only first)
+
+Added in v1.26.0 after EPN's `/contact/` and `/employers/` shipped (2026-10-06) with a
+consent checkbox whose words were not inside a `<label>` (clicking them did nothing), whose
+`aria-label` said something else than the words, and a submit button and checkbox with no
+`cursor: pointer`. pa11y/axe flag a *missing* label but not a label-in-name mismatch or text
+that merely sits beside a box, and nothing in the fleet read computed `cursor`. It runs on the
+same page load as `render`, after the measurement, at every viewport.
+
+```yaml
+      - uses: mvalasis/ci-actions/verify-homepage@v1
+        with:
+          checks: render,nav,affordance   # opt-in: the default stays `render,nav`
+          fail-on-structure: 'true'       # unchanged — governs render + nav only
+          fail-on-affordance: 'false'     # report-only; flip to 'true' once the report is clean
+```
+
+| rule | fires when | notes |
+|---|---|---|
+| `label-missing` | a visible checkbox/radio has no `<label>` (wrapping, or `for=`), or has no accessible name at all | When plain text sits beside an unlabelled control (the EPN shape) it is quoted — those are the words that should have been the label. |
+| `label-in-name` | the visible label text is not contained in the control's accessible name (WCAG 2.5.3) | Only an `aria-label` / `aria-labelledby` / `title` can break it: a name taken from the `<label>` contains its text by construction. With no `<label>`, the nearby visible text stands in for it. Compared case-folded with punctuation collapsed, Greek included. |
+| `label-click` | a **real mouse click** on the label's own text does not toggle the checkbox / select the radio | Hit-tested, so an overlay or `pointer-events: none` is caught, and the finding names the element that took the click. Text inside a link/button in the label is never clicked (it would navigate). Disabled and not-rendered controls are skipped, and so is an already-checked radio (a click cannot flip it). State is restored afterwards — the checkbox by the same click, a radio by re-selecting the group's previous choice. If a click navigates the page the leg stops and says so. |
+| `cursor` | computed `cursor` is not `pointer` on `button`, `input[type=submit\|button\|reset\|image]`, `a[href]`, `summary`, `[role=button]`, `select`, `input[type=checkbox\|radio\|file]`, or a `<label>` that wraps/targets a checkbox or radio | `not-allowed` / `default` are fine only when the control is disabled. A visually-hidden native checkbox/radio/file input (a custom control) is skipped — its `<label>` carries the cursor. `pointer-events: none` and `[inert]` are skipped. A `select` and a bare checkbox default to `cursor: default` in the user-agent sheet, so unstyled ones **will** be flagged: that is the rule. |
+
+**Output.** Per URL: one line per finding *group* (one cause), `` `selector` ×N “quoted words” — what's wrong
+_(viewports)_ ``. A group merges the same selector across viewports, and drops `:nth-of-type(n)` so fifty
+identical cards read as one finding with a count. Behavioural rules list first (`label-click`,
+`label-in-name`, `label-missing`, then `cursor`). The verdict is its own line — `affordance PASS` /
+`affordance WARN (report-only)` / `affordance FAIL` — and **never moves the render/nav verdict or its
+exit code**; the exit code is `fail-on-affordance` alone.
+
+**Annotations** (unlike the render rows — see "No annotations" below): one `::warning` (`::error` when
+enforcing) per finding group, `verify-homepage affordance <rule>`, with the rule, the page URL and the
+selector in the message. Never a label's or a button's text (page-controlled). At most 10 per step; the
+behavioural rules come first so a cap never cuts them off. Unlike a render row, an affordance finding *is*
+one finding with an id (rule + selector + page), and the selector is a short tag/class/`:nth-of-type` path
+restricted in-page to `[A-Za-z0-9_-]` tokens, so it is safe in a workflow command.
+
+**A fault is a fault.** If the check cannot look (the page will not evaluate, a driver error) it says
+`affordance could not look — a fault in the gate, not a verdict on the page`, never prints a PASS, never
+files a finding, and exits `fail-on-affordance ? 1 : 0`. A crash in the whole entrypoint of an
+affordance-only run is governed by `fail-on-affordance`, not `fail-on-structure`.
+
+**Left out on purpose: a visible `:hover` / `:focus-visible` change.** Not cheap and not quiet: it needs a
+pointer move, a style diff and a transition wait per element (hundreds of links per page × 4 viewports);
+touch viewports have no hover at all; and the legitimate change is often on a parent, a pseudo-element or
+an outline rather than the element's own computed style, so the diff would be mostly noise. The focus ring
+is already gated (DISCIPLINES §7: focus-ring ≥2px/≥3:1, axe). Revisit only with a measured, narrow rule.
+
+**Known limits, so a green run is not over-read.** The accessible name is an in-page approximation of the
+accname algorithm for form controls (`aria-labelledby` > `aria-label` > `<label>` > `title`), not Chromium's
+own AX tree. `label-in-name` with no `<label>` guesses the "visible label" from the nearest ancestor (≤5 up)
+that holds this one control and some text, so a control inside a larger wrapper with other controls is
+checked for a label but not for nearby-text contradiction. Only checkboxes and radios get the label rules;
+text inputs/selects are axe's. State toggled by the click leg is restored by script, so a page whose handler
+persists a toggle (a saved preference) will see it persisted — run it on pages you would not mind clicking.
+
 ## Where the report goes
 
 The report goes to the **job log** (stdout) on every run, and to the **step
@@ -208,6 +271,10 @@ fixing v1.19.1:
   cron plus manual dispatch, never on a pull request, so there is no checks tab
   for annotations to appear in, and the run page already shows the step summary.
 
+**Exception — `affordance` (v1.26.0) does annotate**, because none of those four reasons holds for it: an
+affordance finding is one finding with an id (rule + selector + page), its text is restricted to
+identifiers, and its groups are already de-duplicated across viewports and repeated siblings.
+
 Revisit if the gate is wired to pull requests or pushes, or if something that
 reads only annotations becomes how failures get triaged. The shape then: one
 annotation per failing page × viewport, titled by problem kind (`overflow`,
@@ -230,6 +297,15 @@ once. Each of those cases runs with stdout as a socket (what `spawnSync` hands a
 child) and as an `O_APPEND` file. The file is the load-bearing one: on Linux,
 opening `/dev/stdout` fails (ENXIO) when stdout is a socket, so a socket-only leg
 would pass against the pre-v1.19.1 double print on the CI runner.
+
+The `affordance` fixtures are `affordance-bad.html` (every rule must fire: the EPN pre-fix shape, a
+contradicting `aria-label`, an overlay on the label, a swallowed click, unlabelled radios, one wrong-cursor
+control per kind) and `affordance-good.html` (must stay silent, enforcing: a link inside a label, a custom
+checkbox with a hidden native input, a pre-checked radio, disabled and not-rendered controls, a Greek
+label). They also pin the exit codes in both modes, that the switch is independent of
+`fail-on-structure`, that annotations carry identifiers only and stop at 10, that the click leg restores
+every state it toggled, and — by stubbing `playwright` — that a fault inside the check is reported as one
+(never a PASS) and exits under `fail-on-affordance`.
 
 The crash-guard block at the end of the same file needs **neither** — it stubs
 `playwright` in a temp dir, so it runs on a bare checkout. It asserts the same

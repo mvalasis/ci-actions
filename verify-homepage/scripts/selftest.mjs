@@ -21,13 +21,18 @@
 //   6. the report reaches the job log exactly once, and the step summary only when
 //      there is one — with a summary, with none (a local run), and with
 //      GITHUB_STEP_SUMMARY=/dev/stdout; a local crash note prints once too
+//   7. the `affordance` check (v1.26.0): a BAD fixture fires every rule (label-missing,
+//      label-in-name, label-click, cursor), a GOOD fixture stays silent, report-mode and
+//      enforcing exit codes, annotations carry identifiers only, the click leg restores
+//      what it toggled, a fault in the check is a fault (never a PASS, never a finding),
+//      and it never moves the render/nav verdict
 //
 // Run: node scripts/selftest.mjs (also runs in CI, before the live smoke).
 // Requires: npm ci && npx playwright install chromium.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -238,6 +243,164 @@ for (const [label, sink] of [['local run (no GITHUB_STEP_SUMMARY)', undefined], 
 }
 
 // ---------------------------------------------------------------------------
+console.log('\n# affordance — the BAD fixture fires every rule');
+//
+// affordance-bad.html carries the EPN /contact/ + /employers/ shape of 2026-10-06 (consent words
+// outside any <label>, an aria-label that says something else, no pointer cursor) plus one fixture
+// per remaining way a control can lie. Run report-mode with FAIL_ON_STRUCTURE left at its enforcing
+// default, to prove it is `fail-on-affordance` — not `fail-on-structure` — that governs this check.
+const AFF = { CHECKS: 'affordance', VIEWPORTS: 'desktop:1000x800,iphone:393x852', NAV_FILE: '' };
+const bad = run({ URLS: fixture('affordance-bad.html'), ...AFF, FAIL_ON_STRUCTURE: 'true', FAIL_ON_AFFORDANCE: 'false' });
+const badLine = (re) => bad.stdout.split('\n').find((l) => re.test(l)) || '';
+
+check('report-mode run completes, exit 0, with findings present',
+  bad.exit === 0 && /affordance WARN \(report-only\)/.test(bad.stdout), `exit=${bad.exit} ${bad.stdout.slice(-300)}`);
+check('FAIL_ON_STRUCTURE does not govern it (default-enforcing structure, no render/nav in checks)',
+  !/\*\*PASS\*\* — \d+ checks|\*\*FAIL\*\* — \d+\/\d+ checks/.test(bad.stdout), bad.stdout.slice(-300));
+
+// label-missing — the EPN shape: the words are beside the box, not in a label.
+check('label-missing: the EPN consent words sit outside any <label>, and are quoted',
+  /\*\*label-missing\*\* `[^`]*input` “I consent to EPN storing my details/.test(badLine(/label-missing.*I consent to EPN/)) &&
+    /so the words beside it are not its label/.test(badLine(/label-missing.*I consent to EPN/)), bad.stdout);
+check('label-missing: two unlabelled radios are ONE cause (grouped, ×2)',
+  /\*\*label-missing\*\* `[^`]*size[^`]*` ×2 “Small”/.test(badLine(/label-missing.*Small/)), badLine(/label-missing.*Small/));
+
+// label-in-name — WCAG 2.5.3, both through a real <label> and through nearby text.
+check('label-in-name: aria-label "Sign me up" vs label "Subscribe to the newsletter"',
+  /\*\*label-in-name\*\* `input#nl` “Subscribe to the newsletter” — aria-label "Sign me up" does not contain the visible label text/.test(bad.stdout), bad.stdout);
+check('label-in-name: the EPN aria-label contradicts the words beside the box',
+  /\*\*label-in-name\*\*[^\n]*aria-label "I consent to Elite Prodigy Nexus[^\n]*does not contain the visible nearby text/.test(bad.stdout), bad.stdout);
+
+// label-click — a REAL click, hit-tested.
+check('label-click: an overlay on the label text is named',
+  /\*\*label-click\*\* `[^`]*covered[^`]*` — clicking the label text hit div\.cover, not the label/.test(bad.stdout), bad.stdout);
+check('label-click: a label whose click is swallowed does not toggle',
+  /\*\*label-click\*\* `label#stuck > input` — clicking the label text did not toggle the control/.test(bad.stdout), bad.stdout);
+
+// cursor — every clickable kind in the brief, each with its own kind name.
+for (const kind of ['button', 'a', 'select', 'summary', 'div role=button', 'input type=file', 'input type=checkbox', 'label for checkbox', 'input type=submit']) {
+  check(`cursor: ${kind} without a pointer is flagged`,
+    new RegExp(`\\*\\*cursor\\*\\*[^\\n]*— ${kind.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} has cursor: (default|auto), expected pointer`).test(bad.stdout), bad.stdout);
+}
+check('cursor: a DISABLED control showing pointer is tolerated (only enabled controls must show it)',
+  !/Disabled with pointer/.test(bad.stdout) && !/while disabled/.test(bad.stdout), bad.stdout);
+check('cursor: a correctly-cursored labelled checkbox is NOT flagged (no noise on the covered/stuck rows)',
+  !/\*\*cursor\*\*[^\n]*(covered|#stuck)/.test(bad.stdout), bad.stdout);
+check('cursor: an unstyled <input type=checkbox> label names the words, not its value "on"',
+  !/“on”/.test(bad.stdout), bad.stdout);
+
+// Same selector at two viewports is ONE finding, not two.
+check('findings are merged across viewports (listed once, "all viewports")',
+  count(bad.stdout, 'label#stuck > input') >= 1 && (bad.stdout.match(/\*\*label-click\*\* `label#stuck > input`/g) || []).length === 1, bad.stdout);
+
+// Annotations: report mode → ::warning; identifiers only; behavioural findings first; capped at 10.
+const annots = bad.stdout.split('\n').filter((l) => /^::(warning|error) /.test(l));
+check('annotations are ::warning in report mode, behavioural rules first',
+  annots.length > 0 && annots.every((l) => l.startsWith('::warning title=verify-homepage affordance ')) &&
+    /affordance label-click::/.test(annots[0]), JSON.stringify(annots.slice(0, 2)));
+check('annotations carry the rule, the page URL and a selector — never page text',
+  annots.length > 0 && annots.every((l) => /::[a-z-]+ at file:\/\/\S+ — \S/.test(l)) &&
+    !annots.some((l) => /Remember my choice|Keep me signed in|Subscribe|consent to/i.test(l)), annots.join('\n'));
+check('annotations stop at GitHub\'s 10 per step and say how many were left out',
+  annots.length === 10 && /\d+ more finding group\(s\) not annotated/.test(bad.stdout), `${annots.length}`);
+check('the annotations come AFTER the report (the log reads report → annotations)',
+  bad.stdout.indexOf('affordance WARN') < bad.stdout.indexOf('::warning'), '');
+
+// Enforcing.
+const badEnforce = run({ URLS: fixture('affordance-bad.html'), ...AFF, FAIL_ON_AFFORDANCE: 'true' });
+check('fail-on-affordance: true → exit 1, FAIL verdict, ::error annotations',
+  badEnforce.exit === 1 && /affordance FAIL/.test(badEnforce.stdout) && /^::error title=verify-homepage affordance /m.test(badEnforce.stdout) &&
+    !/^::warning /m.test(badEnforce.stdout), `exit=${badEnforce.exit} ${badEnforce.stdout.slice(-300)}`);
+
+// Defaults: unset `fail-on-affordance` is report-only, and the real action.yml agrees (the entrypoint's
+// default and the action's must match — a flipped default would newly-block every caller that opts in).
+const unset = run({ URLS: fixture('affordance-bad.html'), ...AFF });
+check('FAIL_ON_AFFORDANCE unset → report-only: findings present, exit 0',
+  unset.exit === 0 && /affordance WARN \(report-only\)/.test(unset.stdout), `exit=${unset.exit}`);
+const actionYml = fs.readFileSync(path.join(HERE, '..', 'action.yml'), 'utf8');
+const inputDefault = (name) => new RegExp(`^  ${name}:\\n(?:    .*\\n)*?    default: '([^']*)'`, 'm').exec(actionYml)?.[1];
+check('action.yml: fail-on-affordance defaults to false', inputDefault('fail-on-affordance') === 'false', String(inputDefault('fail-on-affordance')));
+check('action.yml: checks still defaults to render,nav (affordance is opt-in)', inputDefault('checks') === 'render,nav', String(inputDefault('checks')));
+check('action.yml: FAIL_ON_AFFORDANCE reaches the script from inputs.fail-on-affordance',
+  /FAIL_ON_AFFORDANCE: \$\{\{ inputs\.fail-on-affordance \}\}/.test(actionYml));
+
+// Opt-in: the default checks never run it.
+const optin = run({ URLS: fixture('affordance-bad.html'), VIEWPORTS: 'desktop:1000x800', FAIL_ON_STRUCTURE: 'false', NAV_FILE: '' });
+check('opt-in: the default `render,nav` checks print no affordance section and no annotation',
+  !/\*\*affordance|affordance (PASS|WARN|FAIL)|^::(warning|error)/m.test(optin.stdout), optin.stdout);
+
+// ---------------------------------------------------------------------------
+console.log('\n# affordance — the GOOD fixture stays silent');
+//
+// The mirror page, with the shapes a naive check mis-reads: a link inside a label, a custom checkbox
+// whose native input is visually hidden, a pre-checked radio, disabled and not-rendered controls, a
+// Greek label. Enforcing, so a single false positive is a red build here.
+const good = run({ URLS: fixture('affordance-good.html'), ...AFF, FAIL_ON_AFFORDANCE: 'true' });
+check('GOOD page: exit 0 and an affordance PASS, enforcing',
+  good.exit === 0 && /affordance PASS/.test(good.stdout), `exit=${good.exit} ${good.stdout.slice(-500)}`);
+check('GOOD page: no finding, no annotation', !/^::/m.test(good.stdout) && !/\*\*(label-|cursor)/.test(good.stdout), good.stdout);
+// The silence must come from LOOKING: a probe that inspected nothing also reports nothing.
+const tally = /(\d+) checkbox\/radio, (\d+) label-click\(s\), (\d+) cursor probe\(s\)/.exec(good.stdout) || [];
+check('GOOD page: the check really looked (≥8 controls, ≥6 label clicks, ≥20 cursor probes)',
+  +tally[1] >= 8 && +tally[2] >= 6 && +tally[3] >= 20, tally[0] || good.stdout.slice(-300));
+
+// ---------------------------------------------------------------------------
+console.log('\n# affordance — independent of the render/nav verdict');
+//
+// Neither fixture declares header/footer, so with `render` on, the STRUCTURE verdict fails on both
+// (missing landmark). The two switches must stay independent.
+const both = (affordanceFail, structureFail, fixtureName) => run({
+  URLS: fixture(fixtureName), CHECKS: 'render,nav,affordance', VIEWPORTS: 'desktop:1000x800', NAV_FILE: '',
+  FAIL_ON_STRUCTURE: structureFail, FAIL_ON_AFFORDANCE: affordanceFail,
+});
+const a1 = both('true', 'false', 'affordance-good.html');
+check('structure red + report-mode, affordance clean + enforcing → exit 0 (affordance never inherits structure)',
+  a1.exit === 0 && /WARN \(report-only\)/.test(a1.stdout) && /affordance PASS/.test(a1.stdout), `exit=${a1.exit} ${a1.stdout.slice(-300)}`);
+const a2 = both('false', 'true', 'affordance-good.html');
+check('structure red + enforcing, affordance clean → exit 1 (structure still blocks as it always did)',
+  a2.exit === 1 && /❌ \*\*FAIL\*\*/.test(a2.stdout) && /affordance PASS/.test(a2.stdout), `exit=${a2.exit}`);
+const a3 = both('false', 'false', 'affordance-bad.html');
+check('affordance findings in report mode never move the exit code, even beside a structure WARN',
+  a3.exit === 0 && /affordance WARN/.test(a3.stdout), `exit=${a3.exit}`);
+const a4 = both('true', 'false', 'affordance-bad.html');
+check('affordance findings + fail-on-affordance → exit 1 even when fail-on-structure is off',
+  a4.exit === 1, `exit=${a4.exit}`);
+
+// ---------------------------------------------------------------------------
+console.log('\n# affordance — the click leg restores what it toggled; a fault is a fault');
+{
+  const { chromium } = await import('playwright');
+  const { runAffordance } = await import(pathToFileURL(path.join(HERE, 'affordance.mjs')).href);
+  const browser = await chromium.launch({ args: ['--no-sandbox'] });
+  try {
+    const states = (page) => page.evaluate(() => [...document.querySelectorAll('input[type=checkbox],input[type=radio]')].map((e) => e.checked));
+    const page = await browser.newPage({ viewport: { width: 1000, height: 800 } });
+    for (const name of ['affordance-good.html', 'affordance-bad.html']) {
+      await page.goto(fixture(name));
+      const before = await states(page);
+      const r = await runAffordance(page);
+      const after = await states(page);
+      check(`${name}: every checkbox/radio is back to its starting state after the click leg`,
+        JSON.stringify(before) === JSON.stringify(after) && r.stats.clicked > 0,
+        `before ${JSON.stringify(before)} after ${JSON.stringify(after)} clicked=${r.stats.clicked}`);
+      check(`${name}: no fault`, r.fault === '', r.fault);
+    }
+    await page.goto(fixture('affordance-good.html'));
+    const g = await runAffordance(page);
+    check('GOOD page: the pre-checked radio is left checked and clicked 0 times (no flip to assert)',
+      (await page.evaluate(() => document.querySelector('input[name=size][value=m]').checked)) === true && g.findings.length === 0, JSON.stringify(g.findings));
+    // A fault comes back as a fault, never as a thrown error and never as a clean result.
+    const dead = await browser.newPage();
+    await dead.close();
+    const f = await runAffordance(dead);
+    check('a page that cannot be inspected returns a fault (not a throw, not a clean PASS)',
+      f.fault.length > 0 && f.findings.length === 0, JSON.stringify(f));
+  } finally {
+    await browser.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CRASH GUARD — asserted BEHAVIOURALLY, by crashing the real entrypoint.
 //
 // Never by grepping render-check.mjs for `process.on(` or for a line position: a
@@ -264,6 +427,8 @@ console.log('\n# crash guard (real render-check.mjs, injected fault)');
     try {
       // Minimal ESM stub so `import { chromium } from 'playwright'` resolves — and
       // so `launch()` throws, which IS the `launch` variant's fault. No injection.
+      // render-check imports ./affordance.mjs — it must sit beside the mutated copies.
+      fs.copyFileSync(path.join(HERE, 'affordance.mjs'), path.join(tmp, 'affordance.mjs'));
       const stub = path.join(tmp, 'node_modules', 'playwright');
       fs.mkdirSync(stub, { recursive: true });
       fs.writeFileSync(path.join(stub, 'package.json'),
@@ -351,6 +516,76 @@ console.log('\n# crash guard (real render-check.mjs, injected fault)');
           }
         }
       }
+
+      // ---- affordance-only runs: the enforcement switch is `fail-on-affordance`, never fail-on-structure ----
+      // FAIL_ON_STRUCTURE stays at the enforcing 'true' below: an affordance-only caller never set it, and
+      // a tool fault must not newly-block them through a switch that does not govern their check.
+      const affCrash = (failOnAffordance) => {
+        const summaryPath = path.join(tmp, `sum-aff-${failOnAffordance}.md`);
+        fs.writeFileSync(summaryPath, '');
+        const r = spawnSync(process.execPath, [path.join(tmp, 'render-launch.mjs')], {
+          encoding: 'utf8',
+          env: { ...process.env, GITHUB_STEP_SUMMARY: summaryPath, CHECKS: 'affordance', FAIL_ON_STRUCTURE: 'true',
+            FAIL_ON_AFFORDANCE: String(failOnAffordance), URLS: 'https://example.invalid/' },
+        });
+        return { status: r.status, summary: fs.readFileSync(summaryPath, 'utf8') };
+      };
+      const affReport = affCrash(false);
+      const affEnforce = affCrash(true);
+      check('[affordance-only] a tool fault in report mode exits 0 although fail-on-structure is true',
+        affReport.status === 0 && /verify-homepage crashed/.test(affReport.summary) && /`fail-on-affordance: false`/.test(affReport.summary),
+        `exit ${affReport.status} ${affReport.summary.slice(0, 200)}`);
+      check('[affordance-only] a tool fault with fail-on-affordance: true exits 1',
+        affEnforce.status === 1 && /`fail-on-affordance: true`/.test(affEnforce.summary), `exit ${affEnforce.status}`);
+
+      // ---- a fault INSIDE the affordance check (the browser launches, the inspection throws) ----
+      const tmp2 = path.join(tmp, 'inspect-fault');
+      const stub2 = path.join(tmp2, 'node_modules', 'playwright');
+      fs.mkdirSync(stub2, { recursive: true });
+      fs.copyFileSync(RUN, path.join(tmp2, 'render-check.mjs'));
+      fs.copyFileSync(path.join(HERE, 'affordance.mjs'), path.join(tmp2, 'affordance.mjs'));
+      fs.writeFileSync(path.join(stub2, 'package.json'),
+        JSON.stringify({ name: 'playwright', version: '0.0.0-stub', type: 'module', main: 'index.js' }));
+      // Every affordance call (they carry {mode}) is recorded in AFF_CALLS, then throws; the render
+      // measurement (no `mode`) gets a clean answer.
+      fs.writeFileSync(path.join(stub2, 'index.js'), `
+        import fs from 'node:fs';
+        const page = { async goto() {}, async waitForLoadState() {}, async waitForTimeout() {}, url: () => 'https://example.invalid/',
+          async evaluate(fn, arg) {
+            if (arg && arg.mode) { fs.appendFileSync(process.env.AFF_CALLS, 'x'); throw new Error('injected affordance fault'); }
+            return { vw: 800, scrollW: 800, overflow: false, offenders: [], landmarks: [] };
+          }, mouse: { async click() {} } };
+        const ctx = { async newPage() { return page; }, async close() {}, async route() {} };
+        export const chromium = { async launch() { return { async newContext() { return ctx; }, async close() {} }; } };
+      `);
+      const inspect = (failOnAffordance) => {
+        const summaryPath = path.join(tmp2, `sum-${failOnAffordance}.md`);
+        fs.writeFileSync(summaryPath, '');
+        const r = spawnSync(process.execPath, [path.join(tmp2, 'render-check.mjs')], {
+          encoding: 'utf8',
+          env: { ...process.env, GITHUB_STEP_SUMMARY: summaryPath, CHECKS: 'affordance', WAIT_MS: '0', VIEWPORTS: 'desktop:800x600',
+            FAIL_ON_AFFORDANCE: String(failOnAffordance), URLS: 'https://example.invalid/', AFF_CALLS: path.join(tmp2, 'calls.txt') },
+        });
+        return { status: r.status, summary: fs.readFileSync(summaryPath, 'utf8'), stdout: r.stdout || '' };
+      };
+      // Opt-in, observed at the browser: without `affordance` in checks the page is never touched by it.
+      fs.writeFileSync(path.join(tmp2, 'calls.txt'), '');
+      spawnSync(process.execPath, [path.join(tmp2, 'render-check.mjs')], {
+        encoding: 'utf8',
+        env: { ...process.env, CHECKS: 'render,nav', FAIL_ON_STRUCTURE: 'false', WAIT_MS: '0', VIEWPORTS: 'desktop:800x600',
+          URLS: 'https://example.invalid/', AFF_CALLS: path.join(tmp2, 'calls.txt'), GITHUB_STEP_SUMMARY: path.join(tmp2, 'optin.md') },
+      });
+      check('opt-in at the browser: default checks make ZERO affordance calls on the page',
+        fs.readFileSync(path.join(tmp2, 'calls.txt'), 'utf8') === '', fs.readFileSync(path.join(tmp2, 'calls.txt'), 'utf8'));
+      const iReport = inspect(false);
+      check('…and with `affordance` in checks it does look (the call counter is not dead)',
+        fs.readFileSync(path.join(tmp2, 'calls.txt'), 'utf8').length > 0);
+      const iEnforce = inspect(true);
+      check('[inspect fault] reported as the GATE\'s fault, not a verdict on the page, and never as a PASS',
+        /affordance could not look/.test(iReport.summary + iReport.stdout) && /not a verdict on the page/.test(iReport.summary + iReport.stdout) &&
+          !/affordance PASS/.test(iReport.stdout) && !/\*\*(label-|cursor)/.test(iReport.stdout), iReport.stdout.slice(-300));
+      check('[inspect fault] report mode exits 0; fail-on-affordance exits 1',
+        iReport.status === 0 && iEnforce.status === 1, `report ${iReport.status}, enforce ${iEnforce.status}`);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

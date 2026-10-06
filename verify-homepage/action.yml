@@ -6,7 +6,9 @@ description: >-
   inventory assert (the primary-nav items present, in declared order, against a
   tiny per-repo verify-nav.json) so a silently wrong / missing / reordered menu
   fails the gate. Mechanical structure/render = BLOCK; visual taste stays
-  advisory (design-critic). Cost:
+  advisory (design-critic). Opt-in `checks: affordance` adds an interaction-
+  affordance check (labelled/label-in-name/clickable-label checkboxes, pointer
+  cursor), report-only unless fail-on-affordance. Cost:
   the browser matrix is meant for the WEEKLY schedule + cutover, NOT per-push.
 
 inputs:
@@ -22,13 +24,17 @@ inputs:
     required: false
     default: 'desktop:1920x1080,laptop:1440x900,iphone:393x852,android:384x854'
   checks:
-    description: 'Comma list of: render (overflow/overlap/collapse), nav (inventory). `links` was retired in v1.15.0 and fails the step: the T1 link crawl is each repo''s own scripts/verify-homepage-t1.sh.'
+    description: 'Comma list of: render (overflow/overlap/collapse), nav (inventory), affordance (opt-in: checkbox/radio labelled + label-in-name + label click toggles + computed cursor:pointer on clickable controls; judged by fail-on-affordance, not fail-on-structure). `links` was retired in v1.15.0 and fails the step: the T1 link crawl is each repo''s own scripts/verify-homepage-t1.sh.'
     required: false
     default: 'render,nav'
   fail-on-structure:
     description: 'true = BLOCK on any render/nav failure; false = report-only (WARN).'
     required: false
     default: 'true'
+  fail-on-affordance:
+    description: 'Only for `checks: …affordance`. true = BLOCK on any affordance finding (or a fault in the check itself); false = report-only (WARN, ::warning annotations). Deliberately the OPPOSITE default of fail-on-structure: a new check reports first, and never moves the render/nav verdict.'
+    required: false
+    default: 'false'
   max-urls:
     description: 'Cap the number of URLs rendered (the browser matrix is the costly part).'
     required: false
@@ -54,7 +60,7 @@ runs:
   using: composite
   steps:
     - name: Install Playwright + Chromium
-      if: ${{ contains(inputs.checks, 'render') || contains(inputs.checks, 'nav') }}
+      if: ${{ contains(inputs.checks, 'render') || contains(inputs.checks, 'nav') || contains(inputs.checks, 'affordance') }}
       shell: bash
       working-directory: ${{ github.action_path }}
       # playwright is the only dependency, pinned + lockfile'd; --ignore-scripts
@@ -65,8 +71,8 @@ runs:
         npm ci --omit=dev --ignore-scripts --no-audit --no-fund
         npx playwright install --with-deps chromium
 
-    - name: Structure + cross-viewport render (+ nav inventory)
-      if: ${{ contains(inputs.checks, 'render') || contains(inputs.checks, 'nav') }}
+    - name: Structure + cross-viewport render (+ nav inventory, + affordance)
+      if: ${{ contains(inputs.checks, 'render') || contains(inputs.checks, 'nav') || contains(inputs.checks, 'affordance') }}
       shell: bash
       working-directory: ${{ github.action_path }}
       env:
@@ -75,6 +81,7 @@ runs:
         VIEWPORTS: ${{ inputs.viewports }}
         CHECKS: ${{ inputs.checks }}
         FAIL_ON_STRUCTURE: ${{ inputs.fail-on-structure }}
+        FAIL_ON_AFFORDANCE: ${{ inputs.fail-on-affordance }}
         MAX_URLS: ${{ inputs.max-urls }}
         VERIFY_TOKEN: ${{ inputs.verify-token }}
         WAIT_MS: ${{ inputs.wait-ms }}

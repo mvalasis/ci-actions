@@ -88,6 +88,36 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.26.0** *(tag not yet cut)* — `verify-homepage` gains **`checks: affordance`**, an opt-in interaction-affordance
+check, report-only until a caller sets the new input `fail-on-affordance: true`. On 2026-10-06 epn-astro's `/contact/`
+and `/employers/` shipped a consent checkbox whose words sat outside any `<label>` (clicking them did nothing), whose
+`aria-label` said something else than the words, and a submit button and checkbox with no `cursor: pointer`; pa11y/axe
+flag a missing label but not a label-in-name mismatch, and no gate in the fleet read computed `cursor`. In the same
+headless Chromium page load as `render`, per viewport: **`label-missing`** (a visible checkbox/radio with no `<label>`,
+wrapping or `for=`, or no accessible name — the words beside an unlabelled box are quoted), **`label-in-name`** (WCAG
+2.5.3: the visible label text must be contained in the accessible name; an `aria-label` that says something else is
+caught, and with no `<label>` the nearby visible text stands in), **`label-click`** (a *real*, hit-tested mouse click on
+the label's text must toggle the control, then the state is restored; an overlay or a swallowed click is named) and
+**`cursor`** (computed `cursor` is `pointer` on button, submit/button/reset/image, `a[href]`, `summary`,
+`[role=button]`, `select`, checkbox/radio/file and a checkbox/radio's label; `not-allowed`/`default` only when
+disabled). A `:hover`/`:focus-visible` change was left out on purpose — not cheap, not quiet (reasons in
+[`verify-homepage/README.md`](verify-homepage/README.md) → "Affordance check"). Findings are grouped per cause across
+viewports, listed behavioural-first, and annotated one `::warning` (`::error` when enforcing) per group — rule, page
+URL and selector only, never page text, at most 10 per step. Its exit code is `fail-on-affordance` alone and it never
+moves the render/nav verdict; a fault in the check (or in an affordance-only run's whole entrypoint) is reported as the
+gate's own and exits `fail-on-affordance ? 1 : 0`, never a PASS. New files: `verify-homepage/scripts/affordance.mjs`
+and two fixtures; `scripts/selftest.mjs` gains the BAD page (every rule fires), the GOOD page (silent, enforcing, with
+the shapes a naive check mis-reads), exit codes in both modes, independence from `fail-on-structure`, annotation
+content and cap, state restoration, and two stubbed-`playwright` fault legs; each assertion was mutation-checked (24 mutants, 22 killed;
+the two survivors are equivalent: a duplicated disabled-control guard, and a name taken from the `<label>` that
+contains its own text by construction). **Measured 2026-10-06:** a copy of epn-astro's pre-fix `/contact/` and
+`/employers/` markup and CSS fires `label-missing`, `label-in-name` and `cursor` on the consent checkbox and the
+submit button; the live fixed pages are clean on both forms, and report real `cursor` debt elsewhere on the page —
+the cookie banner's buttons and checkbox, and the mobile menu toggle `button#navToggle`, all `cursor: default`.
+**Caller-visible:** nothing until a caller adds `affordance` to `checks` — the default stays `render,nav`, and the new
+input defaults to `false`. The `v1` move newly-blocks nobody. **Wiring:** epn-astro's `verify-render.yml` is the pilot,
+report-only (DISCIPLINES §7).
+
 **v1.25.1** — `a11y-audit`'s lock moves basic-ftp from 5.3.1 to 6.2.1. The Monday run of
 `a11y-audit-selftest.yml` (2026-10-05) went red on GHSA-c475-qrg2-pj4r (HIGH: quadratic-time CPU in
 `Client.list()`'s Unix listing parser, fixed in 6.2.1), new on a package nothing here changed. It
@@ -922,7 +952,7 @@ site:
 
 | entrypoint | language | before | after |
 | --- | --- | --- | --- |
-| `verify-homepage/scripts/render-check.mjs` | top-level-await ESM | any throw → exit 1 | reports the fault, exits `fail-on-structure ? 1 : 0` |
+| `verify-homepage/scripts/render-check.mjs` | top-level-await ESM | any throw → exit 1 | reports the fault, exits `fail-on-structure ? 1 : 0` (`fail-on-affordance ? 1 : 0` for an `affordance`-only run, v1.26.0) |
 | `linkcheck/scripts/linkcheck.py` | plain `main()` | traceback → exit 1, **and a false "broken links found" issue filed** | exit **2** = "no verdict", distinct from 1 = "links are broken"; issue steps key on the crawler's rc, so no issue is filed or closed on a crash |
 | `a11y-audit/scripts/audit.sh` | bash | abort → exit 1; any non-zero `pa11y-ci` rc reported as **"WCAG errors found"** | reports the fault, exits `fail-on-violations ? 1 : 0`; a scanner that never produced a per-URL result is no longer reported as accessibility debt |
 
@@ -1549,6 +1579,11 @@ caller). Report-mode-first (`fail-on-structure: false`), then flip to BLOCK once
 clean. Wired 2026-06-29; status as of 2026-07-30: **ENFORCING** — epn-astro
 (pilot), lampakia-astro, hlektrologos, prevedourougr (the last three flipped
 2026-07-07); **report-only** — lux-main + lux-dev (responsive debt outstanding).
+
+Opt-in **`checks: affordance`** (v1.26.0) adds the interaction-affordance check — checkbox/radio labelled,
+label-in-name (WCAG 2.5.3), a real click on the label text toggles it, computed `cursor: pointer` on
+clickable controls — judged by its own `fail-on-affordance` (default `false`), never by `fail-on-structure`.
+Rules, limits and what was left out: [`verify-homepage/README.md`](verify-homepage/README.md) → "Affordance check".
 
 Landmark selectors resolve **first-match-wins**, so a precise selector and a gate
 that catches markup regressions pull against each other — the reasoning, the

@@ -7,6 +7,11 @@
 //   (nav)    the primary-nav items present, in the declared order, matching a
 //            tiny per-repo inventory (verify-nav.json) — catches a silently
 //            wrong / missing / reordered menu.
+//   (affordance, opt-in via `checks`) does a control look and behave like what it
+//            is: checkbox/radio labelled + label-in-name + a click on the label text
+//            toggles it + computed `cursor: pointer` on clickable controls. Its own
+//            report-mode-first switch (FAIL_ON_AFFORDANCE, default false) — see
+//            ./affordance.mjs. Never changes a render/nav verdict or their exit code.
 //
 // Mechanical structure/render = BLOCK (when FAIL_ON_STRUCTURE=true). Visual
 // taste stays advisory (the design-critic subagent), never gated here.
@@ -20,6 +25,7 @@
 // (UI/UX — structure + cross-viewport render).
 import fs from 'node:fs';
 import { chromium } from 'playwright';
+import { runAffordance, groupFindings, formatGroup, annotationLines } from './affordance.mjs';
 
 // ---- crash guard — MUST stay the first top-level statement after the imports ----
 // A fault in this tool (Chromium failing to launch, a malformed verify-nav.json, a
@@ -49,8 +55,16 @@ import { chromium } from 'playwright';
 // escapes) surfaces as `unhandledRejection`. Registering only the first would leave
 // that second class exiting 1 regardless of `fail-on-structure`.
 const onCrash = (kind) => (err) => {
-  // Mirrors the `FAIL` const's rule (default true → BLOCK), read order-immunely.
-  const failing = (process.env.FAIL_ON_STRUCTURE || '') !== 'false';
+  // Mirrors the `FAIL` / `FAIL_AFF` consts' rule, read order-immunely: render/nav default to BLOCK,
+  // affordance to report-only. A run that asked for affordance ALONE is governed by its own switch,
+  // so a tool fault can never newly-block a report-mode affordance caller.
+  const checks = (process.env.CHECKS || 'render,nav').split(/[\s,]+/);
+  const structure = checks.includes('render') || checks.includes('nav');
+  const affordance = checks.includes('affordance');
+  const failing =
+    (structure && (process.env.FAIL_ON_STRUCTURE || '') !== 'false') ||
+    (affordance && process.env.FAIL_ON_AFFORDANCE === 'true');
+  const setting = structure ? 'fail-on-structure' : 'fail-on-affordance';
   // Inline sanitisation: the module's `safe()` is a const defined below and is in
   // the TDZ for exactly the crashes most worth reporting. Strips the markdown
   // structural chars (backtick included, so the fence below cannot be escaped).
@@ -69,8 +83,8 @@ const onCrash = (kind) => (err) => {
     '```',
     '',
     failing
-      ? '`fail-on-structure: true` → exiting **1** (conservative for an enforcing caller).'
-      : '`fail-on-structure: false` → exiting **0** — a tool fault must not newly-block a report-mode caller.',
+      ? `\`${setting}: true\` → exiting **1** (conservative for an enforcing caller).`
+      : `\`${setting}: false\` → exiting **0** — a tool fault must not newly-block a report-mode caller.`,
     '',
   ].join('\n');
   // The `summaryFile` rule below, restated from `process.env` for the TDZ reason
@@ -92,6 +106,8 @@ const env = process.env;
 const URLS = (env.URLS || '').split(/\s+/).map((s) => s.trim()).filter(Boolean);
 const CHECKS = new Set((env.CHECKS || 'render,nav').split(/[\s,]+/).map((s) => s.trim()).filter(Boolean));
 const FAIL = env.FAIL_ON_STRUCTURE !== 'false'; // default true → BLOCK
+const FAIL_AFF = env.FAIL_ON_AFFORDANCE === 'true'; // default false → report-only (the opposite default, on purpose)
+const STRUCTURE = CHECKS.has('render') || CHECKS.has('nav');
 const MAX_URLS = Math.max(1, parseInt(env.MAX_URLS || '12', 10) || 12);
 const VERIFY_TOKEN = env.VERIFY_TOKEN || '';
 const WAIT_MS = Math.max(0, parseInt(env.WAIT_MS || '1200', 10) || 1200);
@@ -203,6 +219,11 @@ const labelEq = (a, b) => a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' 
 
 let overallFail = false;
 const rows = [];
+// affordance: per URL, the findings of each viewport; faults (the gate could not look) kept apart —
+// a fault is never a finding about the caller's page.
+const affByUrl = [];
+const affFaults = [];
+const affStats = { controls: 0, clicked: 0, cursors: 0 };
 
 const browser = await chromium.launch({ args: ['--no-sandbox'] });
 
@@ -521,14 +542,16 @@ for (const url of targets) {
     note(`- **nav inventory** ${navFail ? '❌' : '✅'}${navFail ? ' — ' + lines.map((l) => safe(l, 160)).join(' · ') : ` (${(navSpec.items || []).length} items in order)`}`);
   }
 
-  // ---- RENDER matrix (per viewport) ----
-  if (CHECKS.has('render')) {
+  // ---- RENDER matrix (per viewport) + AFFORDANCE (same page load, after the measurement) ----
+  const affViewports = [];
+  if (CHECKS.has('render') || CHECKS.has('affordance')) {
     for (const vp of VIEWPORTS) {
       const ctx = await newContext(vp);
       const page = await ctx.newPage();
       const problems = [];
       try {
         await gotoSettle(page, url);
+        if (CHECKS.has('render')) {
         const m = await page.evaluate(MEASURE, { tol: OVERFLOW_TOL, landmarks: LANDMARKS });
         if (m.overflow) {
           const who = m.offenders.length
@@ -549,11 +572,26 @@ for (const url of targets) {
           }
         }
         for (const f of overlapFailures(m.landmarks)) problems.push(`overlap ${f}`);
+        }
+        // AFFORDANCE runs LAST on the page: its label-click leg interacts with the document (and
+        // restores it), which the render measurement above must never see.
+        if (CHECKS.has('affordance')) {
+          const a = await runAffordance(page);
+          if (a.fault) affFaults.push(`${vp.name}: ${a.fault}`);
+          else {
+            affViewports.push({ viewport: vp.name, findings: a.findings });
+            affStats.controls = Math.max(affStats.controls, a.stats.controls);
+            affStats.clicked = Math.max(affStats.clicked, a.stats.clicked);
+            affStats.cursors = Math.max(affStats.cursors, a.stats.cursors);
+          }
+        }
       } catch (e) {
-        problems.push(`load error: ${safe(e.message, 80)}`);
+        if (CHECKS.has('render')) problems.push(`load error: ${safe(e.message, 80)}`);
+        else affFaults.push(`${vp.name}: page did not load — ${safe(e.message, 80)}`);
       } finally {
         await ctx.close();
       }
+      if (!CHECKS.has('render')) continue;
       const fail = problems.length > 0;
       if (fail) overallFail = true;
       rows.push({ url, viewport: vp.name, kind: 'render', fail, detail: problems.join('; ') });
@@ -565,6 +603,15 @@ for (const url of targets) {
         `- **${vp.name}** (${vp.width}×${vp.height}) ${fail ? '❌' : '✅'}${fail ? ' — ' + problems.map((p) => safe(p, 320)).join(' · ') : ''}`
       );
     }
+  }
+
+  // ---- AFFORDANCE report for this URL ----
+  if (CHECKS.has('affordance')) {
+    const groups = groupFindings(affViewports);
+    affByUrl.push({ url, groups });
+    note(`- **affordance** ${groups.length ? (FAIL_AFF ? '❌' : '⚠️') : '✅'}${groups.length ? ` — ${groups.length} finding group(s)` : ` (no finding across ${affViewports.length} viewport(s))`}`);
+    for (const g of groups.slice(0, 30)) note(`  - **${g.rule}** ${formatGroup(g, safe, VIEWPORTS.length)}`);
+    if (groups.length > 30) note(`  - …and ${groups.length - 30} more`);
   }
   note('');
 }
@@ -607,10 +654,35 @@ if (ambiguous.size) {
 const failed = rows.filter((r) => r.fail);
 note('---');
 note('');
-if (failed.length === 0) {
-  note(`✅ **PASS** — ${rows.length} checks across ${targets.length} page(s), ${VIEWPORTS.length} viewport(s).`);
-} else {
-  note(`${FAIL ? '❌ **FAIL**' : '⚠️ **WARN (report-only)**'} — ${failed.length}/${rows.length} checks broke.`);
+if (STRUCTURE) {
+  if (failed.length === 0) {
+    note(`✅ **PASS** — ${rows.length} checks across ${targets.length} page(s), ${VIEWPORTS.length} viewport(s).`);
+  } else {
+    note(`${FAIL ? '❌ **FAIL**' : '⚠️ **WARN (report-only)**'} — ${failed.length}/${rows.length} checks broke.`);
+  }
+}
+
+// ---- affordance verdict + annotations ----
+// Its own verdict line and its own exit switch: it never moves the render/nav result above. A fault
+// (the check could not look) is reported as one and exits like a finding would — `fail-on-affordance ?
+// 1 : 0` — never as a PASS, and never as a finding about the page.
+let affNFindings = 0;
+let affBlocks = false;
+let affAnnotations = [];
+if (CHECKS.has('affordance')) {
+  affNFindings = affByUrl.reduce((n, u) => n + u.groups.length, 0);
+  const faulted = affFaults.length > 0;
+  affBlocks = FAIL_AFF && (affNFindings > 0 || faulted);
+  const tally = `${affStats.controls} checkbox/radio, ${affStats.clicked} label-click(s), ${affStats.cursors} cursor probe(s)`;
+  if (faulted) {
+    note(`${FAIL_AFF ? '❌' : '⚠️'} **affordance could not look** (a fault in the gate, not a verdict on the page) — ${safe(affFaults.slice(0, 3).join(' · '), 300)}`);
+    note('');
+  }
+  if (affNFindings === 0 && !faulted) note(`✅ **affordance PASS** — ${targets.length} page(s), ${VIEWPORTS.length} viewport(s); ${tally}.`);
+  else if (affNFindings > 0) note(`${FAIL_AFF ? '❌ **affordance FAIL**' : '⚠️ **affordance WARN (report-only)**'} — ${affNFindings} finding group(s) over ${targets.length} page(s); ${tally}.`);
+  // One workflow command per group, `::error` when this run blocks, `::warning` when it only reports.
+  // Printed AFTER the report (below), so the log reads report → annotations like the sibling gates.
+  affAnnotations = annotationLines(affByUrl.filter((u) => u.groups.length), FAIL_AFF ? 'error' : 'warning');
 }
 
 if (summaryFile) {
@@ -622,6 +694,7 @@ if (summaryFile) {
   }
 }
 say(out.join('\n'));
+for (const l of affAnnotations) say(l);
 
-if (failed.length && FAIL) process.exit(1);
+if ((STRUCTURE && failed.length && FAIL) || affBlocks) process.exit(1);
 process.exit(0);

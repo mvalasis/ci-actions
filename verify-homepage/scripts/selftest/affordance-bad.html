@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>affordance fixture — BAD</title>
+<!-- Every rule of the `affordance` check must fire on this page, and nothing here is styled to hide it.
+     The first row is the EPN /contact/ + /employers/ markup of 2026-10-06, byte for byte in shape: the
+     consent words sit OUTSIDE any <label>, and the aria-label says something else than they do. -->
+<style>
+  body { margin: 0; padding: 16px; font: 16px/1.4 sans-serif; }
+  .row { margin: 14px 0; position: relative; }
+  .cover { position: absolute; inset: 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Bad affordances</h1>
+  <form onsubmit="return false">
+
+    <!-- (1) EPN pre-fix: no <label>; aria-label contradicts the words beside the box. -->
+    <div class="row epn-consent">
+      <p><span><span><span><input type="checkbox" name="your-consent" aria-label="I consent to Elite Prodigy Nexus contacting me about my enquiry"></span></span></span>
+      I consent to EPN storing my details solely for the purpose of my communication.</p>
+    </div>
+
+    <!-- (2) a real <label for>, but the aria-label overrides it with different words (WCAG 2.5.3). -->
+    <div class="row newsletter">
+      <input id="nl" type="checkbox" aria-label="Sign me up"> <label for="nl" style="cursor:pointer">Subscribe to the newsletter</label>
+    </div>
+
+    <!-- (3) labelled correctly, but an overlay sits on the label text: a click never reaches it. -->
+    <div class="row covered">
+      <label style="cursor:pointer"><input type="checkbox" style="cursor:pointer"> Remember my choice</label>
+      <div class="cover"></div>
+    </div>
+
+    <!-- (4) labelled correctly, but the label's click is swallowed by script. -->
+    <div class="row stuck">
+      <label id="stuck" style="cursor:pointer"><input type="checkbox" style="cursor:pointer"> Keep me signed in</label>
+    </div>
+
+    <!-- (5) two radios with plain text beside them and no label at all (grouped: one cause). -->
+    <div class="row size"><input type="radio" name="size" value="s" style="cursor:pointer"> Small</div>
+    <div class="row size"><input type="radio" name="size" value="l" style="cursor:pointer"> Large</div>
+
+    <!-- (6) cursor: every clickable below has the wrong one. No `cursor` is declared on the ones whose
+         user-agent default is not `pointer` (button, submit, select, summary, checkbox, file). -->
+    <div class="row cursors">
+      <button type="button" style="cursor:default">Save draft</button>
+      <a href="#terms" style="cursor:default">Terms</a>
+      <select><option>One</option></select>
+      <details><summary>More</summary>hidden text</details>
+      <div role="button" tabindex="0">Menu</div>
+      <input type="file">
+      <input type="checkbox" id="plain"><label for="plain" style="cursor:default">Plain label</label>
+      <input type="submit" value="Send">
+      <button type="button" disabled style="cursor:pointer">Disabled with pointer is tolerated</button>
+    </div>
+  </form>
+</main>
+<script>
+  document.getElementById('stuck').addEventListener('click', (e) => e.preventDefault());
+</script>
+</body>
+</html>

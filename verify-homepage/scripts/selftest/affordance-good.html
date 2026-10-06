@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>affordance fixture — GOOD</title>
+<!-- The mirror of affordance-bad.html: every control is labelled, named by its visible words, toggles
+     when its label text is clicked, and shows the pointer. The `affordance` check must say NOTHING here
+     — a gate that cries wolf on this page would be switched off by the first caller it annoys. It also
+     carries the shapes a naive check mis-reads: a link inside a label, a custom checkbox whose native
+     input is visually hidden, a pre-checked radio, a disabled control, controls that are not rendered,
+     and a Greek label. -->
+<style>
+  body { margin: 0; padding: 16px; font: 16px/1.4 sans-serif; }
+  .row { margin: 14px 0; }
+  button, input[type="submit"], input[type="button"], input[type="reset"], a[href], summary,
+  [role="button"], select, input[type="checkbox"], input[type="radio"], input[type="file"], label { cursor: pointer; }
+  :disabled { cursor: not-allowed; }
+  .sr { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); opacity: 0; }
+  .box { display: inline-block; width: 14px; height: 14px; border: 1px solid #333; vertical-align: -2px; margin-right: 6px; }
+  input.sr:checked + .box { background: #333; }
+  input.sr { cursor: default; } /* the hidden native box never shows a cursor; its <label> carries it */
+</style>
+</head>
+<body>
+<main>
+  <h1>Good affordances</h1>
+  <form onsubmit="return false">
+
+    <!-- the EPN fix: the whole line is the label; no aria-label to disagree with it -->
+    <div class="row epn-consent">
+      <p><label class="epn-consent-label"><input type="checkbox" name="your-consent"> <span>I consent to EPN storing my details solely for the purpose of my communication.</span></label></p>
+    </div>
+
+    <!-- a link FIRST inside the label: the click goes to the plain text after it, never the link -->
+    <div class="row"><label><input type="checkbox" name="terms"> <a href="#privacy">Privacy Policy</a> — I agree to it</label></div>
+
+    <!-- aria-label that CONTAINS the visible label text satisfies 2.5.3 -->
+    <div class="row"><input id="nl" type="checkbox" aria-label="Subscribe to the newsletter now"> <label for="nl">Subscribe to the newsletter</label></div>
+
+    <!-- custom checkbox: native input visually hidden, the label carries text and cursor -->
+    <div class="row"><label><input type="checkbox" class="sr" name="dark"><span class="box"></span>Dark mode</label></div>
+
+    <!-- a PRE-TICKED checkbox: the click leg unticks it and must tick it back -->
+    <div class="row"><label><input type="checkbox" name="pre" checked> Pre-ticked option</label></div>
+
+    <!-- a Greek label, and an aria-label that contains it -->
+    <div class="row"><label><input type="checkbox" name="gr" aria-label="Συμφωνώ με τους όρους χρήσης"> Συμφωνώ με τους όρους</label></div>
+
+    <!-- radio group: one pre-checked (no flip to assert), the others flip and are restored -->
+    <fieldset class="row"><legend>Size</legend>
+      <label><input type="radio" name="size" value="s"> Small</label>
+      <label><input type="radio" name="size" value="m" checked> Medium</label>
+      <label><input type="radio" name="size" value="l"> Large</label>
+    </fieldset>
+
+    <!-- disabled: skipped by the click leg; not-allowed is the right cursor -->
+    <div class="row"><label><input type="checkbox" disabled> Unavailable</label>
+      <button type="button" disabled>Not yet</button></div>
+
+    <!-- not rendered: no box, nothing to label -->
+    <input type="checkbox" style="display:none">
+    <div hidden><input type="checkbox"></div>
+
+    <div class="row">
+      <button type="button">Save draft</button>
+      <a href="#terms">Terms</a>
+      <select aria-label="Choice"><option>One</option></select>
+      <details><summary>More</summary>hidden text</details>
+      <div role="button" tabindex="0">Menu</div>
+      <input type="file" aria-label="Attachment">
+      <input type="submit" value="Send">
+    </div>
+  </form>
+</main>
+</body>
+</html>
