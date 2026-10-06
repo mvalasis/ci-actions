@@ -19,7 +19,7 @@ export const T0_CHECKS = new Set(['http-200', 'title-present', 'h1-present']);
 export const T1_CHECKS = new Set([
   'noindex', 'single-h1', 'canonical-present', 'canonical-valid', 'meta-description',
   'html-lang', 'viewport', 'jsonld-valid', 'og-core', 'robots-txt', 'sitemap',
-  'robots-sitemap-directive', 'redirect-consistency',
+  'robots-sitemap-directive', 'redirect-consistency', 'external-webfont',
 ]);
 // Everything else is T2 (advisory; ignored if a caller tries to promote it).
 
@@ -113,6 +113,43 @@ function expectedTypesFor(pt) {
     case 'contact': return [['LocalBusiness', 'Store', 'Organization']];
     default: return [];
   }
+}
+
+// ---------- external webfonts (T1) ----------
+
+// Hosts whose font CSS/files must be self-hosted (HEADLESS-ASTRO §7d): the request hands the
+// visitor's IP to a third party, and a render-blocking CSS→font chain sits on the critical path.
+const EXTERNAL_FONT_HOSTS = new Set(['fonts.googleapis.com', 'fonts.gstatic.com', 'use.typekit.net', 'p.typekit.net']);
+const FONT_LINK_RELS = new Set(['stylesheet', 'preload', 'preconnect', 'dns-prefetch']);
+const fontHost = (u) => {
+  try { const h = new URL(String(u || '').trim(), 'https://base.invalid/').hostname.toLowerCase().replace(/\.$/, ''); return EXTERNAL_FONT_HOSTS.has(h) ? h : null; } catch { return null; }
+};
+// url(...) and @import "..." inside a stylesheet's text (comments stripped: a commented-out import is inert).
+function cssUrls(css) {
+  const text = String(css || '').replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const out = [];
+  for (const m of text.matchAll(/url\(\s*(['"]?)([^'")]*)\1\s*\)/gi)) out.push(m[2]);
+  for (const m of text.matchAll(/@import\s+(['"])([^'"]*)\1/gi)) out.push(m[2]);
+  return out;
+}
+// Every external-webfont reference in the served HTML: <link> (rel stylesheet/preload/preconnect/
+// dns-prefetch — which covers the `media="print" onload=` async loader too, since that is still a
+// rel=stylesheet link), inline <style> url()/@import, and the same inside <noscript> (cheerio keeps
+// noscript as text; a JS-disabled crawler/visitor does load it). Returns [{ host, url }].
+export function externalWebfonts($) {
+  const refs = [];
+  const links = ($scope) => $scope('link[href]').each((i, el) => {
+    const rels = String($scope(el).attr('rel') || '').toLowerCase().split(/\s+/);
+    if (!rels.some((r) => FONT_LINK_RELS.has(r))) return;
+    const url = $scope(el).attr('href'), host = fontHost(url);
+    if (host) refs.push({ host, url });
+  });
+  const styles = ($scope) => $scope('style').each((i, el) => {
+    for (const url of cssUrls($scope(el).text())) { const host = fontHost(url); if (host) refs.push({ host, url }); }
+  });
+  links($); styles($);
+  $('noscript').each((i, el) => { const n = load($(el).text()); links(n); styles(n); });
+  return refs;
 }
 
 // ---------- the per-page analyzer ----------
@@ -267,6 +304,28 @@ export function analyzePage(input) {
   if (pageHttps) {
     const insecure = $('img[src^="http://"], script[src^="http://"], link[rel="stylesheet"][href^="http://"], iframe[src^="http://"], video[src^="http://"], audio[src^="http://"], source[src^="http://"]').length;
     if (insecure) add(f('mixed-content', SEV.WARN, `${insecure} subresource(s) loaded over http:// on an https page — mixed content`));
+  }
+
+  // ---- external webfonts (T1) — HEADLESS-ASTRO §7d: self-host, never Google Fonts/Typekit ----
+  const fontRefs = externalWebfonts($);
+  if (fontRefs.length) {
+    const hosts = [...new Set(fontRefs.map((r) => r.host))];
+    const hasPath = (u) => { try { return new URL(u, 'https://base.invalid/').pathname.length > 1; } catch { return false; } };
+    const all = fontRefs.map((r) => r.url.trim());
+    // the informative URLs (a stylesheet with its family=…) before the bare preconnect hosts
+    // the host is already named above: with one host a URL shows as path+query (the part that differs), else host+path
+    const show = (u) => { try { const x = new URL(u, 'https://base.invalid/'); return hasPath(u) && hosts.length === 1 ? x.pathname + x.search : x.hostname + (hasPath(u) ? x.pathname + x.search : ''); } catch { return u; } };
+    const urls = [...new Set([...all.filter(hasPath), ...all.filter((u) => !hasPath(u))].map(show))].slice(0, 3);
+    const head = `external webfont: ${fontRefs.length} reference(s) to ${hosts.join(', ')} — rule: self-host woff2 under the site's own origin (HEADLESS-ASTRO §7d); each request leaks visitor IPs to a third party. e.g. `;
+    // the report caps a message at 300 chars: spend what the fixed text leaves on the URLs — a short
+    // one keeps its whole length, the long ones share the rest — so the rule text is never cut
+    let room = 300 - head.length - 3 * (urls.length - 1);
+    const clean = urls.map((u) => safe(u, 400));
+    const take = clean.map(() => 0);
+    // water-filling: shortest first, each gets min(its length, an equal share of what remains)
+    const order = [...clean.keys()].sort((a, b) => clean[a].length - clean[b].length);
+    order.forEach((k, n) => { const share = Math.floor(room / (order.length - n)); take[k] = Math.max(20, Math.min(clean[k].length, share)); room -= take[k]; });
+    add(f('external-webfont', SEV.WARN, head + clean.map((u, k) => u.slice(0, take[k])).join(' , ')));
   }
 
   // ---- semantic landmarks (T2) ----

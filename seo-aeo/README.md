@@ -16,8 +16,18 @@ everything else reports without ever blocking, and a clean caller can opt indivi
 | Tier | Behaviour | Checks |
 |---|---|---|
 | **T0 — CRITICAL** | blocks when `fail-on-critical: true` | `http-200` (page resolves to a real 2xx — a WAF 403/429/timeout is downgraded to infra-WARN, not a block), `title-present`, `h1-present` |
-| **T1 — promotable WARN** | reports; a caller may elevate any of these to CRITICAL via `critical-checks` | `noindex`, `single-h1`, `canonical-present`, `canonical-valid`, `meta-description`, `html-lang`, `viewport`, `jsonld-valid`, `og-core`, `robots-txt`, `sitemap`, `robots-sitemap-directive`, `redirect-consistency` |
+| **T1 — promotable WARN** | reports; a caller may elevate any of these to CRITICAL via `critical-checks` | `noindex`, `single-h1`, `canonical-present`, `canonical-valid`, `meta-description`, `html-lang`, `viewport`, `jsonld-valid`, `og-core`, `robots-txt`, `sitemap`, `robots-sitemap-directive`, `redirect-consistency`, `external-webfont` |
 | **T2 — advisory WARN/INFO** | reports only, never promotable | length bounds, `charset`, `mixed-content`, `canonical-resolve`, `hreflang`/`hreflang-reciprocity`, `jsonld-type`/`jsonld-fields`/`jsonld-present` (Microdata/RDFa-aware), `entity-sameas`, `twitter-card`, `img-alt`, duplicate title/meta, `search-engine-blocked`, `ai-crawler-allowlist`, `search-verification`, `llms-txt`/`llms-structure`, `trailing-slash`, `soft-404`, `semantic-landmark`, `heading-hierarchy`, freshness, `jsonld-retired` |
+
+**`external-webfont` (v1.28.0)** flags, in the served JS-disabled HTML, any `<link>` (`rel` stylesheet / preload /
+preconnect / dns-prefetch — the `media="print" onload=…` async loader is still a `rel=stylesheet` link) or inline
+`<style>` `@import` / `url(…)` whose host is `fonts.googleapis.com`, `fonts.gstatic.com`, `use.typekit.net` or
+`p.typekit.net` (a `<noscript>` copy counts: a visitor without JS loads it). The rule behind it is
+HEADLESS-ASTRO §7d: webfonts are self-hosted, woff2 under the site's own origin, never an external font service —
+each request hands the visitor's IP to a third party and puts a CSS→font chain on the critical path. One finding per
+page: the reference count, the host(s), and up to 3 distinct URLs (sanitised like every page-controlled string).
+Self-hosted `@font-face` and same-origin `/fonts/…` never fire. Default **WARN**, so a caller is never newly-blocked;
+`critical-checks: external-webfont` makes it block once the caller's own pages are clean.
 
 **Scope — this is a detector, not a generator.** It *flags* a missing/poor meta description, an
 absent sitemap, a noindex, a dead canonical; it never *authors* copy or *creates* a sitemap —

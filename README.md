@@ -88,6 +88,21 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.28.0** *(tag not yet cut)* — `seo-aeo` gains **`external-webfont`** (T1, promotable WARN via `critical-checks`; default
+WARN, so the `v1` move newly-blocks nobody). HEADLESS-ASTRO §7d says webfonts are self-hosted, woff2 under the site's own
+origin. In the page-level matrix, on the JS-disabled
+HTML, it flags any `<link>` (`rel` stylesheet / preload / preconnect / dns-prefetch, which includes the
+`media="print" onload=…` async loader) whose host is `fonts.googleapis.com`, `fonts.gstatic.com`, `use.typekit.net` or
+`p.typekit.net`, and inline `<style>` `@import` / `url(…)` of those hosts (a `<noscript>` copy counts). One finding per
+page — the reference count, the host(s), and up to 3 distinct URLs, sanitised like the other checks — saying the rule is
+self-hosting and that the request leaks visitor IPs to a third party. Self-hosted `@font-face`, same-origin `/fonts/`,
+lookalike hosts, a hyperlink to the host, a commented-out `@import` and `<template>` content do not fire. Touches
+`seo-aeo/scripts/checks.mjs` (`externalWebfonts`, `T1_CHECKS`), `selftest.mjs` (positives, negatives, near-miss mutants,
+and an end-to-end default-WARN / promoted-BLOCK pair through the real `check.mjs`), `seo-aeo/README.md` and `action.yml`'s
+promotable list. **Caller-visible:** a new WARN line on any page that loads an external font, and nothing else.
+**Wiring:** callers may rehearse `critical-checks: external-webfont` with `fail-on-critical: false` first. **Staged,
+not tagged:** on release the `v1` move ships this entry with everything below it (see "A move ships every version staged below it").
+
 **v1.27.0** *(tag not yet cut)* — `verify-homepage` gains five opt-in check families, **`checks: focus | forms | target |
 motion | consent`**, each report-only until a caller sets its own new input `fail-on-focus | -forms | -target | -motion |
 -consent: true`. On 2026-10-06 the UI/UX gap review of EPN (`~/.claude/retros/UIUX-GAP-REVIEW-2026-10-06.md`) found

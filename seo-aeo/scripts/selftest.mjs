@@ -182,10 +182,65 @@ check('no structured data at all → WARN jsonld-present', sevOf(Pin('<html lang
 check('google-site-verification on home → INFO search-verification', sevOf(P('<html lang=en><head><title>T</title><meta name="google-site-verification" content="abc"></head><body><h1>h</h1></body></html>', { url: 'https://e/', finalUrl: 'https://e/' }).findings, 'search-verification').includes(SEV.INFO));
 check('no verification meta → no warn (DNS/file verification is equally valid)', !ids(P('<html lang=en><head><title>T</title></head><body><h1>h</h1></body></html>', { url: 'https://e/', finalUrl: 'https://e/' }).findings).includes('search-verification'));
 
+console.log('\n# external-webfont (T1) — HEADLESS-ASTRO §7d: webfonts are self-hosted, never fonts.googleapis.com & co');
+{
+  const GF = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Playfair+Display&display=swap';
+  const fw = (extra) => P(HEAD(extra)).findings.filter((x) => x.id === 'external-webfont');
+  const one = (label, extra, re) => {
+    const x = fw(extra);
+    check(`${label} → one WARN external-webfont`, x.length === 1 && x[0].sev === SEV.WARN, JSON.stringify(x));
+    if (re) check(`${label} → message names the host, the count, the self-host rule and the IP leak`, x.length === 1 && re.test(x[0].msg) && /self-host/.test(x[0].msg) && /woff2/.test(x[0].msg) && /§7d/.test(x[0].msg) && /visitor IPs/.test(x[0].msg), JSON.stringify(x));
+  };
+  // positives
+  one('Google Fonts stylesheet <link>', `<link rel="stylesheet" href="${GF}">`, /1 reference\(s\) to fonts\.googleapis\.com/);
+  one('preconnect only (no CSS link)', '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>', /1 reference\(s\) to fonts\.gstatic\.com/);
+  one('dns-prefetch with a protocol-relative href', '<link rel="dns-prefetch" href="//fonts.googleapis.com">', /fonts\.googleapis\.com/);
+  one('async media=print loader', `<link rel="stylesheet" href="${GF}" media="print" onload="this.media='all'">`, /fonts\.googleapis\.com/);
+  one('preload as=style + onload loader', `<link rel="preload" as="style" href="${GF}" onload="this.rel='stylesheet'">`, /fonts\.googleapis\.com/);
+  one('inline <style> @import url()', `<style>@import url('${GF}'); body{font-family:Inter}</style>`, /fonts\.googleapis\.com/);
+  one('inline <style> @import "…" (string form)', `<style>@import "${GF}";</style>`, /fonts\.googleapis\.com/);
+  one('inline <style> @font-face src: url(gstatic)', '<style>@font-face{font-family:Inter;src:url(https://fonts.gstatic.com/s/inter/v13/x.woff2) format("woff2")}</style>', /fonts\.gstatic\.com/);
+  one('Typekit stylesheet', '<link rel="stylesheet" href="https://use.typekit.net/abc1def.css">', /use\.typekit\.net/);
+  one('Typekit p.typekit.net preconnect, upper-cased host', '<link rel="preconnect" href="https://P.TYPEKIT.NET">', /p\.typekit\.net/);
+  one('<noscript> fallback link (a JS-disabled visitor loads it)', `<noscript><link rel="stylesheet" href="${GF}"></noscript>`, /fonts\.googleapis\.com/);
+  // the EPN shape: preconnect x2 + css link + noscript copy + @import → ONE finding, counted, URLs capped at 3 distinct
+  {
+    const x = fw(`<link rel="stylesheet" href="${GF}"><link rel="stylesheet" href="${GF}"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/cssA"><link rel="stylesheet" href="https://fonts.googleapis.com/cssB"><style>@import url(https://fonts.googleapis.com/cssC);</style><noscript><link rel="stylesheet" href="${GF}"></noscript>`);
+    check('many references (one URL three times, incl. <noscript>) → still ONE finding, count = 8 (references, not distinct URLs), both hosts named', x.length === 1 && /8 reference\(s\) to fonts\.googleapis\.com, fonts\.gstatic\.com/.test(x[0].msg), JSON.stringify(x));
+    const urls = x.length ? (x[0].msg.split('e.g. ')[1] || '').split(' , ') : [];
+    check('…lists at most 3 distinct URLs', urls.length === 3 && urls.every((u, i) => urls.every((v, j) => i === j || !(u.startsWith(v) || v.startsWith(u)))), JSON.stringify(urls));
+    check('…and the message fits the report\'s 300-char cap (the rule text is never cut)', x.length === 1 && x[0].msg.length <= 300, String(x[0] && x[0].msg.length));
+    const y = fw(`<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="${GF}">`);
+    const yu = y.length ? (y[0].msg.split('e.g. ')[1] || '').split(' , ') : [];
+    check('…the stylesheet URL (with its family=) is listed before the bare preconnect hosts, though it comes last in the page', yu.length === 3 && /^fonts\.googleapis\.com\/css2\?family=Inter/.test(yu[0]) && yu[1] === 'fonts.googleapis.com' && yu[2] === 'fonts.gstatic.com', JSON.stringify(yu));
+  }
+  // URLs are sanitised like every page-controlled string: no line break, no markdown/bracket characters
+  {
+    const x = fw('<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=A&#10;::error::pwned|`[x]<b>">');
+    check('hostile href → sanitised (no CR/LF, no ` | [ ] < >)', x.length === 1 && !/[\r\n`|[\]<>]/.test(x[0].msg), JSON.stringify(x));
+  }
+  // negatives
+  check('self-hosted font preload + @font-face → no external-webfont', fw('<link rel="preload" as="font" type="font/woff2" href="/fonts/inter-latin.woff2" crossorigin><style>@font-face{font-family:Inter;src:url(/fonts/inter-latin.woff2) format("woff2");font-display:swap}</style>').length === 0);
+  check('absolute same-origin /fonts/ URLs → no external-webfont', fw('<link rel="preload" as="font" href="https://example.com/fonts/inter.woff2" crossorigin><style>@font-face{font-family:I;src:url("https://example.com/fonts/inter.woff2")}</style>').length === 0);
+  check('page with no fonts at all → no external-webfont (the clean page, again)', fw('').length === 0);
+  // near-miss mutants: each is the real defect with ONE property changed, and must stay silent
+  check('mutant: host only as a path segment (example.com/fonts.googleapis.com/x.css) → silent', fw('<link rel="stylesheet" href="https://example.com/fonts.googleapis.com/x.css">').length === 0);
+  check('mutant: lookalike host (fonts.googleapis.com.example.org) → silent', fw('<link rel="stylesheet" href="https://fonts.googleapis.com.example.org/css">').length === 0);
+  check('mutant: lookalike host (notfonts.gstatic.com) → silent', fw('<link rel="preconnect" href="https://notfonts.gstatic.com">').length === 0);
+  check('mutant: an <a href> to the host is a hyperlink, not a font request → silent', P('<html lang=en><head><title>T</title></head><body><h1>h</h1><a href="https://fonts.googleapis.com/css2?family=Inter">fonts</a></body></html>').findings.every((x) => x.id !== 'external-webfont'));
+  check('mutant: <link rel="canonical"> / rel="icon" at the host is not a webfont → silent', fw('<link rel="icon" href="https://fonts.gstatic.com/favicon.ico">').length === 0);
+  check('mutant: @import commented out of the inline <style> → silent', fw(`<style>/* @import url('${GF}'); */ body{margin:0}</style>`).length === 0);
+  check('mutant: the host named in plain text of a <style> comment/selector value → silent', fw('<style>.x::after{content:"fonts.googleapis.com"}</style>').length === 0);
+  check('mutant: the link lives in a <template> (inert) → silent', fw(`<template><link rel="stylesheet" href="${GF}"></template>`).length === 0);
+  check('mutant: a link in an HTML comment → silent', fw(`<!-- <link rel="stylesheet" href="${GF}"> -->`).length === 0);
+  check('only a 2xx page is graded (a 404 short-circuits before this check)', !ids(P(`<html><head><link rel="stylesheet" href="${GF}"></head><body></body></html>`, { status: 404 }).findings).includes('external-webfont'));
+}
+
 console.log('\n# severity-tier contract');
 check('T0 core is exactly {http-200,title-present,h1-present}', [...T0_CHECKS].sort().join(',') === 'h1-present,http-200,title-present');
 check('promotable T1 set excludes T0 ids', ![...T0_CHECKS].some((c) => T1_CHECKS.has(c)));
 check('noindex is promotable (T1), title-length is not', T1_CHECKS.has('noindex') && !T1_CHECKS.has('title-length'));
+check('external-webfont is promotable T1 and never a T0 (default WARN)', T1_CHECKS.has('external-webfont') && !T0_CHECKS.has('external-webfont'));
 
 console.log('\n# report + annotation encoding (pure)');
 {
@@ -225,6 +280,7 @@ console.log('\n# check.mjs end to end — the job log carries the report; CRITIC
   const server = createServer((req, res) => {
     const base = `http://${req.headers.host}`;
     if (req.url === '/ok/') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(OK(`${base}/ok/`)); return; }
+    if (req.url === '/gfont/') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(OK(`${base}/gfont/`).replace('</head>', '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter&display=swap"></head>')); return; }
     if (req.url === '/hostile/') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(HOSTILE); return; }
     if (req.url === '/empty-sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); res.end('<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>'); return; }
     res.writeHead(404, { 'content-type': 'text/html' }); res.end('<html><head><title>404</title></head><body><h1>Not found</h1></body></html>');
@@ -310,6 +366,13 @@ console.log('\n# check.mjs end to end — the job log carries the report; CRITIC
     const g = await run({ SITEMAP_URL: `${BASE}/empty-sitemap.xml`, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'false' });
     check('an empty sitemap: report-only exit 0, annotated at the sitemap as ::warning', g.status === 0
       && JSON.stringify(commands(g.stdout)) === JSON.stringify([`::warning title=seo-aeo no-urls-resolved::no-urls-resolved at ${BASE}/empty-sitemap.xml`]), JSON.stringify(commands(g.stdout)));
+
+    // (F) external-webfont through the real action path: a clean page with one Google Fonts link is a
+    // WARN by default (exit 0, no annotation) and BLOCKS only when this caller promotes the check.
+    const hf = await run({ URLS: `${BASE}/gfont/`, GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'true' });
+    check('external-webfont: default WARN does not block (exit 0), reported, never annotated', hf.status === 0 && hf.stdout.includes('`external-webfont`') && commands(hf.stdout).length === 0, why(hf));
+    const hp = await run({ URLS: `${BASE}/gfont/`, GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: 'external-webfont' });
+    check('external-webfont: promoted via critical-checks BLOCKS with one ::error', hp.status === 1 && JSON.stringify(commands(hp.stdout)) === JSON.stringify([`::error title=seo-aeo external-webfont::external-webfont at ${BASE}/gfont/`]), why(hp) + JSON.stringify(commands(hp.stdout)));
   } finally {
     server.close();
     fs.rmSync(tmp, { recursive: true, force: true });
