@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>consent fixture — BAD (reject smaller than accept)</title>
+<!-- A reject IS on the first layer, but it is 100×28 against an accept of 180×48 (under 80% in both
+     dimensions), and an outline against a filled button. Only the size is a finding; the visual weight is an
+     INFO note. No checkbox is ticked. -->
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  #cookie-banner { position: fixed; left: 0; right: 0; bottom: 0; background: #223; color: #fff; padding: 12px; }
+  #acc { width: 180px; height: 48px; background: #d4a017; border: 0; color: #000; }
+  #rej { width: 100px; height: 28px; background: transparent; border: 1px solid #fff; color: #fff; }
+</style>
+</head>
+<body>
+<main><h1>Consent — smaller reject</h1></main>
+<div id="cookie-banner" role="dialog" aria-label="Cookies">
+  <p>We use cookies to improve your visit.</p>
+  <p><label><input type="checkbox" name="analytics"> Analytics</label></p>
+  <button id="acc" type="button">Accept all</button>
+  <button id="rej" type="button">Reject</button>
+</div>
+</body>
+</html>

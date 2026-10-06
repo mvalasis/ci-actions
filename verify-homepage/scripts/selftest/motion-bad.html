@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>motion fixture — BAD</title>
+<!-- The EPN shape of 2026-10-06 plus a layout shift. Every `motion` rule must fire here:
+       reduced-motion-animation     .shine (infinite) and .slow (one 8s run) ignore prefers-reduced-motion
+       reduced-motion-smooth-scroll `html { scroll-behavior: smooth }` with no reduce override
+       cls                          a 300px banner is inserted above the content 150ms after load
+     NOT findings: .spin (infinite, but inside [data-essential-motion]), .blip (0.4s, finished by the time the
+     page is read), .guarded (infinite, but switched off under reduce). -->
+<style>
+  html { scroll-behavior: smooth; }
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  @keyframes shine { to { transform: translateX(10px); } }
+  @keyframes slow  { to { opacity: .5; } }
+  @keyframes blip  { to { opacity: .9; } }
+  .shine   { animation: shine 3s infinite alternate; }
+  .slow    { animation: slow 8s 1 forwards; }
+  .spin    { animation: shine 1s infinite alternate; }
+  .blip    { animation: blip .4s 1; }
+  .guarded { animation: shine 2s infinite alternate; }
+  @media (prefers-reduced-motion: reduce) { .guarded { animation: none; } }
+  .content { height: 600px; background: linear-gradient(#cde, #eef); padding: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Motion — bad</h1>
+  <div class="shine">infinite shine</div>
+  <div class="slow">slow fade</div>
+  <div data-essential-motion><span class="spin">essential spinner</span></div>
+  <div class="blip">brief blip</div>
+  <div class="guarded">guarded</div>
+  <div class="content">content that moves down when the banner lands</div>
+</main>
+<script>
+  window.addEventListener('load', function () { setTimeout(function () {
+    var b = document.createElement('div');
+    b.style.cssText = 'height:300px;background:#fed';
+    b.textContent = 'late banner';
+    document.body.insertBefore(b, document.body.firstChild);
+  }, 150); });
+</script>
+</body>
+</html>

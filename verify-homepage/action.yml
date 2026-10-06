@@ -8,7 +8,10 @@ description: >-
   fails the gate. Mechanical structure/render = BLOCK; visual taste stays
   advisory (design-critic). Opt-in `checks: affordance` adds an interaction-
   affordance check (labelled/label-in-name/clickable-label checkboxes, pointer
-  cursor), report-only unless fail-on-affordance. Cost:
+  cursor), report-only unless fail-on-affordance. Opt-in `checks: focus | forms |
+  target | motion | consent` (v1.27.0) add keyboard-focus, form-usability, WCAG 2.5.8
+  target-size, reduced-motion + layout-shift and first-visit consent-banner checks, each
+  report-only unless its own fail-on-<check>. Cost:
   the browser matrix is meant for the WEEKLY schedule + cutover, NOT per-push.
 
 inputs:
@@ -24,7 +27,7 @@ inputs:
     required: false
     default: 'desktop:1920x1080,laptop:1440x900,iphone:393x852,android:384x854'
   checks:
-    description: 'Comma list of: render (overflow/overlap/collapse), nav (inventory), affordance (opt-in: checkbox/radio labelled + label-in-name + label click toggles + computed cursor:pointer on clickable controls; judged by fail-on-affordance, not fail-on-structure). `links` was retired in v1.15.0 and fails the step: the T1 link crawl is each repo''s own scripts/verify-homepage-t1.sh.'
+    description: 'Comma list of: render (overflow/overlap/collapse), nav (inventory), affordance (opt-in: checkbox/radio labelled + label-in-name + label click toggles + computed cursor:pointer on clickable controls; judged by fail-on-affordance, not fail-on-structure), focus (opt-in: Tab-walk — skip link visible when focused, focused element not wholly covered, a focus indicator on every stop; fail-on-focus), forms (opt-in: visible label, autocomplete on identity fields, 16px inputs on phones, a required cue; fail-on-forms), target (opt-in: WCAG 2.5.8 target size via axe-core wcag22aa; fail-on-target), motion (opt-in: reduced-motion honoured + layout shift within cls-budget, in its own browser contexts; fail-on-motion), consent (opt-in: first-visit consent banner has a reject on the first layer, not smaller than accept, no pre-ticked optional box; fail-on-consent). Every opt-in family is judged by its OWN fail-on-<check>, never by fail-on-structure. `links` was retired in v1.15.0 and fails the step: the T1 link crawl is each repo''s own scripts/verify-homepage-t1.sh.'
     required: false
     default: 'render,nav'
   fail-on-structure:
@@ -35,6 +38,34 @@ inputs:
     description: 'Only for `checks: …affordance`. true = BLOCK on any affordance finding (or a fault in the check itself); false = report-only (WARN, ::warning annotations). Deliberately the OPPOSITE default of fail-on-structure: a new check reports first, and never moves the render/nav verdict.'
     required: false
     default: 'false'
+  fail-on-focus:
+    description: 'Only for `checks: …focus`. true = BLOCK on any focus finding (skip-link-hidden, focus-obscured, focus-no-indicator) or a fault in the check itself; false = report-only (WARN, ::warning annotations). Same opposite-of-fail-on-structure default as fail-on-affordance: a new check reports first.'
+    required: false
+    default: 'false'
+  fail-on-forms:
+    description: 'Only for `checks: …forms`. true = BLOCK on any forms finding (label-not-visible, autocomplete-missing, input-font-size, required-unmarked) or a fault in the check itself; false = report-only (WARN, ::warning annotations).'
+    required: false
+    default: 'false'
+  fail-on-target:
+    description: 'Only for `checks: …target`. true = BLOCK on any WCAG 2.5.8 target-size violation axe-core reports (or a fault in the check itself); false = report-only (WARN, ::warning annotations). The under-44px count is a statistic, never a finding.'
+    required: false
+    default: 'false'
+  fail-on-motion:
+    description: 'Only for `checks: …motion`. true = BLOCK on any motion finding (reduced-motion-animation, reduced-motion-smooth-scroll, cls over cls-budget) or a fault in the check itself; false = report-only (WARN, ::warning annotations).'
+    required: false
+    default: 'false'
+  cls-budget:
+    description: 'Only for `checks: …motion`. Cumulative layout shift (summed over the load, per viewport) above this is a `cls` finding. 0.1 is the Core Web Vitals "good" line. Lab data from a headless run — expect variance near the budget.'
+    required: false
+    default: '0.1'
+  fail-on-consent:
+    description: 'Only for `checks: …consent`. true = BLOCK on any consent finding (consent-no-reject, consent-reject-smaller, consent-prechecked) or a fault in the check itself; false = report-only (WARN, ::warning annotations). No banner found is never a finding.'
+    required: false
+    default: 'false'
+  consent-selector:
+    description: 'Only for `checks: …consent`. CSS selector of the first-visit consent banner, overriding detection (a fixed/sticky element or dialog holding an accept control). Empty = detect. A selector that matches nothing is a note, not a finding.'
+    required: false
+    default: ''
   max-urls:
     description: 'Cap the number of URLs rendered (the browser matrix is the costly part).'
     required: false
@@ -60,10 +91,11 @@ runs:
   using: composite
   steps:
     - name: Install Playwright + Chromium
-      if: ${{ contains(inputs.checks, 'render') || contains(inputs.checks, 'nav') || contains(inputs.checks, 'affordance') }}
+      if: ${{ contains(inputs.checks, 'render') || contains(inputs.checks, 'nav') || contains(inputs.checks, 'affordance') || contains(inputs.checks, 'focus') || contains(inputs.checks, 'forms') || contains(inputs.checks, 'target') || contains(inputs.checks, 'motion') || contains(inputs.checks, 'consent') }}
       shell: bash
       working-directory: ${{ github.action_path }}
-      # playwright is the only dependency, pinned + lockfile'd; --ignore-scripts
+      # playwright and axe-core (the `target` check; the version a11y-audit's pa11y already runs) are the
+      # only dependencies, pinned + lockfile'd; --ignore-scripts
       # blocks dependency lifecycle scripts (matches seo-aeo's hardening). The
       # chromium engine + its OS libs come from the EXPLICIT install step below,
       # not a postinstall, so --ignore-scripts is safe here.
@@ -71,8 +103,8 @@ runs:
         npm ci --omit=dev --ignore-scripts --no-audit --no-fund
         npx playwright install --with-deps chromium
 
-    - name: Structure + cross-viewport render (+ nav inventory, + affordance)
-      if: ${{ contains(inputs.checks, 'render') || contains(inputs.checks, 'nav') || contains(inputs.checks, 'affordance') }}
+    - name: Structure + cross-viewport render (+ nav inventory, + affordance, + focus/forms/target/motion/consent)
+      if: ${{ contains(inputs.checks, 'render') || contains(inputs.checks, 'nav') || contains(inputs.checks, 'affordance') || contains(inputs.checks, 'focus') || contains(inputs.checks, 'forms') || contains(inputs.checks, 'target') || contains(inputs.checks, 'motion') || contains(inputs.checks, 'consent') }}
       shell: bash
       working-directory: ${{ github.action_path }}
       env:
@@ -82,6 +114,13 @@ runs:
         CHECKS: ${{ inputs.checks }}
         FAIL_ON_STRUCTURE: ${{ inputs.fail-on-structure }}
         FAIL_ON_AFFORDANCE: ${{ inputs.fail-on-affordance }}
+        FAIL_ON_FOCUS: ${{ inputs.fail-on-focus }}
+        FAIL_ON_FORMS: ${{ inputs.fail-on-forms }}
+        FAIL_ON_TARGET: ${{ inputs.fail-on-target }}
+        FAIL_ON_MOTION: ${{ inputs.fail-on-motion }}
+        FAIL_ON_CONSENT: ${{ inputs.fail-on-consent }}
+        CLS_BUDGET: ${{ inputs.cls-budget }}
+        CONSENT_SELECTOR: ${{ inputs.consent-selector }}
         MAX_URLS: ${{ inputs.max-urls }}
         VERIFY_TOKEN: ${{ inputs.verify-token }}
         WAIT_MS: ${{ inputs.wait-ms }}

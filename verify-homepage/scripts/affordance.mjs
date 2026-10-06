@@ -332,48 +332,8 @@ export async function runAffordance(page, { settleMs = 60 } = {}) {
   return out;
 }
 
-// ---- report plumbing (render-check passes its own `safe`) ----
+// ---- report plumbing: grouping, formatting and annotations live in ./ux-report.mjs (shared by every family) ----
 
-// One group = one cause. `:nth-of-type(n)` is dropped from the key so fifty identical cards read as one
-// finding with a count instead of fifty lines.
-export function groupFindings(perViewport) {
-  const groups = new Map();
-  for (const { viewport, findings } of perViewport) {
-    for (const f of findings) {
-      const key = `${f.rule}|${f.sel.replace(/:nth-of-type\(\d+\)/g, '')}|${f.detail.replace(/\d+/g, 'N')}`;
-      let g = groups.get(key);
-      if (!g) { g = { ...f, count: 0, seen: new Set(), viewports: new Set() }; groups.set(key, g); }
-      g.viewports.add(viewport);
-      if (!g.seen.has(f.sel)) { g.seen.add(f.sel); g.count++; }
-    }
-  }
-  // Behavioural findings first: they are the ones a caller cannot see by looking, and the ones a
-  // capped annotation list must not cut off.
-  const ORDER = ['label-click', 'label-in-name', 'label-missing', 'cursor'];
-  return [...groups.values()].sort((a, b) => ORDER.indexOf(a.rule) - ORDER.indexOf(b.rule));
-}
-
-const SEL_SAFE = (s) => String(s).replace(/[^\w\-#.:()> ]/g, '').slice(0, 160);
-
-export function formatGroup(g, safe, allViewports) {
-  const vps = g.viewports.size >= allViewports ? 'all viewports' : [...g.viewports].join(', ');
-  const times = g.count > 1 ? ` ×${g.count}` : '';
-  const text = g.text ? ` “${safe(g.text, 60)}”` : '';
-  return `\`${SEL_SAFE(g.sel)}\`${times}${text} — ${safe(g.detail, 200)} _(${safe(vps, 60)})_`;
-}
-
-// `::warning`/`::error` workflow commands, one per group, capped at what GitHub keeps per step. Only
-// identifiers go in: rule, selector (restricted to [\w#.:()> -] in-page) and the page URL — never a
-// label's or a button's text, which is page-controlled. The location is IN the message because the
-// file=/line= properties never reach the log line (ci-workflows.md).
-const escapeData = (s) => String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
-const escapeProp = (s) => escapeData(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
-export function annotationLines(urlGroups, level, cap = 10) {
-  const all = [];
-  for (const { url, groups } of urlGroups) for (const g of groups) all.push({ url, g });
-  const lines = all.slice(0, cap).map(({ url, g }) =>
-    `::${level} title=${escapeProp(`verify-homepage affordance ${g.rule}`)}::${escapeData(`${g.rule} at ${String(url).slice(0, 200)} — ${SEL_SAFE(g.sel)}${g.count > 1 ? ` (+${g.count - 1} like it)` : ''}`)}`
-  );
-  if (all.length > cap) lines.push(`verify-homepage affordance: ${all.length - cap} more finding group(s) not annotated (GitHub keeps ${cap} per step) — the report above lists them all.`);
-  return lines;
-}
+// Behavioural findings first: they are the ones a caller cannot see by looking, and the ones a capped
+// annotation list must not cut off.
+export const AFFORDANCE_ORDER = ['label-click', 'label-in-name', 'label-missing', 'cursor'];

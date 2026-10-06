@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>target fixture — BAD</title>
+<!-- WCAG 2.5.8: two 14×14 icon buttons 4px apart (each fails: too small AND no free space around it), plus
+     one small link in a row of links. NOT findings (axe's own exceptions): a 14×14 button with plenty of
+     free space around it, an inline link inside a sentence. -->
+<style>
+  body { margin: 0; padding: 16px; font: 16px/1.4 sans-serif; }
+  .icons { display: flex; gap: 4px; margin: 20px 0; }
+  .icons button { width: 14px; height: 14px; padding: 0; border: 1px solid #333; background: #eee; }
+  .alone { margin: 80px 0; }
+  .alone button { width: 14px; height: 14px; padding: 0; border: 1px solid #333; background: #eee; }
+  .row { display: flex; gap: 2px; }
+  .row a { display: block; width: 18px; height: 18px; background: #cde; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Targets — bad</h1>
+  <div class="icons"><button type="button" aria-label="Previous"></button><button type="button" aria-label="Next"></button></div>
+  <div class="row"><a href="#1" aria-label="One"></a><a href="#2" aria-label="Two"></a><a href="#3" aria-label="Three"></a></div>
+  <div class="alone"><button type="button" aria-label="Isolated small button"></button></div>
+  <p>This sentence has an <a href="#inline">inline link</a> in its running text.</p>
+</main>
+</body>
+</html>

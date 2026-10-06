@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>consent fixture — NO BANNER</title>
+<!-- No first-visit banner: a fixed "Allow notifications" widget (not about cookies) and a STATIC in-flow
+     #alt-bar that looks like a consent bar but is neither fixed, sticky nor a dialog. Detection must find
+     nothing (a stat, never a finding) — and `consent-selector: #alt-bar` must make it judge that bar, which
+     has an accept and no reject. -->
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  #notify { position: fixed; right: 12px; top: 12px; }
+</style>
+</head>
+<body>
+<main><h1>Consent — none</h1></main>
+<div id="notify"><button type="button">Allow notifications</button></div>
+<div id="alt-bar"><p>This site uses cookies.</p><button type="button">Accept</button></div>
+</body>
+</html>

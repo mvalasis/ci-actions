@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>forms fixture — BAD</title>
+<!-- The EPN /contact/ shape of 2026-10-06 (placeholder + aria-label only, no autocomplete, 15.2px text, three
+     required fields with no cue) plus one control per remaining way a form field can fail. Every `forms`
+     rule must fire here; the honeypot and the search boxes (a role=search form, and a type=search input in an
+     ordinary form — no label, no autocomplete) must NOT. -->
+<style>
+  body { margin: 0; padding: 16px; font: 16px/1.4 sans-serif; }
+  input, textarea, select { font-size: 15.2px; display: block; margin: 8px 0; width: 90%; box-sizing: border-box; }
+  .sr { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .trap { position: absolute; left: -9999px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Contact</h1>
+  <form id="contact" action="#" onsubmit="return false">
+    <input name="your-name" type="text" placeholder="Your name" aria-label="Your name" required>
+    <input name="your-email" type="email" aria-label="Your e-mail" required>
+    <label class="sr" for="phone">Phone</label>
+    <input id="phone" name="phone" type="tel">
+    <label for="company">Company</label>
+    <input id="company" name="company" type="text" autocomplete="off">
+    <textarea name="your-question" aria-label="Your question" required></textarea>
+    <label for="country">Country</label>
+    <select id="country" name="country"><option>Greece</option></select>
+    <input class="trap" name="website" type="text" autocomplete="off" tabindex="-1">
+    <input type="hidden" name="nonce" value="x">
+    <input type="submit" value="Send">
+  </form>
+  <form role="search" action="#" onsubmit="return false">
+    <input name="q" type="search" placeholder="Search">
+  </form>
+  <form action="#" onsubmit="return false">
+    <input name="s2" type="search" placeholder="Find">
+  </form>
+</main>
+</body>
+</html>

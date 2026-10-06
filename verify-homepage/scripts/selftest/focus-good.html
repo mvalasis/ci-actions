@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>focus fixture — GOOD</title>
+<!-- The mirror of focus-bad.html. The `focus` check must say NOTHING here, enforcing — and it carries the
+     shapes a naive check mis-reads: a skip link that SLIDES IN with a transition (read at its first frame it
+     is still off-screen), rings that FADE IN (a box-shadow, and an outline whose width grows over .2s: read at
+     the first frame they are `none` / 0px), a long page whose footer link is scrolled to the bottom edge beside a fixed banner — kept clear
+     by `scroll-padding-bottom` — a third-party iframe, and a hidden native checkbox whose label carries the ring. -->
+<style>
+  html { scroll-padding-top: 130px; scroll-padding-bottom: 120px; }
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  .skip { position: fixed; top: 0; left: 0; height: 40px; line-height: 40px; padding: 0 12px; background: #000; color: #fff; z-index: 100;
+          transform: translateY(-150%); transition: transform .15s; }
+  .skip:focus { transform: none; }
+  header.bar { position: fixed; top: 0; left: 0; right: 0; height: 120px; background: #eee; z-index: 20; }
+  main { padding: 140px 16px 40px; }
+  button, input, select { transition: box-shadow .15s; }
+  /* links draw their ring as an outline whose WIDTH grows over .2s: read at the first frame it is 0px */
+  a { outline: 0 solid #36c; outline-offset: 2px; transition: outline-width .2s; }
+  a:focus-visible { outline-width: 3px; }
+  button:focus-visible { outline: none; box-shadow: 0 0 0 3px #36c; }
+  input:focus-visible { outline: none; box-shadow: 0 0 0 3px #36c; }
+  .row { margin: 0 0 70px; }
+  .banner { position: fixed; left: 0; right: 0; bottom: 0; height: 100px; background: #223; color: #fff; z-index: 30; padding: 8px; box-sizing: border-box; }
+  .banner button { height: 36px; }
+  .sr { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); outline: none; }
+  .box { display: inline-block; width: 14px; height: 14px; border: 1px solid #333; vertical-align: -2px; margin-right: 6px; }
+  input.sr:focus-visible + .box { box-shadow: 0 0 0 3px #36c; }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="bar">Site header</header>
+<main id="main">
+  <h1>Focus — good</h1>
+  <div class="row"><a href="#one">First link (ring fades in)</a></div>
+  <div class="row"><button type="button">A button (ring fades in)</button></div>
+  <div class="row"><input type="text" aria-label="A text input"></div>
+  <div class="row"><label><input class="sr" type="checkbox"><span class="box"></span> Custom checkbox</label></div>
+  <div class="row"><iframe title="third party" srcdoc="<button>inside</button>" style="width:200px;height:50px;outline:none"></iframe></div>
+  <div class="row"><a href="#two">Second link</a></div>
+  <div class="row"><a href="#three">Third link</a></div>
+  <div class="row"><a href="#four">Fourth link</a></div>
+  <div class="row"><a href="#five">Fifth link</a></div>
+  <div class="row"><a href="#six">Sixth link</a></div>
+</main>
+<footer style="padding: 0 16px 140px"><!-- room under the last link for the fixed banner --><a id="foot" href="#foot">Footer link (kept clear of the banner by scroll-padding)</a></footer>
+<div class="banner" role="dialog" aria-label="Cookies"><p>We use cookies.</p><button type="button">OK</button></div>
+</body>
+</html>

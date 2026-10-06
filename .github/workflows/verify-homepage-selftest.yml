@@ -12,9 +12,10 @@ name: verify-homepage self-test
 #     (e2ff769), so the smoke run below can never exercise the path again.
 #
 # (2) live-smoke — the action in REPORT mode (fail-on-structure forced off, so
-#     this can never block ci-actions itself; fail-on-affordance forced off too, and
-#     `affordance` is in checks so the new input and step wiring run through the real
-#     action.yml, v1.26.0). Proves npm ci + Chromium install +
+#     this can never block ci-actions itself; every fail-on-<check> forced off too, and
+#     `affordance` + the five v1.27.0 families (focus, forms, target, motion, consent)
+#     are in checks so each new input and the step wiring run through the real
+#     action.yml, axe-core install included). Proves npm ci + Chromium install +
 #     the composite action wire up end-to-end against a real page. ci-actions
 #     carries no scripts/verify-nav.json, so it also exercises the
 #     nav-file-missing skip path. Dispatch to point it at any site.
@@ -34,9 +35,9 @@ on:
         required: false
         default: 'https://www.lampakia.gr/'
       checks:
-        description: 'Any subset of: render,nav,affordance'
+        description: 'Any subset of: render,nav,affordance,focus,forms,target,motion,consent'
         required: false
-        default: 'render,nav,affordance'
+        default: 'render,nav,affordance,focus,forms,target,motion,consent'
 
 permissions:
   contents: read
@@ -65,9 +66,14 @@ jobs:
       - uses: ./verify-homepage
         with:
           urls: ${{ inputs.urls || 'https://www.lampakia.gr/' }}
-          checks: ${{ inputs.checks || 'render,nav,affordance' }}
+          checks: ${{ inputs.checks || 'render,nav,affordance,focus,forms,target,motion,consent' }}
           fail-on-structure: 'false'
           fail-on-affordance: 'false'
+          fail-on-focus: 'false'
+          fail-on-forms: 'false'
+          fail-on-target: 'false'
+          fail-on-motion: 'false'
+          fail-on-consent: 'false'
           verify-token: ${{ secrets.VERIFY_HOMEPAGE_TOKEN }}
           max-urls: '4'
 

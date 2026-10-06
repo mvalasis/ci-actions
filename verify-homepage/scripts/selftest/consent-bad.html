@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>consent fixture — BAD (no reject on the first layer, pre-ticked boxes)</title>
+<!-- The first-visit banner EDPB/CNIL practice rules out: accept on the first layer, refusing hidden behind
+     "Manage preferences", an optional box pre-ticked, another pre-ticked in a collapsed panel. The always-on
+     "Necessary" box (checked, disabled) and the unticked "Marketing" box are NOT findings. -->
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  #cookie-banner { position: fixed; left: 0; right: 0; bottom: 0; background: #223; color: #fff; padding: 12px; }
+  #cookie-banner button { height: 40px; min-width: 140px; margin-right: 8px; }
+  #acc { background: #d4a017; border: 0; color: #000; }
+  .panel { display: none; }
+</style>
+</head>
+<body>
+<main><h1>Consent — bad</h1><p>Page content.</p></main>
+<div id="cookie-banner" role="dialog" aria-label="Cookies">
+  <p>We use cookies to improve your visit.</p>
+  <p><label><input type="checkbox" checked disabled> Necessary (always on)</label>
+     <label><input type="checkbox" name="analytics" checked> Analytics</label>
+     <label><input type="checkbox" name="marketing"> Marketing</label></p>
+  <div class="panel"><label><input type="checkbox" name="profiling" checked> Profiling</label></div>
+  <button id="acc" type="button">Accept all</button>
+  <button id="prefs" type="button">Manage preferences</button>
+</div>
+</body>
+</html>

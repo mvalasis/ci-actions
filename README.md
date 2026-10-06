@@ -88,6 +88,47 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.27.0** *(tag not yet cut)* — `verify-homepage` gains five opt-in check families, **`checks: focus | forms | target |
+motion | consent`**, each report-only until a caller sets its own new input `fail-on-focus | -forms | -target | -motion |
+-consent: true`. On 2026-10-06 the UI/UX gap review of EPN (`~/.claude/retros/UIUX-GAP-REVIEW-2026-10-06.md`) found
+defects in rendered behaviour that no gate in the fleet reads. Same shape as `affordance` (v1.26.0): one module per
+family under `verify-homepage/scripts/`, the render page load shared (read-only families first, the Tab-walk after
+them, `affordance` last), its own switch that never moves the render/nav verdict or another family's, a fault in a
+check reported as the gate's own and exiting `fail-on-<check> ? 1 : 0`, findings grouped per cause across viewports,
+`::warning`/`::error` annotations with rule + selector + URL only (the ten GitHub keeps per level are now shared by all
+families). **`focus`** — a real Tab-walk (≤60 stops): **`skip-link-hidden`** (the first stop is an in-page `#anchor`
+and, focused, has no real size, is off-screen, transparent or hit-tests to something else — EPN's skip link sits behind
+the 144px fixed header), **`focus-obscured`** (WCAG 2.4.11: centre and all four inset corners covered by a foreign
+element; partly covered is only counted — EPN's footer links under the cookie banner), **`focus-no-indicator`**
+(`outline: none` and no `box-shadow`; transitions awaited first); iframes and `.cf-turnstile` ignored. **`forms`** —
+**`label-not-visible`** (placeholder, `aria-label` or an sr-only label alone), **`autocomplete-missing`** (identity
+fields by name/id/aria-label/type; `off` counts; WCAG 1.3.5), **`input-font-size`** (<16px, viewports ≤600 only — iOS
+focus zoom), **`required-unmarked`** (no `*`/required word and no convention sentence); honeypots and search boxes
+skipped. **`target`** — WCAG 2.5.8 via **axe-core 4.11.4** (a second pinned dependency, the version `a11y-audit`'s pa11y
+already runs, locked with its hash, `--ignore-scripts`), `wcag22aa` tag, `target-size` violations only; the under-44px
+count is a statistic, never a finding. **`motion`** — its own browser contexts: under `reducedMotion: 'reduce'`
+**`reduced-motion-animation`** (a CSS animation/transition still running that is infinite or >5s; `data-essential-motion`
+opts out) and **`reduced-motion-smooth-scroll`**, and in a fresh context **`cls`** over the new `cls-budget` input
+(default `0.1`, per viewport). **`consent`** — a first-visit banner (fixed/sticky or dialog holding an accept control,
+or the new `consent-selector` input): **`consent-no-reject`**, **`consent-reject-smaller`** (<80% in width or height),
+**`consent-prechecked`**; visual weight is an INFO note only, and no banner found is a stat, never a finding. Left out
+on purpose, per family, in [`verify-homepage/README.md`](verify-homepage/README.md) → "UX families" (submit-time form
+behaviour, JS-driven animation, what happens after a consent click). **A trap found while building it:** a mobile
+(`isMobile`) Chromium context flags *every* layout-shift entry `hadRecentInput: true` (a shift 1.2s after load
+included), so the textbook "exclude `hadRecentInput`" CLS reading is 0 on every phone viewport — EPN's "mobile 0" in the
+review was very likely that; `motion` counts all entries because it dispatches no input. New files: `focus.mjs`,
+`forms.mjs`, `target.mjs`, `motion.mjs`, `consent.mjs`, `ux-page.mjs` (in-page helpers), `ux-report.mjs` (grouping +
+annotations, now shared with `affordance`) and ten selftest fixtures; `render-check.mjs`'s crash guard now reads every
+enabled gate's switch (exit 1 only if one that runs is `true`, and the note names which). `scripts/selftest.mjs` grows
+a BAD page per family (every rule fires, every exclusion holds), a GOOD page (silent, enforcing, and the tally proves
+it looked), both exit codes, independence from `fail-on-structure` both ways, annotation content, opt-in at the
+browser, an unevaluable page and a missing `axe-core` as faults, and two pinned mutants (`focus` without its
+transition wait flags GOOD's fading rings; `motion` must read the phone viewport). **Caller-visible:** nothing until
+a caller adds a family to `checks` — the default stays `render,nav`, every new input defaults to report-only, so the
+`v1` move newly-blocks nobody; `npm ci` now also installs `axe-core` (one more ~560 KB package, MPL-2.0, same version
+as `a11y-audit`'s lock). **Wiring:** epn-astro's `verify-render.yml` is the pilot, report-only, ahead of the sibling
+sites (DISCIPLINES §7).
+
 **v1.26.0** *(anchor `62ae3ec`; `v1` moved onto it 2026-10-06)* — `verify-homepage` gains **`checks: affordance`**, an opt-in interaction-affordance
 check, report-only until a caller sets the new input `fail-on-affordance: true`. On 2026-10-06 epn-astro's `/contact/`
 and `/employers/` shipped a consent checkbox whose words sat outside any `<label>` (clicking them did nothing), whose
@@ -952,7 +993,7 @@ site:
 
 | entrypoint | language | before | after |
 | --- | --- | --- | --- |
-| `verify-homepage/scripts/render-check.mjs` | top-level-await ESM | any throw → exit 1 | reports the fault, exits `fail-on-structure ? 1 : 0` (`fail-on-affordance ? 1 : 0` for an `affordance`-only run, v1.26.0) |
+| `verify-homepage/scripts/render-check.mjs` | top-level-await ESM | any throw → exit 1 | reports the fault, exits `fail-on-structure ? 1 : 0` (`fail-on-<check> ? 1 : 0` for a run of opt-in checks only — `affordance` v1.26.0, `focus`/`forms`/`target`/`motion`/`consent` v1.27.0) |
 | `linkcheck/scripts/linkcheck.py` | plain `main()` | traceback → exit 1, **and a false "broken links found" issue filed** | exit **2** = "no verdict", distinct from 1 = "links are broken"; issue steps key on the crawler's rc, so no issue is filed or closed on a crash |
 | `a11y-audit/scripts/audit.sh` | bash | abort → exit 1; any non-zero `pa11y-ci` rc reported as **"WCAG errors found"** | reports the fault, exits `fail-on-violations ? 1 : 0`; a scanner that never produced a per-URL result is no longer reported as accessibility debt |
 
@@ -1584,6 +1625,13 @@ Opt-in **`checks: affordance`** (v1.26.0) adds the interaction-affordance check 
 label-in-name (WCAG 2.5.3), a real click on the label text toggles it, computed `cursor: pointer` on
 clickable controls — judged by its own `fail-on-affordance` (default `false`), never by `fail-on-structure`.
 Rules, limits and what was left out: [`verify-homepage/README.md`](verify-homepage/README.md) → "Affordance check".
+
+Opt-in **`checks: focus | forms | target | motion | consent`** (v1.27.0) add the keyboard-focus (skip link visible,
+focused element not covered, a focus indicator), form-usability (visible label, `autocomplete`, 16px phone inputs,
+a required cue), WCAG 2.5.8 target-size (axe-core `wcag22aa`), reduced-motion + layout-shift (`cls-budget`) and
+first-visit consent-banner (`consent-selector`) checks — each judged by its own `fail-on-<check>` (default
+`false`), never by `fail-on-structure`. Rules, limits and what was left out:
+[`verify-homepage/README.md`](verify-homepage/README.md) → "UX families".
 
 Landmark selectors resolve **first-match-wins**, so a precise selector and a gate
 that catches markup regressions pull against each other — the reasoning, the

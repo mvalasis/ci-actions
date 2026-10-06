@@ -12,6 +12,12 @@
 //            toggles it + computed `cursor: pointer` on clickable controls. Its own
 //            report-mode-first switch (FAIL_ON_AFFORDANCE, default false) — see
 //            ./affordance.mjs. Never changes a render/nav verdict or their exit code.
+//   (focus | forms | target | motion | consent, opt-in via `checks`, v1.27.0) the UX
+//            families — keyboard focus, form usability, target size (axe wcag22aa),
+//            reduced-motion + CLS, first-visit consent banner. Each in its own module
+//            (./focus.mjs …), each with its own report-mode-first switch
+//            (FAIL_ON_FOCUS …, default false), none able to move the render/nav
+//            verdict or another family's. All but `motion` share the render page load.
 //
 // Mechanical structure/render = BLOCK (when FAIL_ON_STRUCTURE=true). Visual
 // taste stays advisory (the design-critic subagent), never gated here.
@@ -25,7 +31,13 @@
 // (UI/UX — structure + cross-viewport render).
 import fs from 'node:fs';
 import { chromium } from 'playwright';
-import { runAffordance, groupFindings, formatGroup, annotationLines } from './affordance.mjs';
+import { runAffordance, AFFORDANCE_ORDER } from './affordance.mjs';
+import { groupFindings, formatGroup, annotationLines } from './ux-report.mjs';
+import { FOCUS } from './focus.mjs';
+import { FORMS } from './forms.mjs';
+import { TARGET } from './target.mjs';
+import { MOTION } from './motion.mjs';
+import { CONSENT } from './consent.mjs';
 
 // ---- crash guard — MUST stay the first top-level statement after the imports ----
 // A fault in this tool (Chromium failing to launch, a malformed verify-nav.json, a
@@ -55,16 +67,17 @@ import { runAffordance, groupFindings, formatGroup, annotationLines } from './af
 // escapes) surfaces as `unhandledRejection`. Registering only the first would leave
 // that second class exiting 1 regardless of `fail-on-structure`.
 const onCrash = (kind) => (err) => {
-  // Mirrors the `FAIL` / `FAIL_AFF` consts' rule, read order-immunely: render/nav default to BLOCK,
-  // affordance to report-only. A run that asked for affordance ALONE is governed by its own switch,
-  // so a tool fault can never newly-block a report-mode affordance caller.
+  // Mirrors the per-gate consts' rule, read order-immunely: render/nav default to BLOCK, every opt-in
+  // family to report-only. A run governed by opt-in gates ALONE is governed by their switches, so a tool
+  // fault can never newly-block a report-mode caller of a check that is report-only.
   const checks = (process.env.CHECKS || 'render,nav').split(/[\s,]+/);
-  const structure = checks.includes('render') || checks.includes('nav');
-  const affordance = checks.includes('affordance');
-  const failing =
-    (structure && (process.env.FAIL_ON_STRUCTURE || '') !== 'false') ||
-    (affordance && process.env.FAIL_ON_AFFORDANCE === 'true');
-  const setting = structure ? 'fail-on-structure' : 'fail-on-affordance';
+  const gates = [];
+  if (checks.includes('render') || checks.includes('nav')) gates.push(['fail-on-structure', (process.env.FAIL_ON_STRUCTURE || '') !== 'false']);
+  for (const n of ['affordance', 'focus', 'forms', 'target', 'motion', 'consent']) {
+    if (checks.includes(n)) gates.push([`fail-on-${n}`, process.env[`FAIL_ON_${n.toUpperCase()}`] === 'true']);
+  }
+  const failing = gates.some((g) => g[1]);
+  const setting = (failing ? gates.filter((g) => g[1]) : gates).map((g) => g[0]).join(' / ') || 'fail-on-structure';
   // Inline sanitisation: the module's `safe()` is a const defined below and is in
   // the TDZ for exactly the crashes most worth reporting. Strips the markdown
   // structural chars (backtick included, so the fence below cannot be escaped).
@@ -108,6 +121,17 @@ const CHECKS = new Set((env.CHECKS || 'render,nav').split(/[\s,]+/).map((s) => s
 const FAIL = env.FAIL_ON_STRUCTURE !== 'false'; // default true → BLOCK
 const FAIL_AFF = env.FAIL_ON_AFFORDANCE === 'true'; // default false → report-only (the opposite default, on purpose)
 const STRUCTURE = CHECKS.has('render') || CHECKS.has('nav');
+// The v1.27.0 families: each opt-in via `checks`, each judged by its OWN switch (default false → report-only).
+const FAMILIES = [FOCUS, FORMS, TARGET, MOTION, CONSENT]
+  .filter((f) => CHECKS.has(f.name))
+  .map((f) => ({ ...f, fail: env[`FAIL_ON_${f.name.toUpperCase()}`] === 'true', byUrl: [], faults: [], stats: {} }));
+// Page-sharing families run in this order on the render page load, read-only ones first, the Tab-walk
+// after them; `affordance` (it clicks, then restores) is last of all. `motion` has its own contexts.
+const PAGE_ORDER = ['consent', 'forms', 'target', 'focus'];
+const PAGE_FAMILIES = PAGE_ORDER.map((n) => FAMILIES.find((f) => f.name === n)).filter(Boolean);
+const OWN_FAMILIES = FAMILIES.filter((f) => f.own);
+const CLS_BUDGET = Number.isFinite(parseFloat(env.CLS_BUDGET)) ? parseFloat(env.CLS_BUDGET) : 0.1;
+const CONSENT_SELECTOR = (env.CONSENT_SELECTOR || '').trim();
 const MAX_URLS = Math.max(1, parseInt(env.MAX_URLS || '12', 10) || 12);
 const VERIFY_TOKEN = env.VERIFY_TOKEN || '';
 const WAIT_MS = Math.max(0, parseInt(env.WAIT_MS || '1200', 10) || 1200);
@@ -227,13 +251,14 @@ const affStats = { controls: 0, clicked: 0, cursors: 0 };
 
 const browser = await chromium.launch({ args: ['--no-sandbox'] });
 
-async function newContext(vp) {
+async function newContext(vp, extra = {}) {
   const ctx = await browser.newContext({
     viewport: { width: vp.width, height: vp.height },
     isMobile: vp.mobile,
     hasTouch: vp.mobile,
     deviceScaleFactor: vp.mobile ? 3 : 1,
     userAgent: vp.mobile ? MOBILE_UA : DESKTOP_UA,
+    ...extra,
   });
   if (VERIFY_TOKEN) {
     await ctx.route('**', async (route) => {
@@ -542,54 +567,81 @@ for (const url of targets) {
     note(`- **nav inventory** ${navFail ? '❌' : '✅'}${navFail ? ' — ' + lines.map((l) => safe(l, 160)).join(' · ') : ` (${(navSpec.items || []).length} items in order)`}`);
   }
 
-  // ---- RENDER matrix (per viewport) + AFFORDANCE (same page load, after the measurement) ----
+  // ---- RENDER matrix (per viewport) + the page-sharing families + AFFORDANCE (same page load, after the
+  //      measurement), then the families that need their own browser contexts ----
   const affViewports = [];
-  if (CHECKS.has('render') || CHECKS.has('affordance')) {
+  const famViewports = Object.fromEntries(FAMILIES.map((f) => [f.name, []]));
+  const famNotes = Object.fromEntries(FAMILIES.map((f) => [f.name, new Set()]));
+  const addFam = (f, vp, r) => {
+    if (r.fault) { f.faults.push(`${vp.name}: ${r.fault}`); return; }
+    famViewports[f.name].push({ viewport: vp.name, findings: r.findings });
+    for (const n of r.notes || []) famNotes[f.name].add(n);
+    for (const [k, v] of Object.entries(r.stats || {})) {
+      if (typeof v === 'number') f.stats[k] = Math.max(f.stats[k] || 0, v);
+      else if (v) f.stats[k] = v;
+    }
+  };
+  if (CHECKS.has('render') || CHECKS.has('affordance') || PAGE_FAMILIES.length || OWN_FAMILIES.length) {
     for (const vp of VIEWPORTS) {
-      const ctx = await newContext(vp);
-      const page = await ctx.newPage();
       const problems = [];
-      try {
-        await gotoSettle(page, url);
-        if (CHECKS.has('render')) {
-        const m = await page.evaluate(MEASURE, { tol: OVERFLOW_TOL, landmarks: LANDMARKS });
-        if (m.overflow) {
-          const who = m.offenders.length
-            ? ' — ' + m.offenders.map((o) => `${o.tag}.${safe(o.cls, 24)}@${o.right}`).join(', ')
-            : '';
-          problems.push(`horizontal overflow: scrollW ${m.scrollW} > ${m.vw}${who}`);
-        }
-        for (const l of m.landmarks) {
-          noteAmbiguity(url, vp.name, l);
-          if (!l.present) {
-            problems.push(`missing landmark ${safe(l.sel, 28)}`);
-          } else if (l.display !== 'none' && l.display !== 'contents' && l.h <= 0) {
-            // display:contents generates no box (height 0) but its children
-            // render — not a collapse. (overlapFailures already skips it: its
-            // 0×0 rect fails the h>0/w>0 in-flow filter.)
-            const tail = identTail(l);
-            problems.push(`collapsed landmark ${safe(l.sel, 28)} (0-height)${tail ? ` — ${tail}` : ''}`);
+      if (CHECKS.has('render') || CHECKS.has('affordance') || PAGE_FAMILIES.length) {
+        const ctx = await newContext(vp);
+        const page = await ctx.newPage();
+        try {
+          await gotoSettle(page, url);
+          if (CHECKS.has('render')) {
+          const m = await page.evaluate(MEASURE, { tol: OVERFLOW_TOL, landmarks: LANDMARKS });
+          if (m.overflow) {
+            const who = m.offenders.length
+              ? ' — ' + m.offenders.map((o) => `${o.tag}.${safe(o.cls, 24)}@${o.right}`).join(', ')
+              : '';
+            problems.push(`horizontal overflow: scrollW ${m.scrollW} > ${m.vw}${who}`);
           }
-        }
-        for (const f of overlapFailures(m.landmarks)) problems.push(`overlap ${f}`);
-        }
-        // AFFORDANCE runs LAST on the page: its label-click leg interacts with the document (and
-        // restores it), which the render measurement above must never see.
-        if (CHECKS.has('affordance')) {
-          const a = await runAffordance(page);
-          if (a.fault) affFaults.push(`${vp.name}: ${a.fault}`);
-          else {
-            affViewports.push({ viewport: vp.name, findings: a.findings });
-            affStats.controls = Math.max(affStats.controls, a.stats.controls);
-            affStats.clicked = Math.max(affStats.clicked, a.stats.clicked);
-            affStats.cursors = Math.max(affStats.cursors, a.stats.cursors);
+          for (const l of m.landmarks) {
+            noteAmbiguity(url, vp.name, l);
+            if (!l.present) {
+              problems.push(`missing landmark ${safe(l.sel, 28)}`);
+            } else if (l.display !== 'none' && l.display !== 'contents' && l.h <= 0) {
+              // display:contents generates no box (height 0) but its children
+              // render — not a collapse. (overlapFailures already skips it: its
+              // 0×0 rect fails the h>0/w>0 in-flow filter.)
+              const tail = identTail(l);
+              problems.push(`collapsed landmark ${safe(l.sel, 28)} (0-height)${tail ? ` — ${tail}` : ''}`);
+            }
           }
+          for (const f of overlapFailures(m.landmarks)) problems.push(`overlap ${f}`);
+          }
+          // The page-sharing families: read-only first (consent, forms, target), the Tab-walk after them.
+          for (const f of PAGE_FAMILIES) {
+            addFam(f, vp, await f.run({ page, url, vp, opts: { selector: CONSENT_SELECTOR } }));
+          }
+          // AFFORDANCE runs LAST on the page: its label-click leg interacts with the document (and
+          // restores it), which nothing above may see.
+          if (CHECKS.has('affordance')) {
+            const a = await runAffordance(page);
+            if (a.fault) affFaults.push(`${vp.name}: ${a.fault}`);
+            else {
+              affViewports.push({ viewport: vp.name, findings: a.findings });
+              affStats.controls = Math.max(affStats.controls, a.stats.controls);
+              affStats.clicked = Math.max(affStats.clicked, a.stats.clicked);
+              affStats.cursors = Math.max(affStats.cursors, a.stats.cursors);
+            }
+          }
+        } catch (e) {
+          if (CHECKS.has('render')) problems.push(`load error: ${safe(e.message, 80)}`);
+          else if (CHECKS.has('affordance')) affFaults.push(`${vp.name}: page did not load — ${safe(e.message, 80)}`);
+          for (const f of PAGE_FAMILIES) f.faults.push(`${vp.name}: page did not load — ${safe(e.message, 80)}`);
+        } finally {
+          await ctx.close();
         }
-      } catch (e) {
-        if (CHECKS.has('render')) problems.push(`load error: ${safe(e.message, 80)}`);
-        else affFaults.push(`${vp.name}: page did not load — ${safe(e.message, 80)}`);
-      } finally {
-        await ctx.close();
+      }
+      // The families with their own browser contexts (reduced motion, layout shift).
+      for (const f of OWN_FAMILIES) {
+        try {
+          addFam(f, vp, await f.run({ newContext, gotoSettle, url, vp, opts: { clsBudget: CLS_BUDGET } }));
+        } catch (e) {
+          f.faults.push(`${vp.name}: ${safe(e.message, 80)}`);
+        }
       }
       if (!CHECKS.has('render')) continue;
       const fail = problems.length > 0;
@@ -607,11 +659,21 @@ for (const url of targets) {
 
   // ---- AFFORDANCE report for this URL ----
   if (CHECKS.has('affordance')) {
-    const groups = groupFindings(affViewports);
+    const groups = groupFindings(affViewports, AFFORDANCE_ORDER);
     affByUrl.push({ url, groups });
     note(`- **affordance** ${groups.length ? (FAIL_AFF ? '❌' : '⚠️') : '✅'}${groups.length ? ` — ${groups.length} finding group(s)` : ` (no finding across ${affViewports.length} viewport(s))`}`);
     for (const g of groups.slice(0, 30)) note(`  - **${g.rule}** ${formatGroup(g, safe, VIEWPORTS.length)}`);
     if (groups.length > 30) note(`  - …and ${groups.length - 30} more`);
+  }
+  // ---- the v1.27.0 families' reports for this URL, in the brief's order ----
+  for (const f of FAMILIES) {
+    const vps = famViewports[f.name];
+    const groups = groupFindings(vps, f.order);
+    f.byUrl.push({ url, groups });
+    note(`- **${f.name}** ${groups.length ? (f.fail ? '❌' : '⚠️') : '✅'}${groups.length ? ` — ${groups.length} finding group(s)` : ` (no finding across ${vps.length} viewport(s))`}`);
+    for (const g of groups.slice(0, 30)) note(`  - **${g.rule}** ${formatGroup(g, safe, VIEWPORTS.length)}`);
+    if (groups.length > 30) note(`  - …and ${groups.length - 30} more`);
+    for (const n of [...famNotes[f.name]].slice(0, 5)) note(`  - ℹ️ ${safe(n, 200)}`);
   }
   note('');
 }
@@ -668,7 +730,6 @@ if (STRUCTURE) {
 // 1 : 0` — never as a PASS, and never as a finding about the page.
 let affNFindings = 0;
 let affBlocks = false;
-let affAnnotations = [];
 if (CHECKS.has('affordance')) {
   affNFindings = affByUrl.reduce((n, u) => n + u.groups.length, 0);
   const faulted = affFaults.length > 0;
@@ -680,10 +741,36 @@ if (CHECKS.has('affordance')) {
   }
   if (affNFindings === 0 && !faulted) note(`✅ **affordance PASS** — ${targets.length} page(s), ${VIEWPORTS.length} viewport(s); ${tally}.`);
   else if (affNFindings > 0) note(`${FAIL_AFF ? '❌ **affordance FAIL**' : '⚠️ **affordance WARN (report-only)**'} — ${affNFindings} finding group(s) over ${targets.length} page(s); ${tally}.`);
-  // One workflow command per group, `::error` when this run blocks, `::warning` when it only reports.
-  // Printed AFTER the report (below), so the log reads report → annotations like the sibling gates.
-  affAnnotations = annotationLines(affByUrl.filter((u) => u.groups.length), FAIL_AFF ? 'error' : 'warning');
 }
+
+// ---- the v1.27.0 families' verdicts: one line each, one switch each, none moving another's result ----
+// A fault (the check could not look) is reported as one and exits like a finding would —
+// `fail-on-<family> ? 1 : 0` — never as a PASS, and never as a finding about the page.
+let famBlocks = false;
+for (const f of FAMILIES) {
+  const n = f.byUrl.reduce((k, u) => k + u.groups.length, 0);
+  const faulted = f.faults.length > 0;
+  f.nFindings = n;
+  if (f.fail && (n > 0 || faulted)) famBlocks = true;
+  const tally = f.tally(new Proxy(f.stats, { get: (t, k) => t[k] ?? 0 }));
+  if (faulted) {
+    note(`${f.fail ? '❌' : '⚠️'} **${f.name} could not look** (a fault in the gate, not a verdict on the page) — ${safe(f.faults.slice(0, 3).join(' · '), 300)}`);
+    note('');
+  }
+  if (n === 0 && !faulted) note(`✅ **${f.name} PASS** — ${targets.length} page(s), ${VIEWPORTS.length} viewport(s); ${tally}.`);
+  else if (n > 0) note(`${f.fail ? `❌ **${f.name} FAIL**` : `⚠️ **${f.name} WARN (report-only)**`} — ${n} finding group(s) over ${targets.length} page(s); ${tally}.`);
+}
+// One workflow command per group — `::error` when that family blocks, `::warning` when it only reports —
+// capped at what GitHub keeps per step per level. Printed AFTER the report (below), so the log reads
+// report → annotations like the sibling gates.
+const annotationItems = [];
+if (CHECKS.has('affordance')) {
+  for (const u of affByUrl) for (const g of u.groups) annotationItems.push({ family: 'affordance', level: FAIL_AFF ? 'error' : 'warning', url: u.url, g });
+}
+for (const f of FAMILIES) {
+  for (const u of f.byUrl) for (const g of u.groups) annotationItems.push({ family: f.name, level: f.fail ? 'error' : 'warning', url: u.url, g });
+}
+const annotations = annotationLines(annotationItems);
 
 if (summaryFile) {
   try {
@@ -694,7 +781,7 @@ if (summaryFile) {
   }
 }
 say(out.join('\n'));
-for (const l of affAnnotations) say(l);
+for (const l of annotations) say(l);
 
-if ((STRUCTURE && failed.length && FAIL) || affBlocks) process.exit(1);
+if ((STRUCTURE && failed.length && FAIL) || affBlocks || famBlocks) process.exit(1);
 process.exit(0);

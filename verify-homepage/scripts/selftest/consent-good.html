@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>consent fixture — GOOD</title>
+<!-- Accept and Reject side by side, the same size, optional boxes unticked, the always-on box disabled. The
+     `consent` check must say NOTHING here, enforcing — and it must find THIS banner (accept AND reject), not
+     the smaller fixed "Allow cookie tips" widget beside it (an accept-looking control that talks about
+     cookies, so only the accept-and-reject preference tells them apart). The two
+     buttons differ in colour (filled gold / filled grey): not a finding. -->
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  #cookie-banner { position: fixed; left: 0; right: 0; bottom: 0; background: #223; color: #fff; padding: 12px; }
+  #cookie-banner button { width: 150px; height: 44px; margin-right: 8px; border: 0; }
+  #acc { background: #d4a017; color: #000; }
+  #rej { background: #667; color: #fff; }
+  #notify { position: fixed; right: 12px; top: 12px; }
+</style>
+</head>
+<body>
+<main><h1>Consent — good</h1></main>
+<div id="notify" class="cookie-tip"><button type="button">Allow cookie tips</button></div>
+<div id="cookie-banner" role="dialog" aria-label="Cookies">
+  <p>We use cookies to improve your visit.</p>
+  <p><label><input type="checkbox" checked disabled> Necessary (always on)</label>
+     <label><input type="checkbox" name="analytics"> Analytics</label></p>
+  <button id="acc" type="button">Accept all</button>
+  <button id="rej" type="button">Reject all</button>
+</div>
+</body>
+</html>

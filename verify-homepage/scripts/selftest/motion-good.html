@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>motion fixture — GOOD</title>
+<!-- The mirror of motion-bad.html: the same animations, every one guarded under prefers-reduced-motion, smooth
+     scrolling offered only to visitors who have not asked for less motion, and the late banner lands in space
+     the page reserved for it. The `motion` check must say NOTHING here, enforcing. Carries what a naive check
+     mis-reads: an essential spinner and a short (2s, one-shot) animation that DO still run under `reduce`
+     (so the check really looks — it counts them), and a late insert that shifts nothing. -->
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+  @keyframes shine { to { transform: translateX(10px); } }
+  @keyframes slow  { to { opacity: .5; } }
+  .shine { animation: shine 3s infinite alternate; }
+  .slow  { animation: slow 8s 1 forwards; }
+  @media (prefers-reduced-motion: reduce) { .shine, .slow { animation: none; } }
+  .spin  { animation: shine 1s infinite alternate; }          /* essential: opted out below */
+  .brief { animation: slow 2s 1; }                              /* short and finite: never a finding */
+  .reserved { height: 300px; }                                  /* the banner's room, held from the first paint */
+  .content { height: 600px; background: linear-gradient(#cde, #eef); padding: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Motion — good</h1>
+  <div class="shine">shine</div>
+  <div class="slow">slow fade</div>
+  <div data-essential-motion><span class="spin">essential spinner</span></div>
+  <div class="brief">brief</div>
+  <div class="reserved" id="slot"></div>
+  <div class="content">content that stays where it is</div>
+</main>
+<script>
+  window.addEventListener('load', function () { setTimeout(function () { document.getElementById('slot').textContent = 'late banner'; }, 150); });
+</script>
+</body>
+</html>

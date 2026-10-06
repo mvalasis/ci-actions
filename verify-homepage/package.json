@@ -5,6 +5,7 @@
   "description": "Multi-viewport structure + render gate (Playwright) for the fleet's site ecosystem.",
   "type": "module",
   "dependencies": {
+    "axe-core": "4.11.4",
     "playwright": "1.61.1"
   }
 }

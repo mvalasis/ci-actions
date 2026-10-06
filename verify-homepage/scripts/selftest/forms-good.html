@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>forms fixture — GOOD</title>
+<!-- The mirror of forms-bad.html: the `forms` check must say NOTHING here, enforcing. It carries the shapes a
+     naive check mis-reads: a wrapping <label>, aria-labelledby pointing at visible text, a Greek form whose
+     required cue is a Greek word, a form-level "all fields are required" sentence, `autocomplete="on"`, an
+     identity-looking field that does carry a token, a non-identity field with none, a checkbox (the label
+     rules are `affordance`'s), a select with a visible label, and 16px text. -->
+<style>
+  body { margin: 0; padding: 16px; font: 16px/1.4 sans-serif; }
+  input, textarea, select { font-size: 16px; display: block; margin: 8px 0; width: 90%; box-sizing: border-box; }
+  input[type="checkbox"] { display: inline-block; width: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Contact</h1>
+  <form id="contact" action="#" onsubmit="return false">
+    <p>Fields marked * are required.</p>
+    <label for="n">Your name *</label>
+    <input id="n" name="your-name" type="text" autocomplete="name" required>
+    <label>E-mail * <input name="your-email" type="email" autocomplete="email" required></label>
+    <span id="phone-l">Phone (optional)</span>
+    <input name="phone" type="tel" aria-labelledby="phone-l" autocomplete="tel">
+    <label for="org">Organisation</label>
+    <input id="org" name="company" type="text" autocomplete="on">
+    <label for="subject">Subject</label>
+    <input id="subject" name="subject" type="text">
+    <label for="msg">Your question *</label>
+    <textarea id="msg" name="your-question" required></textarea>
+    <label for="country">Country</label>
+    <select id="country" name="country"><option>Greece</option></select>
+    <p><label><input type="checkbox" name="consent" required> I agree to the processing of my details</label></p>
+    <input type="submit" value="Send">
+  </form>
+
+  <form id="all-required" action="#" onsubmit="return false">
+    <p>All fields are required.</p>
+    <label for="un">Username</label>
+    <input id="un" name="username" type="text" autocomplete="username" required>
+    <label for="zip">Postcode</label>
+    <input id="zip" name="postal-code" type="text" autocomplete="postal-code" required>
+  </form>
+
+  <form id="el" action="#" onsubmit="return false" lang="el">
+    <label for="onoma">Όνομα (υποχρεωτικό)</label>
+    <input id="onoma" name="first-name" type="text" autocomplete="given-name" required>
+    <label for="epitheto">Επώνυμο (προαιρετικό)</label>
+    <input id="epitheto" name="last-name" type="text" autocomplete="family-name">
+  </form>
+</main>
+</body>
+</html>

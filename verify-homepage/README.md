@@ -36,7 +36,15 @@ menu and responsive breakage until they were caught by eye across four devices
   it, computed `cursor: pointer` on clickable controls. Report-only until a caller
   sets `fail-on-affordance: true` — see [Affordance check](#affordance-check-opt-in-report-only-first).
 
-`render`+`nav`+`affordance` need a browser. The browser matrix is the
+- **focus**, **forms**, **target**, **motion**, **consent** (opt-in, v1.27.0) — the
+  UX families added after the 2026-10-06 UI/UX review: a keyboard Tab-walk (skip link
+  visible, focused element not covered, a focus indicator), form usability (visible
+  label, `autocomplete`, 16px inputs on phones, a required cue), WCAG 2.5.8 target size
+  (axe-core `wcag22aa`), reduced motion + layout shift, and the first-visit consent
+  banner. Each report-only until its own `fail-on-<check>` is `true` — see
+  [UX families](#ux-families-opt-in-report-only-first).
+
+Every check but `nav` needs a browser. The browser matrix is the
 costly part — **run it on the weekly schedule + at cutover, not per-push.**
 
 ## Use it (weekly + manual)
@@ -69,9 +77,16 @@ jobs:
 | `urls` | yes | — | Live URLs (production at cutover — **never a preview host**). |
 | `nav-file` | no | `scripts/verify-nav.json` | Nav inventory + landmarks, read from your checkout. Missing = nav skipped (render still runs). |
 | `viewports` | no | `desktop:1920x1080,laptop:1440x900,iphone:393x852,android:384x854` | `[name:]WxH`; width ≤600 emulates mobile. |
-| `checks` | no | `render,nav` | Any of `render`, `nav`, `affordance` (opt-in — not in the default). (`links` retired in v1.15.0 — fails the step.) |
+| `checks` | no | `render,nav` | Any of `render`, `nav`, `affordance`, `focus`, `forms`, `target`, `motion`, `consent` (the last six are opt-in — not in the default). (`links` retired in v1.15.0 — fails the step.) |
 | `fail-on-structure` | no | `true` | `true` = BLOCK; `false` = report-only (WARN). Governs `render` and `nav` only. |
 | `fail-on-affordance` | no | `false` | Governs `affordance` only. `true` = BLOCK on any finding, or on a fault in the check itself; `false` = report-only (WARN + `::warning` annotations). The opposite default of `fail-on-structure`, on purpose: a new check reports first. |
+| `fail-on-focus` | no | `false` | Governs `focus` only. Same contract as `fail-on-affordance`: `true` = BLOCK on a finding or a fault in the check; `false` = report-only. |
+| `fail-on-forms` | no | `false` | Governs `forms` only. |
+| `fail-on-target` | no | `false` | Governs `target` only. |
+| `fail-on-motion` | no | `false` | Governs `motion` only (its `cls` rule included). |
+| `cls-budget` | no | `0.1` | `motion` only: cumulative layout shift above this, per viewport, is a `cls` finding. |
+| `fail-on-consent` | no | `false` | Governs `consent` only. |
+| `consent-selector` | no | `''` | `consent` only: CSS selector of the banner, overriding detection. A selector that matches nothing is a note, not a finding. |
 | `max-urls` | no | `12` | Cap the rendered URL count. |
 | `verify-token` | no | `''` | `X-Verify-Source`, sent **only** to the target host (+ www/apex). |
 | `wait-ms` | no | `1200` | Settle time after load+networkidle. |
@@ -240,6 +255,162 @@ checked for a label but not for nearby-text contradiction. Only checkboxes and r
 text inputs/selects are axe's. State toggled by the click leg is restored by script, so a page whose handler
 persists a toggle (a saved preference) will see it persisted — run it on pages you would not mind clicking.
 
+## UX families (opt-in, report-only first)
+
+Five more opt-in families, added in v1.27.0 after the 2026-10-06 UI/UX review
+(`~/.claude/retros/UIUX-GAP-REVIEW-2026-10-06.md`): EPN's contact and employers forms had shipped with
+defects no gate saw — no skip link a keyboard user could see, a cookie banner covering the focused
+footer links, placeholder-only labels, no `autocomplete`, 15.2px inputs, motion that ignored
+`prefers-reduced-motion`. They follow the [affordance](#affordance-check-opt-in-report-only-first)
+template exactly:
+
+- **Opt-in** through `checks`; the default stays `render,nav`.
+- **Their own switch**, `fail-on-<check>`, default `false` — report-only first. A family never moves the
+  render/nav verdict, nor another family's; the exit code is `fail-on-structure` for render/nav and each
+  `fail-on-<check>` for its family, OR-ed.
+- **A fault is a fault.** If a check cannot look (the page will not evaluate, axe-core is missing, a driver
+  error) it says `<check> could not look — a fault in the gate, not a verdict on the page`, never prints a
+  PASS, never files a finding, and exits `fail-on-<check> ? 1 : 0`. A crash of the whole entrypoint is
+  governed by the switches of the checks that run: `fail-on-structure` for `render`/`nav`, each
+  `fail-on-<check>` for an opt-in one — exit 1 only if one of them is `true`, and the note names which.
+- **Same output**: per URL one line per finding *group* (one cause: the same rule + selector across
+  viewports, `:nth-of-type` dropped), `` `selector` ×N “quoted words” — what's wrong _(viewports)_ ``; a
+  verdict line `<check> PASS | WARN (report-only) | FAIL` with a one-line tally of what was looked at;
+  `::warning` (`::error` when enforcing) annotations carrying family, rule, page URL and selector — never
+  page text — at most 10 per level per step across ALL families, the rest counted.
+- **Read-only.** None of them types into, submits or clicks anything. (`focus` presses Tab; `affordance`,
+  separately, clicks a label and restores it.) The page-sharing families run after the `render`
+  measurement on the same page load — `consent`, `forms`, `target`, then `focus`, then `affordance` last —
+  so they add no page loads. `motion` needs its own browser contexts (below).
+
+```yaml
+      - uses: mvalasis/ci-actions/verify-homepage@v1
+        with:
+          checks: render,nav,affordance,focus,forms,target,motion,consent
+          fail-on-structure: 'true'   # unchanged — governs render + nav only
+          # every fail-on-<check> defaults to 'false': report first, flip one at a time once its report is clean
+```
+
+### `focus` — can a keyboard user see where they are?
+
+A real Tab-walk (keyboard events, so `:focus-visible` matches) from the top of the page: at most 60 stops,
+ending when focus returns to the first stop, leaves the document or stops moving. Before each reading the
+element's own finite CSS transitions are awaited (≤250ms), so a skip link that slides in, or a ring that
+fades in, is read where it ends up and not at its first frame.
+
+| rule | fires when | notes |
+|---|---|---|
+| `skip-link-hidden` | the FIRST stop is an in-page `#anchor` link and, once focused, it has no real size (≤2px), sits outside the viewport, is transparent, or the point at the centre of its visible box hit-tests to something that is not the link or a descendant | EPN: the skip link sits at y 0–25 behind a 144px fixed header. Only the first stop is treated as a skip link; a page whose first stop is something else is not asked for one (`stats: no skip link`). |
+| `focus-obscured` | a stop whose centre AND four inset corner points (those inside the viewport) are ALL covered by a foreign element — neither an ancestor nor a descendant | WCAG 2.4.11 fails only when the element is entirely hidden: **partly covered is not a finding**, it is counted (`N partly covered`). Needs the centre and ≥3 points in the viewport; an element scrolled mostly off-screen is counted, not judged. EPN: footer links on `/search/` and the 404 at desktop, under `div.epn-cookie-banner`. The fix is `scroll-padding-bottom` + room under the last link, not removing the banner. |
+| `focus-no-indicator` | a stop with `outline-style: none` (or a 0 outline width) AND `box-shadow: none` | An input that draws its ring as a box-shadow (EPN's inputs) is fine. |
+
+Ignored by all three: a stop that is, sits inside or contains an `<iframe>`, `.cf-turnstile`, `.g-recaptcha`
+or `.h-captcha` (third-party; counted as `N third-party skipped`), and a box of ≤2px — the visually-hidden
+native checkbox of a custom control, whose `<label>` carries the ring.
+
+**Left out on purpose:** Tab *order* against visual order (WCAG 2.4.3 — a heuristic with real false
+positives); a keyboard trap (the walk just ends); focus appearance size/contrast (2.4.13 is AAA); anything that
+needs a click.
+**False-positive notes:** an indicator drawn by a *background*, `border` or `text-decoration` change alone is
+flagged (there is no outline or shadow to read) — add an outline; a ring drawn on a *different* element
+(`:focus-within` on a wrapper, the label of a hidden native input) is not seen when the native input is >2px;
+an overlay with `pointer-events: none` is not seen by the hit test; a page that moves focus in script on
+`focus` can make the walk skip stops.
+
+### `forms` — is the form usable before it is submitted?
+
+One in-page scan per viewport of every visible `<form>` and its `<input>`/`<select>`/`<textarea>` — skipping
+`type=hidden|submit|button|image|reset`, **honeypots** (`autocomplete=off` AND off-screen, ≤2px or transparent)
+and **search** inputs (`type=search`, `role=searchbox`, inside `role=search`). Stats: forms and controls inspected.
+
+| rule | fires when | notes |
+|---|---|---|
+| `label-not-visible` | no `<label for>` / wrapping `<label>` with *visible* text, and no `aria-labelledby` that points at visible text | A placeholder, an `aria-label` or a `title` alone is a finding, and so is a label that is visually hidden (sr-only) — the detail says which. Checkboxes and radios are `affordance`'s (`label-missing`) and are not repeated. |
+| `autocomplete-missing` | a `text/email/tel/url/number` input whose `name`/`id`/`aria-label`/`type` reads as an identity field has no `autocomplete` token | Table: `name`, `given-name`, `family-name`, `email`, `tel`, `organization`, `street-address`, `postal-code`, `address-level2`, `country`, `username` — matched on whole tokens (`your-name`, `yourName`, `first_name`; not `nickname`, not `email-address` as a street). `off` counts as missing, and so does a form-level `autocomplete=off` with no attribute of the control's own. `on` and any other value do not (axe's `autocomplete-valid` judges the token). WCAG 1.3.5. |
+| `input-font-size` | **viewport width ≤600 only**: computed `font-size` under 16px on a text-like input, select or textarea | iOS Safari zooms the page on focus below 16px. |
+| `required-unmarked` | a `required` / `aria-required` control has no visible required cue | A cue is an `*` or the word required / mandatory / optional (Greek υποχρεωτικό / προαιρετικό too) in its label or placeholder, **or** a sentence in the form that states the convention ("fields marked * are required", "all fields are required"). |
+
+**Left out on purpose:** how the form behaves when *submitted* — error summary, focus to the error, data
+kept, double-submit, pending state. The check never types or submits, and those need a mocked POST in the
+caller's own Playwright test (EPN's `/apply` held-button test is the model). Also `type`/`inputmode`
+suitability and per-field validation messages.
+**False-positive notes:** the identity table is name-based, so a field *named* `name` that is not a person's
+(a pet's, a product's) is flagged — give it `autocomplete="off"` on purpose and it is still flagged, because
+`off` is "missing": rename it, or leave the form out of the run; a visually-hidden label on a non-search field
+is a finding by design; a required cue given only by colour or an icon is not read.
+
+### `target` — WCAG 2.5.8, through axe-core
+
+[axe-core](https://github.com/dequelabs/axe-core) **4.11.4** (a pinned second dependency — the version
+`a11y-audit`'s pa11y already runs; `package-lock.json` hashes it, `npm ci --ignore-scripts`) is injected from
+`node_modules/axe-core/axe.min.js` through the DevTools protocol (a page CSP cannot block it) and run with
+`runOnly: { type: 'tag', values: ['wcag22aa'] }`. Only the `target-size` rule's violations are kept — one finding
+per element, per viewport, naming axe's own measurement ("14px by 14px, should be at least 24px by 24px").
+**axe decides the exceptions** (inline links in running text, the spacing exception, user-agent controls), so
+an isolated 14px button with free space around it is *not* a finding. A target axe puts under "incomplete" is
+a stat (`needs-review`), never a finding.
+
+Stats only, **never a finding**: how many interactive targets render under 44px in either dimension (the
+Apple HIG / Material guideline) — 15 on a typical desktop page of a content site, so a gate on it would be noise;
+the count is there so a doubling is visible.
+
+Why it exists: `a11y-audit` runs axe via pa11y without the `wcag22aa` tag, so `target-size` never ran in the
+fleet. EPN measured 0 violations on 6 pages × 2 viewports on 2026-10-06 — this is regression insurance.
+**Limits:** only what axe's `wcag22aa` set judges; 2.4.11 (focus not obscured) is `focus`'s, not axe's.
+
+### `motion` — does the page hold still when it should?
+
+The only family with its **own browser contexts**, per URL × viewport: (1) `reducedMotion: 'reduce'`;
+(2) a fresh context with a `layout-shift` `PerformanceObserver` installed by `addInitScript` before the page's
+own scripts, so a shift during load is not missed — plus 700ms of settle for a late banner or lazy image.
+
+| rule | fires when | notes |
+|---|---|---|
+| `reduced-motion-animation` | under `reduce`, a CSS animation or transition from `document.getAnimations()` is still `running` and is infinite or longer than 5s | The finding names the animation and the element (and pseudo-element). EPN: `epn-hero-shine`, `epn-map-flow` on `/`. Short finite animations (≤5s) are never a finding. Opt out essential motion (a loading spinner, a video the user started) with `data-essential-motion` on the element or an ancestor. |
+| `reduced-motion-smooth-scroll` | under `reduce`, the root's computed `scroll-behavior` is not `auto` | EPN: `smooth` on every page. |
+| `cls` | the layout-shift sum after load + settle is over `cls-budget` (default `0.1`), per viewport | The sum over the whole load, a stricter reading than the worst 5s session window; the number is in the tally either way. |
+
+**`hadRecentInput` is deliberately not used to discard shifts.** The context dispatches no input, and a
+*mobile* emulation (`isMobile`) flags **every** entry `hadRecentInput: true` — measured on the pinned Chromium,
+a shift 1.2s after load included — so honouring the flag reads 0 on every phone viewport. (EPN's "mobile 0"
+in the review was very likely this blind spot.)
+
+**Left out on purpose:** JS-driven animation (requestAnimationFrame, canvas, script-started Web Animations);
+autoplay video; parallax; LCP/INP (Lighthouse is the tool). CLS is lab data from a headless run, so expect
+variance near the budget — set `cls-budget` a little above where you are, and trend it.
+
+### `consent` — is refusing as easy as accepting?
+
+EDPB / CNIL practice for a first-visit cookie banner. A fresh context has no cookies, so the banner the check
+sees *is* the first-visit banner. Read-only: it never clicks, ticks or types.
+
+**Detection** (or the `consent-selector` input): a rendered element that is `position: fixed` or `sticky`, or a
+`[role=dialog|alertdialog]` / `dialog[open]` / `[aria-modal=true]`, holding controls (`button`, `a[href]`,
+`[role=button]`, input button/submit) whose text or aria-label reads as **accept** — accept / agree / allow /
+ok / got it (Greek αποδοχή / συμφωνώ). One that holds an accept *and* a **reject** control is preferred (reject
+/ decline / deny / refuse / "necessary only" / "essential only" / "do not accept"; Greek απόρριψη / μόνο
+απαραίτητα — matched first, so "Accept necessary only" is a reject). One that holds only accept qualifies only if
+its text, id or class talks about cookies / consent / privacy, so a fixed "Allow notifications" widget is not a
+banner. Smallest wins. "Manage / settings / preferences" is not a reject.
+
+| rule | fires when |
+|---|---|
+| `consent-no-reject` | an accept control is on the first layer and no reject is (the detail adds "refusing sits behind a settings control" when there is one) |
+| `consent-reject-smaller` | reject's width **or** height is under 80% of accept's (the largest accept and the largest reject are compared) |
+| `consent-prechecked` | an optional-category checkbox (`input[type=checkbox]`, `[role=checkbox|switch][aria-checked=true]`) in the banner is checked and not disabled. Always-on boxes — a label/name/id mentioning necessary / essential / required / strictly — are exempt, and so is a disabled one. One in a collapsed preferences panel inside the banner counts (the detail says so): a pre-ticked box is invalid wherever the user meets it. |
+
+**Visual weight** (filled vs outline, colour) is an `ℹ️ INFO` note and a stat, **never a finding** — whether a
+gold button beside an outline one "nudges" is a judgement call; size and position are not.
+**No banner found** → a stat (`no banner found`) and an INFO note, never a finding: a site with none, one that
+appears after `wait-ms`, or one inside a cross-origin iframe is not something this check can judge. Say
+so with `consent-selector` when you know where the banner is.
+**Left out on purpose:** what happens after a click (does rejecting stop the trackers — that needs the network
+and a cookie jar), the wording, reject being *behind* a second click beyond the first layer, whether the site
+needs a banner at all.
+**False-positive notes:** the 80% rule compares *boxes*, so "Accept all" next to a short "Reject" can trip it
+on label length alone — make the buttons the same width; a banner whose text is rendered by an unusual
+script, or controls that are not buttons/links/`[role=button]`, are not recognised.
+
 ## Where the report goes
 
 The report goes to the **job log** (stdout) on every run, and to the **step
@@ -271,9 +442,10 @@ fixing v1.19.1:
   cron plus manual dispatch, never on a pull request, so there is no checks tab
   for annotations to appear in, and the run page already shows the step summary.
 
-**Exception — `affordance` (v1.26.0) does annotate**, because none of those four reasons holds for it: an
-affordance finding is one finding with an id (rule + selector + page), its text is restricted to
-identifiers, and its groups are already de-duplicated across viewports and repeated siblings.
+**Exception — `affordance` (v1.26.0) and the v1.27.0 families do annotate**, because none of those four
+reasons holds for them: a finding is one finding with an id (rule + selector + page), its text is restricted
+to identifiers, and its groups are already de-duplicated across viewports and repeated siblings. The ten
+per level that GitHub keeps are shared by all of them, behavioural rules first, the remainder counted.
 
 Revisit if the gate is wired to pull requests or pushes, or if something that
 reads only annotations becomes how failures get triaged. The shape then: one
@@ -307,6 +479,18 @@ label). They also pin the exit codes in both modes, that the switch is independe
 every state it toggled, and — by stubbing `playwright` — that a fault inside the check is reported as one
 (never a PASS) and exits under `fail-on-affordance`.
 
+The v1.27.0 families each have a BAD and a GOOD fixture in the same directory (`focus-`, `forms-`,
+`target-`, `motion-`, `consent-` + `bad|good`; consent also `consent-smaller` and `consent-none`). BAD must fire
+every rule *and* hold every exclusion (a honeypot, a search box, a third-party iframe, a link only partly
+under the banner, an essential spinner, an isolated small button, an always-on checkbox); GOOD must stay silent,
+enforcing, *and prove it looked* (Tab stops, controls, targets, animations seen under `reduce`, the banner
+found and not mistaken for a fixed "Allow notifications" widget). Per family: report-mode with the switch
+unset exits 0, enforcing exits 1, independence from `fail-on-structure` both ways, annotations carry
+identifiers only, and a fault in the check — an unevaluable page for all five, a missing `axe-core` for
+`target` — is reported as one. Two mutants are pinned on purpose: `focus` run without its transition wait must
+flag GOOD's fading rings (so the fixture really exercises the wait), and a `motion` CLS leg must read the
+phone viewport too (the `hadRecentInput` trap above).
+
 The crash-guard block at the end of the same file needs **neither** — it stubs
 `playwright` in a temp dir, so it runs on a bare checkout. It asserts the same
 exactly-once rule for a local crash note.
@@ -339,6 +523,12 @@ Two implementation notes, both load-bearing:
   a redundant spelling of `FAIL`.
 
 ## Honest limits
+
+The opt-in families are *rendered, read-only probes* — each README section above lists what it does not
+judge. Across all of them: they read the page as a fresh, cookie-less visitor on the weekly runner's network,
+so a banner that appears after `wait-ms`, a flow behind a login, or anything that needs a click is not seen;
+a green run means "nothing here tripped these rules", not "accessible" (axe catches roughly a third of WCAG
+issues; the critics and a keyboard are the rest).
 
 Catches **structure + render breakage**, not visual taste. It does not judge
 hierarchy, spacing rhythm, or brand fidelity (advisory `design-critic` + your
