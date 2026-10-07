@@ -88,6 +88,12 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.28.2** *(anchor `d65635c`; `v1` moved onto it 2026-10-07, superseding v1.28.1)* — `verify-homepage` fix to v1.28.1's own change, no new input. The `behavior: 'instant'`
+scroll let the label click reach the page before the scrolled frame was committed (Chromium hit-tests input against the last committed frame), so about 1 live run
+in 6 on EPN `/contact/` read "clicking the label text did not toggle the control". The `affordance` click leg now waits two animation frames after the scroll
+and retries a miss once from a fresh scroll; a control that swallows the click fails twice and is still reported (the selftest's `#stuck` fixture). 14 live
+runs on `/contact/` (1920x1080, pre-scrolled to the bottom): 0 false findings, against 1 in 6 before. Do not roll `v1` back to v1.28.1.
+
 **v1.28.1** *(anchor `6d17251`; `v1` moved onto it 2026-10-07)* — `verify-homepage` fix, no new input. The `affordance` label-click scrolled the label to the middle and
 hit-tested in the same tick, so on a page with `scroll-behavior: smooth` (EPN) it read whatever sat over the label's OLD position (fixed header, cookie
 banner) and reported a cover no user sees once the page has settled: `/apply/` and `/contact/` on the laptop viewport, 2026-10-07. It now scrolls with
