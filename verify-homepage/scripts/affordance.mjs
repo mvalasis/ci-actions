@@ -296,14 +296,30 @@ export async function runAffordance(page, { settleMs = 60 } = {}) {
       // A checked radio cannot be un-checked by a click, so there is no flip to assert on it.
       if (c.type === 'radio' && p.checked) continue;
       out.stats.clicked++;
+      // The scroll above was 'instant', but Chromium hit-tests an input event against the last COMMITTED
+      // frame: a click sent in the same tick lands where the label WAS (v1.28.1: ~3 of 4 live clicks on
+      // EPN /contact/ missed and read "did not toggle"). Two animation frames put the scrolled layout in.
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
       await page.mouse.click(p.x, p.y);
       await page.waitForTimeout(settleMs);
       if (page.url().split('#')[0] !== startUrl.split('#')[0]) {
         out.notes.push(`${c.sel}: clicking the label navigated the page — the label-click leg stopped here`);
         break;
       }
-      const after = await page.evaluate(AFFORDANCE_PAGE, { mode: 'state', index: c.index });
-      const flipped = !!after && after.checked !== p.checked;
+      let after = await page.evaluate(AFFORDANCE_PAGE, { mode: 'state', index: c.index });
+      let flipped = !!after && after.checked !== p.checked;
+      if (!flipped && p.within) {
+        // One retry from a fresh scroll + frame wait: a headless click can still land a frame early
+        // (1 in ~6 live runs on EPN /contact/). A control that genuinely swallows the click fails twice.
+        const p2 = await page.evaluate(AFFORDANCE_PAGE, { mode: 'prepare', index: c.index });
+        if (p2 && !p2.skip && p2.within) {
+          await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+          await page.mouse.click(p2.x, p2.y);
+          await page.waitForTimeout(settleMs);
+          after = await page.evaluate(AFFORDANCE_PAGE, { mode: 'state', index: c.index });
+          flipped = !!after && after.checked !== p.checked;
+        }
+      }
       if (!flipped) {
         out.findings.push({
           rule: 'label-click', sel: c.sel, text: '',
