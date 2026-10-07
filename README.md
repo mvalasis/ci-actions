@@ -88,6 +88,13 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.28.1** *(anchor `6d17251`; `v1` moved onto it 2026-10-07)* — `verify-homepage` fix, no new input. The `affordance` label-click scrolled the label to the middle and
+hit-tested in the same tick, so on a page with `scroll-behavior: smooth` (EPN) it read whatever sat over the label's OLD position (fixed header, cookie
+banner) and reported a cover no user sees once the page has settled: `/apply/` and `/contact/` on the laptop viewport, 2026-10-07. It now scrolls with
+`behavior: 'instant'`. The `focus` Tab-walk had the same exposure (Tab's own scroll is smooth there) and now waits until the scroll position is unchanged
+for two frames (capped at its settle time) before measuring. Selftest: `selftest/affordance-smooth.html` (page pre-scrolled under a fixed header,
+smooth root) fails the old probe and passes the new. Findings can only go down: a cover that survives a settled scroll is still reported.
+
 **v1.28.0** *(anchor `38139ce`; `v1` moved onto it 2026-10-06)* — `seo-aeo` gains **`external-webfont`** (T1, promotable WARN via `critical-checks`; default
 WARN, so the `v1` move newly-blocks nobody). HEADLESS-ASTRO §7d says webfonts are self-hosted, woff2 under the site's own
 origin. In the page-level matrix, on the JS-disabled
