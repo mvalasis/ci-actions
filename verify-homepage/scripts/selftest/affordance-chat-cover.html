@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>affordance fixture — chat widget over a control</title>
+<!-- A fixed chat widget that is not a consent banner covers the label. Only a cookie/consent banner is dismissed; this stays a label-click finding. The checkbox sits far down the page so the click leg scrolls it to the middle of the viewport,
+     where the fixed cover (the lower 60% of the screen) sits over it. The control shows the pointer, so
+     only the label-click rule can speak. -->
+<style>
+  body { margin: 0; padding: 16px 16px 1600px; font: 16px/1.4 sans-serif; }
+  button, input, label, a[href] { cursor: pointer; }
+  .spacer { height: 1400px; }
+  .cover { position: fixed; left: 0; right: 0; top: 40vh; bottom: 0; background: #222; color: #fff; padding: 16px; z-index: 50; }
+  .cover[hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>chat widget over a control</h1>
+  <div class="spacer"></div>
+  <form onsubmit="return false"><label><input type="checkbox" id="target"> I agree to the terms</label></form>
+</main>
+<div class="cover" id="chat" style="background:#06c"><p>Chat with us</p><button type="button" onclick="document.getElementById('chat').hidden = true">Close</button></div>
+</body>
+</html>

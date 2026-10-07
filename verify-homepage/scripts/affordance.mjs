@@ -154,6 +154,30 @@ export const AFFORDANCE_PAGE = (args) => {
     return el ? { checked: el.checked, url: location.href } : null;
   }
 
+  if (args.mode === 'dismiss') {
+    // What covers the point (args.x, args.y)? If it is a first-visit cookie/consent banner, press the
+    // REJECT control on its first layer (privacy-preserving: never accept) so the click leg can reach the
+    // control the banner was hiding. Anything else that covers it — a header, a chat widget, a promo — is
+    // left alone and stays a finding. Reject words are consent.mjs's.
+    const REJECT = /(?<![\p{L}\p{N}])(reject|decline|deny|refuse|necessary only|essential only|only necessary|only essential|necessary cookies only|do not accept|don't accept|dont accept|απορρι\p{L}*|μονο απαραιτητ\p{L}*)(?![\p{L}\p{N}])/u;
+    const BANNERISH = /cookie|consent|gdpr|privacy|συναινεση|cookies/i;
+    let hit = document.elementFromPoint(args.x, args.y);
+    let overlay = null;
+    for (let n = hit; n && n !== document.body; n = n.parentElement) {
+      const pos = getComputedStyle(n).position;
+      if (pos === 'fixed' || pos === 'sticky') { overlay = n; break; }
+    }
+    if (!overlay) return { skip: 'the cover is not a fixed/sticky overlay' };
+    const ident = [overlay.id, overlay.className && overlay.className.baseVal === undefined ? overlay.className : '', overlay.getAttribute('aria-label'), overlay.getAttribute('role')].join(' ');
+    if (!BANNERISH.test(ident) && !BANNERISH.test(norm(overlay.textContent).slice(0, 400))) return { skip: 'the cover is not a cookie/consent banner' };
+    const btn = [...overlay.querySelectorAll('button,[role="button"],a[href],input[type="button"],input[type="submit"]')]
+      .find((b) => rendered(b) && REJECT.test(norm(b.getAttribute('aria-label') || b.value || b.textContent).toLowerCase()));
+    if (!btn) return { skip: 'the cookie banner has no reject control on its first layer' };
+    const label = norm(btn.getAttribute('aria-label') || btn.value || btn.textContent).slice(0, 30);
+    btn.click();
+    return { dismissed: label, banner: selectorOf(overlay) };
+  }
+
   if (args.mode === 'prepare') {
     // Where to put the pointer: the first piece of plain label text that is not itself a link/button/
     // control (clicking a privacy-policy link would navigate, and that is not a label click anyway).
@@ -280,7 +304,8 @@ export const AFFORDANCE_PAGE = (args) => {
 // The Node half: run the scan, then the real-click leg. Never throws a finding about the CALLER's page
 // as an exception — a fault here is the gate's, and is returned as `fault` so the caller can report it
 // as such (scanner-conventions.md: a scanner that could not look is a fault, never a PASS).
-export async function runAffordance(page, { settleMs = 60 } = {}) {
+export async function runAffordance(page, { settleMs = 60, dismissSettleMs = 500 } = {}) {
+  let dismissTried = false;
   const out = { findings: [], notes: [], stats: { controls: 0, clickable: 0, cursors: 0, clicked: 0 }, fault: '' };
   try {
     const scan = await page.evaluate(AFFORDANCE_PAGE, { mode: 'scan' });
@@ -288,13 +313,25 @@ export async function runAffordance(page, { settleMs = 60 } = {}) {
     Object.assign(out.stats, scan.stats);
     const startUrl = page.url();
     for (const c of scan.clickIdx) {
-      const p = await page.evaluate(AFFORDANCE_PAGE, { mode: 'prepare', index: c.index });
+      let p = await page.evaluate(AFFORDANCE_PAGE, { mode: 'prepare', index: c.index });
       if (!p || p.skip) {
         if (p && p.skip && p.skip !== 'no plain-text label to click') out.notes.push(`${c.sel}: label click skipped — ${p.skip}`);
         continue;
       }
       // A checked radio cannot be un-checked by a click, so there is no flip to assert on it.
       if (c.type === 'radio' && p.checked) continue;
+      // A first-visit cookie banner can sit over the control (a fresh browser context always sees it). Reject
+      // it once and look again; a cover that is not a banner (or a banner with no reject) stays a finding.
+      if (!p.within && !dismissTried) {
+        dismissTried = true;
+        const d = await page.evaluate(AFFORDANCE_PAGE, { mode: 'dismiss', x: p.x, y: p.y });
+        if (d && d.dismissed) {
+          out.notes.push(`${d.banner}: rejected the cookie banner (“${d.dismissed}”) to reach ${c.sel}`);
+          await page.waitForTimeout(dismissSettleMs);
+          const again = await page.evaluate(AFFORDANCE_PAGE, { mode: 'prepare', index: c.index });
+          if (again && !again.skip) p = again;
+        }
+      }
       out.stats.clicked++;
       // The scroll above was 'instant', but Chromium hit-tests an input event against the last COMMITTED
       // frame: a click sent in the same tick lands where the label WAS (v1.28.1: ~3 of 4 live clicks on

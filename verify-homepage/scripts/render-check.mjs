@@ -570,6 +570,7 @@ for (const url of targets) {
   // ---- RENDER matrix (per viewport) + the page-sharing families + AFFORDANCE (same page load, after the
   //      measurement), then the families that need their own browser contexts ----
   const affViewports = [];
+  const affNotes = new Set(); // what the click leg did on this page (e.g. rejected the cookie banner)
   const famViewports = Object.fromEntries(FAMILIES.map((f) => [f.name, []]));
   const famNotes = Object.fromEntries(FAMILIES.map((f) => [f.name, new Set()]));
   const addFam = (f, vp, r) => {
@@ -619,6 +620,7 @@ for (const url of targets) {
           // restores it), which nothing above may see.
           if (CHECKS.has('affordance')) {
             const a = await runAffordance(page);
+            for (const n of a.notes || []) affNotes.add(n);
             if (a.fault) affFaults.push(`${vp.name}: ${a.fault}`);
             else {
               affViewports.push({ viewport: vp.name, findings: a.findings });
@@ -664,6 +666,7 @@ for (const url of targets) {
     note(`- **affordance** ${groups.length ? (FAIL_AFF ? '❌' : '⚠️') : '✅'}${groups.length ? ` — ${groups.length} finding group(s)` : ` (no finding across ${affViewports.length} viewport(s))`}`);
     for (const g of groups.slice(0, 30)) note(`  - **${g.rule}** ${formatGroup(g, safe, VIEWPORTS.length)}`);
     if (groups.length > 30) note(`  - …and ${groups.length - 30} more`);
+    for (const n of [...affNotes].slice(0, 5)) note(`  - ℹ️ ${safe(n, 200)}`);
   }
   // ---- the v1.27.0 families' reports for this URL, in the brief's order ----
   for (const f of FAMILIES) {

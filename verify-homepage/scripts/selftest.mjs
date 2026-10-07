@@ -26,6 +26,8 @@
 //      enforcing exit codes, annotations carry identifiers only, the click leg restores
 //      what it toggled, a fault in the check is a fault (never a PASS, never a finding),
 //      and it never moves the render/nav verdict
+//      and a first-visit cookie banner over a control is rejected once (never accepted) before the label
+//      click, while any other cover stays a finding
 //   8. the five UX families (v1.27.0) — `focus`, `forms`, `target`, `motion`, `consent`: each with a BAD
 //      fixture (every rule red, each exclusion held) and a GOOD one (silent, enforcing, and it really
 //      looked), report-mode and enforcing exit codes, independence from `fail-on-structure`, annotations,
@@ -360,6 +362,25 @@ check('SMOOTH-scroll page: no label-click false positive from the fixed header, 
   `exit=${smooth.exit} ${smooth.stdout.slice(-400)}`);
 check('SMOOTH-scroll page: the label click really ran (≥1 label click)',
   +((/(\d+) label-click\(s\)/.exec(smooth.stdout) || [])[1]) >= 1, smooth.stdout.slice(-300));
+
+// ---------------------------------------------------------------------------
+console.log('\n# affordance — a first-visit cookie banner over a control is rejected once, anything else is a finding');
+//
+// A fresh browser context always shows the banner, so one that covers a labelled checkbox (EPN /apply/,
+// 2026-10-07) must not be reported as a defect of the page: the click leg rejects it and looks again. Never
+// accept; never touch a cover that is not a cookie/consent banner.
+const BAN = { ...AFF, VIEWPORTS: 'iphone:393x852', FAIL_ON_AFFORDANCE: 'true' };
+const banRej = run({ URLS: fixture('affordance-banner-reject.html'), ...BAN });
+check('banner with a Reject: rejected, the label click lands, no finding, exit 0 (enforcing)',
+  banRej.exit === 0 && /affordance PASS/.test(banRej.stdout) && !/\*\*label-click/.test(banRej.stdout), `exit=${banRej.exit} ${banRej.stdout.slice(-400)}`);
+check('banner with a Reject: the report says it rejected the banner (an interaction the reader must be able to see)',
+  /ℹ️ [^\n]*rejected the cookie banner \(“Reject”\) to reach input#?target/.test(banRej.stdout), banRej.stdout);
+const banAcc = run({ URLS: fixture('affordance-banner-accept-only.html'), ...BAN });
+check('banner with ONLY Accept: never accepted on the page\'s behalf — still a label-click finding',
+  banAcc.exit === 1 && /\*\*label-click\*\* `input#target` — clicking the label text hit div/.test(banAcc.stdout) && !/rejected the cookie banner/.test(banAcc.stdout), `exit=${banAcc.exit} ${banAcc.stdout.slice(-400)}`);
+const chat = run({ URLS: fixture('affordance-chat-cover.html'), ...BAN });
+check('a fixed chat widget (not a cookie banner) is left alone — still a label-click finding',
+  chat.exit === 1 && /\*\*label-click\*\* `input#target` — clicking the label text hit div/.test(chat.stdout) && !/rejected the cookie banner/.test(chat.stdout), `exit=${chat.exit} ${chat.stdout.slice(-400)}`);
 
 // ---------------------------------------------------------------------------
 console.log('\n# affordance — independent of the render/nav verdict');
