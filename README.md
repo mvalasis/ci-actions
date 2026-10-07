@@ -88,6 +88,8 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.28.3** *(anchor `02c5a01`; `v1` moved onto it 2026-10-07)* — `verify-homepage` fix, no new input. A fresh browser context always shows a site's first-visit cookie banner, so on EPN `/apply/` (phone widths) the banner sat over the consent label and the `affordance` label-click reported "something sits over it" for a cover every visitor dismisses first. The click leg now presses the banner's **Reject** (Decline / "necessary only" — never Accept) once and retries, and prints `ℹ️ … rejected the cookie banner` so the interaction is visible. A cover that is not a cookie/consent banner (header, chat widget, promo) and a banner with no reject on its first layer are left alone and stay findings (three selftest fixtures). Live `/apply/` + `/contact/`, 4 viewports: 0 findings.
+
 **v1.28.2** *(anchor `d65635c`; `v1` moved onto it 2026-10-07, superseding v1.28.1)* — `verify-homepage` fix to v1.28.1's own change, no new input. The `behavior: 'instant'`
 scroll let the label click reach the page before the scrolled frame was committed (Chromium hit-tests input against the last committed frame), so about 1 live run
 in 6 on EPN `/contact/` read "clicking the label text did not toggle the control". The `affordance` click leg now waits two animation frames after the scroll
