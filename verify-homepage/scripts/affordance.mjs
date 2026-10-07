@@ -165,7 +165,10 @@ export const AFFORDANCE_PAGE = (args) => {
         (n) => nodeOk(n, l, true) && !(n.parentElement && n.parentElement.closest('a,button,input,select,textarea,summary,[role="button"],[role="link"]'))
       );
       if (!node) continue;
-      node.parentElement.scrollIntoView({ block: 'center', inline: 'nearest' });
+      // 'instant', not the default: a page with `scroll-behavior: smooth` (EPN) would otherwise scroll
+      // AFTER the hit-test below, which then reads whatever sits over the label's OLD position (the fixed
+      // header, the cookie banner) and reports a cover the user never sees once the page has settled.
+      node.parentElement.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
       const rg = document.createRange();
       rg.selectNodeContents(node);
       const r = [...rg.getClientRects()].find((q) => q.width > 1 && q.height > 1);

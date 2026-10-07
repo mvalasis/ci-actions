@@ -351,6 +351,16 @@ const tally = /(\d+) checkbox\/radio, (\d+) label-click\(s\), (\d+) cursor probe
 check('GOOD page: the check really looked (≥8 controls, ≥6 label clicks, ≥20 cursor probes)',
   +tally[1] >= 8 && +tally[2] >= 6 && +tally[3] >= 20, tally[0] || good.stdout.slice(-300));
 
+// `scroll-behavior: smooth` + a fixed header over the label at scroll 0 (EPN, 2026-10-07): the probe
+// scrolls the label to the middle and hit-tests in the same tick, so a smooth scroll made it read the
+// header at the OLD position. The label is clear once the page settles, so the check must say nothing.
+const smooth = run({ URLS: fixture('affordance-smooth.html'), ...AFF, FAIL_ON_AFFORDANCE: 'true' });
+check('SMOOTH-scroll page: no label-click false positive from the fixed header, enforcing',
+  smooth.exit === 0 && /affordance PASS/.test(smooth.stdout) && !/\*\*label-click\*\*/.test(smooth.stdout),
+  `exit=${smooth.exit} ${smooth.stdout.slice(-400)}`);
+check('SMOOTH-scroll page: the label click really ran (≥1 label click)',
+  +((/(\d+) label-click\(s\)/.exec(smooth.stdout) || [])[1]) >= 1, smooth.stdout.slice(-300));
+
 // ---------------------------------------------------------------------------
 console.log('\n# affordance — independent of the render/nav verdict');
 //

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>affordance fixture — SMOOTH SCROLL</title>
+<!-- The EPN shape of 2026-10-07: `scroll-behavior: smooth` on the root and a fixed header. The
+     page has been scrolled (by the render check, a reload, the user) so the consent label sits UNDER the
+     header, so a probe that scrolls and hit-tests in the same tick (a smooth
+     scroll has not moved yet) reads the header and reports a cover that no user sees once the page has
+     settled. After the click leg scrolls the label to the middle of the viewport nothing covers it: the
+     `affordance` check must say NOTHING here. -->
+<style>
+  html { scroll-behavior: smooth; }
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  header { position: fixed; top: 0; left: 0; right: 0; height: 150px; background: #222; color: #fff; z-index: 10; }
+  label, input { cursor: pointer; }
+  .top { padding-top: 1000px; padding-left: 16px; }
+  .spacer { height: 3000px; }
+</style>
+</head>
+<body>
+<header>Fixed header</header>
+<main>
+  <div class="top"><label class="epn-consent-label"><input type="checkbox" name="your-consent"> <span>I consent to storing my details solely for answering this message.</span></label></div>
+  <div class="spacer"></div>
+</main>
+<script>scrollTo({ top: 920, behavior: 'instant' });</script>
+</body>
+</html>

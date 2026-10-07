@@ -61,6 +61,21 @@ const STOP = async (H, a) => {
     await Promise.race([Promise.all(running.map((an) => an.finished.catch(() => {}))), new Promise((r) => setTimeout(r, a.waitMs))]);
   }
 
+  // Tab scrolls the focused element into view, and under `scroll-behavior: smooth` that takes a few
+  // hundred ms: measuring before it ends reads the element mid-flight (or still off-screen). Wait until
+  // the scroll position is unchanged for two frames, capped at waitMs.
+  {
+    const t0 = performance.now();
+    let last = [scrollX, scrollY];
+    let still = 0;
+    while (still < 2 && performance.now() - t0 < a.waitMs) {
+      await new Promise((r) => requestAnimationFrame(() => r()));
+      const now = [scrollX, scrollY];
+      still = now[0] === last[0] && now[1] === last[1] ? still + 1 : 0;
+      last = now;
+    }
+  }
+
   const r = el.getBoundingClientRect();
   const cs = getComputedStyle(el);
   const iw = document.documentElement.clientWidth;
