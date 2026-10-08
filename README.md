@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.29.0** *(tag not yet cut)* — `seo-aeo` gains an **agent-readiness** layer, and a new action, **`agent-benchmark`**.
+**v1.29.0** *(anchor `0a561bc`; `v1` moved onto it 2026-10-08)* — `seo-aeo` gains an **agent-readiness** layer, and a new action, **`agent-benchmark`**.
 After the site files, each origin gets a `### Agent readiness` block: does a browsing agent or an agent-readiness scanner
 find what it looks for? Markdown negotiation (`Accept: text/markdown` on `/`, and on a random path that must 404), robots.txt
 `Content-Signal:`, the Agent Skills index (`/.well-known/agent-skills/index.json`, each listed skill's `digest` checked
