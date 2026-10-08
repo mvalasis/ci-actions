@@ -1,0 +1,50 @@
+name: 'Agent-readiness benchmark (ora.ai + isitagentready.com)'
+description: >-
+  What two public agent-readiness scanners say about a site: ora.ai's score (0-100, graded, four
+  layers, its top fixes) and Cloudflare's isitagentready.com level (and what the next level needs).
+  A second opinion next to seo-aeo's own agent checks, for the trend and the order of work.
+  REPORT-ONLY: always exits 0; a scanner that could not look says so and never reads as a score.
+  NOT air-gapped: the site URL goes to both services, and ora.ai lists every scan on its public
+  leaderboard. No npm dependency (node's own fetch).
+
+inputs:
+  url:
+    description: 'The site to scan, as its homepage URL (https://www.example.com/). A bare host gets https://.'
+    required: true
+  ora:
+    description: >-
+      'true' = ask ora.ai (POST /api/scan?format=audit). A stored result younger than 6 h comes back
+      from its cache and costs no quota; rate-limited, the action reads ora's last stored result.
+      'false' = skip (for a host that must not appear on ora's public leaderboard).
+    required: false
+    default: 'true'
+  isitagentready:
+    description: "'true' = ask isitagentready.com (POST /api/scan). 'false' = skip."
+    required: false
+    default: 'true'
+
+outputs:
+  ora-score:
+    description: "ora's score (empty when ora was off or could not look)."
+    value: ${{ steps.bench.outputs.ora-score }}
+  ora-grade:
+    description: "ora's letter grade (empty when ora was off or could not look)."
+    value: ${{ steps.bench.outputs.ora-grade }}
+  isitagentready-level:
+    description: "isitagentready's level (empty when it was off or could not look)."
+    value: ${{ steps.bench.outputs.isitagentready-level }}
+  json:
+    description: 'Path of the JSON holding both answers in full, under RUNNER_TEMP (empty when nothing was asked) — upload it as an artifact to keep the history.'
+    value: ${{ steps.bench.outputs.json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Agent-readiness benchmark
+      id: bench
+      shell: bash
+      env:
+        TARGET_URL: ${{ inputs.url }}
+        ORA: ${{ inputs.ora }}
+        ISITAGENTREADY: ${{ inputs.isitagentready }}
+      run: node "${{ github.action_path }}/scripts/benchmark.mjs"

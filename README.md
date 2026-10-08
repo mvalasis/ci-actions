@@ -88,6 +88,28 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.29.0** *(tag not yet cut)* — `seo-aeo` gains an **agent-readiness** layer, and a new action, **`agent-benchmark`**.
+After the site files, each origin gets a `### Agent readiness` block: does a browsing agent or an agent-readiness scanner
+find what it looks for? Markdown negotiation (`Accept: text/markdown` on `/`, and on a random path that must 404), robots.txt
+`Content-Signal:`, the Agent Skills index (`/.well-known/agent-skills/index.json`, each listed skill's `digest` checked
+against the bytes served), the ARD catalog (`/.well-known/ard.json`, `ai-catalog.json`), `Link:` headers, WebMCP (`<form
+toolname>`, `registerTool` inline or in ≤6 same-origin bundles), llms.txt agent guidance, the trust pages (`/about`,
+`/contact`, `/privacy`), sitemap `<lastmod>`, and the homepage entity's fields and type breadth. Three states, one
+contract: **absent → ℹ️ INFO**, never elevated (adopting a capability is a roadmap item, not a defect); **present but broken
+→ ⚠️ WARN**; **adopted →** one `✅ in place:` line. A leg that could not look (a challenge, a 5xx, a network error) is a WARN
+under its own id, worded as not a verdict about the site. Four ids are promotable T1 via `critical-checks`:
+**`agent-markdown`, `agent-skills-index`, `agent-ard`, `agent-content-signal`**; the rest are T2. Default WARN, and absent
+never blocks, so the `v1` move newly-blocks nobody and promoting an id locks in an adoption without blocking a site that
+has not adopted it. Still air-gapped: about 25 extra same-origin GETs per origin at most; a skill listed on another host
+is reported, never fetched, and the verify token never leaves the checked host. Touches `seo-aeo/scripts/agent.mjs` (new,
+the pure analyzers), `check.mjs` (the per-origin fetches), `checks.mjs` (`T1_CHECKS`, the homepage entity fields),
+`selftest.mjs` (absent / broken / adopted per analyzer, the tier contract, an end-to-end leg through the real `check.mjs`;
+49 targeted mutants each turn it red), `seo-aeo/README.md` → "Agent readiness (v1.29.0)" and `action.yml`'s promotable
+list. **Caller-visible:** a new block per origin, mostly INFO; a WARN only where an adopted capability is broken or a leg
+could not look. **`agent-benchmark`** (new, report-only, always exits 0) asks ora.ai and isitagentready.com what they make
+of the site, for the trend and the order of work — see [`agent-benchmark`](#agent-benchmark--what-public-agent-readiness-scanners-say)
+below. **Wiring:** rehearse `critical-checks: agent-markdown,…` with `fail-on-critical: false` once a site adopts one.
+
 **v1.28.3** *(anchor `02c5a01`; `v1` moved onto it 2026-10-07)* — `verify-homepage` fix, no new input. A fresh browser context always shows a site's first-visit cookie banner, so on EPN `/apply/` (phone widths) the banner sat over the consent label and the `affordance` label-click reported "something sits over it" for a cover every visitor dismisses first. The click leg now presses the banner's **Reject** (Decline / "necessary only" — never Accept) once and retries, and prints `ℹ️ … rejected the cookie banner` so the interaction is visible. A cover that is not a cookie/consent banner (header, chat widget, promo) and a banner with no reject on its first layer are left alone and stay findings (three selftest fixtures). Live `/apply/` + `/contact/`, 4 viewports: 0 findings.
 
 **v1.28.2** *(anchor `d65635c`; `v1` moved onto it 2026-10-07, superseding v1.28.1)* — `verify-homepage` fix to v1.28.1's own change, no new input. The `behavior: 'instant'`
@@ -1780,6 +1802,18 @@ broken build there never reaches prod. The hook now greps the pushed tree's
 its build and dist audit (keeping the instant `src/pages` audit + the secret
 scan) — a repo migrates itself the moment its `deploy.yml` adopts the step, with
 no window where neither side grades `dist/` (PUSH-GATE.md §14m).
+
+## `agent-benchmark` — what public agent-readiness scanners say
+
+Asks **ora.ai** (score 0-100, grade, four layers, top fixes) and Cloudflare's **isitagentready.com**
+(level, and what the next level needs) about one site, and reports both: the second opinion next
+to `seo-aeo`'s own `### Agent readiness` block, which stays what a caller promotes and blocks on.
+**Report-only** — it always exits 0, and a scanner that could not look is listed as such, never as
+a score. **Not air-gapped, by design:** the URL (and nothing else) goes to both services, and ora.ai
+lists every scan on its public leaderboard (`ora: 'false'` for a host that must not appear). Wire
+it on a **weekly schedule + manual dispatch** and upload the `json` output as an artifact to keep
+the history. No npm dependency. Inputs, quotas, the 202 poll and why Lighthouse's
+`agentic-browsing` category is run by hand instead: [`agent-benchmark/README.md`](agent-benchmark/README.md).
 
 ## Roadmap
 

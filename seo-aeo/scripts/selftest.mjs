@@ -12,6 +12,10 @@ import {
   SEV, T0_CHECKS, T1_CHECKS, analyzePage, analyzeRobots, analyzeLlms, analyzeSitemap, analyzeRedirects,
   collectLdNodes, typesOf, safe, escapeData, escapeProperty, annotation, annotations,
 } from './checks.mjs';
+import {
+  parseLinkHeader, analyzeAgentHome, analyzeWebmcp, analyzeMarkdownNegotiation, analyzeMarkdown404, analyzeContentSignal,
+  analyzeLlmsGuidance, parseSkillsIndex, gradeSkillArtifacts, sha256hex, analyzeArd, analyzeTrustPages, analyzeSitemapLastmod,
+} from './agent.mjs';
 
 let failed = 0;
 const ids = (fs) => fs.map((x) => x.id);
@@ -36,7 +40,7 @@ console.log('\n# page analyzer');
 
 // 1. clean homepage is pristine (low false-positive rate is the whole point)
 {
-  const fs = P(HEAD(`<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","name":"Brand","url":"https://example.com/","sameAs":["https://www.linkedin.com/company/brand"]},{"@type":"WebSite","url":"https://example.com/"}]}</script>`), { url: 'https://example.com/', finalUrl: 'https://example.com/' }).findings;
+  const fs = P(HEAD(`<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","name":"Brand","url":"https://example.com/","description":"What Brand does, in one sentence.","address":{"@type":"PostalAddress","addressCountry":"GR"},"contactPoint":{"@type":"ContactPoint","contactType":"customer service","email":"hi@example.com"},"sameAs":["https://www.linkedin.com/company/brand"]},{"@type":"WebSite","url":"https://example.com/"},{"@type":"ItemList","itemListElement":[]}]}</script>`), { url: 'https://example.com/', finalUrl: 'https://example.com/' }).findings;
   const noisy = fs.filter((x) => x.sev !== SEV.OK);
   check('clean page → zero crit/warn/info', noisy.length === 0, `got: ${JSON.stringify(noisy.map((x) => x.id + ':' + x.sev))}`);
 }
@@ -236,11 +240,128 @@ console.log('\n# external-webfont (T1) — HEADLESS-ASTRO §7d: webfonts are sel
   check('only a 2xx page is graded (a 404 short-circuits before this check)', !ids(P(`<html><head><link rel="stylesheet" href="${GF}"></head><body></body></html>`, { status: 404 }).findings).includes('external-webfont'));
 }
 
+console.log('\n# agent readiness (agent.mjs + the homepage entity) — absent → INFO, present but broken → WARN, adopted → OK');
+const only = (fs, id) => [...new Set(sevOf(fs, id))].sort().join(',');   // the severities one id produced
+{
+  const links = parseLinkHeader('</sitemap-index.xml>; rel="sitemap", </llms.txt>; rel="describedby", </index.md>; rel="alternate"; type="text/markdown"');
+  check('parseLinkHeader: three links, rel and type read', links.length === 3 && links[0].rel === 'sitemap' && links[2].type === 'text/markdown', JSON.stringify(links));
+  const HOME = '<html><head><link rel="alternate" type="text/markdown" href="/index.md"><link rel="modulepreload" href="/_astro/entry.js"><script src="https://cdn.other.test/x.js"></script></head><body><script src="/_astro/a.js"></script><form toolname="search_products" tooldescription="Search the catalog"></form></body></html>';
+  check('no Link header → INFO agent-link-headers', only(analyzeAgentHome({ finalUrl: 'https://e.test/', headers: {}, html: '<html></html>' }).findings, 'agent-link-headers') === SEV.INFO);
+  const h = analyzeAgentHome({ finalUrl: 'https://e.test/', headers: { link: '</llms.txt>; rel="describedby"' }, html: HOME });
+  check('a Link header → OK agent-link-headers', only(h.findings, 'agent-link-headers') === SEV.OK);
+  const wpLink = analyzeAgentHome({ finalUrl: 'https://e.test/', headers: { link: '<https://e.test/wp-json/>; rel="https://api.w.org/", <https://e.test/?p=1>; rel=shortlink' }, html: HOME });
+  check("WordPress's REST-discovery and shortlink Link headers alone → INFO, never adopted", only(wpLink.findings, 'agent-link-headers') === SEV.INFO && wpLink.findings.some((x) => x.id === 'agent-link-headers' && /carries only https:\/\/api\.w\.org\/, shortlink — none an agent follows/.test(x.msg)), JSON.stringify(wpLink.findings.filter((x) => x.id === 'agent-link-headers')));
+  check('a language alternate alone → INFO', only(analyzeAgentHome({ finalUrl: 'https://e.test/', headers: { link: '</en/>; rel="alternate"; hreflang="en"' }, html: HOME }).findings, 'agent-link-headers') === SEV.INFO);
+  const mdLink = analyzeAgentHome({ finalUrl: 'https://e.test/', headers: { link: '<https://e.test/wp-json/>; rel="https://api.w.org/", </index.md>; rel="alternate"; type="text/markdown", </x>; rel="preload describedby"' }, html: HOME });
+  check('the Markdown alternate and a space-separated rel list count; the REST link beside them is not listed', only(mdLink.findings, 'agent-link-headers') === SEV.OK && mdLink.findings.some((x) => x.id === 'agent-link-headers' && x.msg === 'Link: header advertises alternate (text/markdown), describedby'), JSON.stringify(mdLink.findings.filter((x) => x.id === 'agent-link-headers')));
+  check('the Markdown alternate is read from <link rel=alternate type=text/markdown>', h.mdAlternate === '/index.md', h.mdAlternate);
+  check('bundles: same-origin <script src> + modulepreload, never another origin', JSON.stringify(h.scripts) === JSON.stringify(['https://e.test/_astro/a.js', 'https://e.test/_astro/entry.js']), JSON.stringify(h.scripts));
+  check('no tools → INFO agent-webmcp', only(analyzeWebmcp({ bundles: [{ url: 'u', body: 'console.log(1)' }] }), 'agent-webmcp') === SEV.INFO);
+  check('a toolname form → OK agent-webmcp', h.toolForms === 1 && only(analyzeWebmcp({ toolForms: h.toolForms }), 'agent-webmcp') === SEV.OK);
+  check('registerTool in a same-origin bundle → OK agent-webmcp', only(analyzeWebmcp({ bundles: [{ url: 'u', body: 'document.modelContext.registerTool({name:"search_products"})' }] }), 'agent-webmcp') === SEV.OK);
+  check('mutant: modelContext feature-tested but no tool registered → still INFO', only(analyzeWebmcp({ bundles: [{ url: 'u', body: 'if (navigator.modelContext) {}' }] }), 'agent-webmcp') === SEV.INFO);
+}
+{
+  const MD = '# Fixture shop\n\nA lighting shop. Products, categories and shipping, in Markdown for agents.\n';
+  const neg = (status, headers, body) => analyzeMarkdownNegotiation({ status, headers, body });
+  check('HTML answer to Accept: text/markdown → INFO agent-markdown', only(neg(200, { 'content-type': 'text/html; charset=utf-8' }, '<!doctype html><html>'), 'agent-markdown') === SEV.INFO);
+  check('a non-2xx answer → INFO agent-markdown, even one labelled text/markdown', only(neg(406, {}, ''), 'agent-markdown') === SEV.INFO && only(neg(404, { 'content-type': 'text/markdown', vary: 'Accept' }, MD), 'agent-markdown') === SEV.INFO);
+  check('text/markdown + Vary: Accept + a Markdown body → OK', only(neg(200, { 'content-type': 'text/markdown; charset=utf-8', vary: 'Accept-Encoding, Accept' }, MD), 'agent-markdown') === SEV.OK);
+  check('negotiated without Vary: Accept → WARN (a shared cache serves the Markdown to browsers)', only(neg(200, { 'content-type': 'text/markdown' }, MD), 'agent-markdown') === SEV.WARN);
+  check('mutant: Vary: Accept-Encoding alone is not Vary: Accept → WARN', only(neg(200, { 'content-type': 'text/markdown', vary: 'Accept-Encoding' }, MD), 'agent-markdown') === SEV.WARN);
+  // the HTML body is longer than the nearly-empty floor, so only the HTML test can turn it WARN
+  check('text/markdown over an HTML body → WARN', only(neg(200, { 'content-type': 'text/markdown', vary: 'Accept' }, `<!doctype html><html><body><p>${'A real page body. '.repeat(5)}</p></body></html>`), 'agent-markdown') === SEV.WARN);
+  check('text/markdown, nearly empty → WARN', only(neg(200, { 'content-type': 'text/markdown', vary: 'Accept' }, '# x'), 'agent-markdown') === SEV.WARN);
+  const p404 = (status, headers, body, adopted) => analyzeMarkdown404({ status, headers, body }, { adopted });
+  check('a nonexistent path answering 200 → WARN soft-404, adopted or not', only(p404(200, {}, '<html>', false), 'agent-markdown-404') === SEV.WARN && only(p404(200, {}, '<html>', true), 'agent-markdown-404') === SEV.WARN);
+  check('not adopted + a real 404 → nothing graded', p404(404, { 'content-type': 'text/html' }, '<html>', false).length === 0);
+  check('adopted + an HTML 404 → INFO', only(p404(404, { 'content-type': 'text/html' }, '<!doctype html><html>', true), 'agent-markdown-404') === SEV.INFO);
+  check('adopted + a Markdown 404 → OK', only(p404(404, { 'content-type': 'text/markdown' }, '# Not found\n\nThe site map is at /llms.txt.', true), 'agent-markdown-404') === SEV.OK);
+}
+{
+  check('no Content-Signal → INFO', only(analyzeContentSignal('User-agent: *\nAllow: /\n'), 'agent-content-signal') === SEV.INFO);
+  check('Content-Signal: search=yes, ai-input=yes, ai-train=no → OK', only(analyzeContentSignal('User-agent: *\nContent-Signal: search=yes, ai-input=yes, ai-train=no\nAllow: /\n'), 'agent-content-signal') === SEV.OK);
+  check('a value outside yes/no → WARN', only(analyzeContentSignal('Content-Signal: ai-train=maybe'), 'agent-content-signal') === SEV.WARN);
+  check('an unknown key → WARN', only(analyzeContentSignal('Content-Signal: ai-foo=yes'), 'agent-content-signal') === SEV.WARN);
+  check('mutant: a commented-out Content-Signal declares nothing → INFO', only(analyzeContentSignal('# Content-Signal: search=yes\nUser-agent: *\n'), 'agent-content-signal') === SEV.INFO);
+  check('a trailing comment is not part of the signal → OK', only(analyzeContentSignal('Content-Signal: search=yes, ai-train=no # the owner\'s call\n'), 'agent-content-signal') === SEV.OK);
+  check('llms.txt "## When to use (for AI agents)" → OK', only(analyzeLlmsGuidance({ status: 200, body: '# S\n\n> s\n\n## When to use (for AI agents)\n- buying lamps\n' }), 'agent-llms-guidance') === SEV.OK);
+  check('llms.txt without it → INFO', only(analyzeLlmsGuidance({ status: 200, body: '# S\n\n## Docs\n- [a](https://e/a)\n' }), 'agent-llms-guidance') === SEV.INFO);
+  check('mutant: the phrase in prose, not a ## heading → INFO', only(analyzeLlmsGuidance({ status: 200, body: '# S\n\nWhen to use this site: always.\n' }), 'agent-llms-guidance') === SEV.INFO);
+  check('no llms.txt → nothing here (llms-txt already reports it)', analyzeLlmsGuidance({ status: 404, body: '' }).length === 0);
+}
+{
+  const SKILL = Buffer.from('---\nname: product-finder\ndescription: Find a lamp by room, socket and price.\n---\n# Product finder\n');
+  const entry = { name: 'product-finder', type: 'skill-md', description: 'Find a lamp.', url: '/.well-known/agent-skills/product-finder/SKILL.md', digest: `sha256:${sha256hex(SKILL)}` };
+  const index = (skills) => ({ status: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ $schema: 'https://schemas.agentskills.io/discovery/0.2.0/schema.json', skills }) });
+  const grade = (idx, art) => { const p = parseSkillsIndex(idx); return [...p.findings, ...gradeSkillArtifacts(p.entries.map((e) => ({ ...e, ...art })), p.findings)]; };
+  const served = { status: 200, headers: { 'content-type': 'text/markdown; charset=utf-8' }, bytes: SKILL };
+  check('no index (404) → INFO agent-skills-index', only(parseSkillsIndex({ status: 404 }).findings, 'agent-skills-index') === SEV.INFO);
+  check('an index + a SKILL.md whose bytes match its digest → OK', only(grade(index([entry]), served), 'agent-skills-index') === SEV.OK);
+  check('a digest that does not match the bytes served → WARN', only(grade(index([entry]), { ...served, bytes: Buffer.concat([SKILL, Buffer.from('\n')]) }), 'agent-skills-index') === SEV.WARN);
+  check('index soft-404 (HTML with a 200) → WARN naming the soft-404', parseSkillsIndex({ status: 200, headers: { 'content-type': 'text/html' }, body: '<!doctype html><html>' }).findings.some((x) => x.sev === SEV.WARN && /soft-404/.test(x.msg)));
+  check('an index that is not JSON → WARN', only(parseSkillsIndex({ status: 200, headers: { 'content-type': 'application/json' }, body: '{nope' }).findings, 'agent-skills-index') === SEV.WARN);
+  check('an index served as text/plain → WARN', sevOf(grade({ ...index([entry]), headers: { 'content-type': 'text/plain' } }, served), 'agent-skills-index').includes(SEV.WARN));
+  check('a skill name that is not lowercase-kebab → WARN', sevOf(grade(index([{ ...entry, name: 'Product_Finder' }]), served), 'agent-skills-index').includes(SEV.WARN));
+  check('a SKILL.md served as text/html → WARN', sevOf(grade(index([entry]), { ...served, headers: { 'content-type': 'text/html' } }), 'agent-skills-index').includes(SEV.WARN));
+  check('a listed SKILL.md that 404s → WARN', sevOf(grade(index([entry]), { ...served, status: 404 }), 'agent-skills-index').includes(SEV.WARN));
+  check('a skill on another host → INFO only (never fetched, so never claimed verified)', only(grade(index([entry]), { offSite: true }), 'agent-skills-index') === SEV.INFO);
+  check('an index that lists no skills → WARN', only(parseSkillsIndex(index([])).findings, 'agent-skills-index') === SEV.WARN);
+}
+{
+  const CAT = (entries) => ({ status: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ specVersion: '0.91', host: 'e.test', entries }) });
+  const e = { identifier: 'urn:air:e.test:skill:product-finder', displayName: 'Product finder', type: 'application/ai-skill+md', url: 'https://e.test/.well-known/agent-skills/product-finder/SKILL.md' };
+  const gone = { status: 404, headers: {}, body: '' };
+  check('no catalog under either name → INFO agent-ard', only(analyzeArd(gone, gone, 'e.test'), 'agent-ard') === SEV.INFO);
+  check('a catalog under both names → OK', only(analyzeArd(CAT([e]), CAT([e]), 'e.test'), 'agent-ard') === SEV.OK);
+  check('ard.json only → OK + INFO for the missing alias', only(analyzeArd(CAT([e]), gone, 'e.test'), 'agent-ard') === 'info,ok');
+  check('a www host against an apex identifier → the same site, OK', only(analyzeArd(CAT([e]), CAT([e]), 'www.e.test'), 'agent-ard') === SEV.OK);
+  check('an identifier on another domain → WARN', sevOf(analyzeArd(CAT([{ ...e, identifier: 'urn:air:other.test:skill:x' }]), CAT([e]), 'e.test'), 'agent-ard').includes(SEV.WARN));
+  check('an entry with both url and data → WARN', sevOf(analyzeArd(CAT([{ ...e, data: {} }]), CAT([e]), 'e.test'), 'agent-ard').includes(SEV.WARN));
+  check('catalog soft-404 (HTML with a 200) → WARN', only(analyzeArd({ status: 200, headers: {}, body: '<!doctype html><html>' }, gone, 'e.test'), 'agent-ard') === SEV.WARN);
+}
+{
+  const real = `<html><body><main><h1>About</h1><p>${'Real content about the business. '.repeat(20)}</p></main></body></html>`;
+  const pages = (over = {}) => ['/about', '/contact', '/privacy'].map((p) => ({ path: p, status: 200, finalUrl: `https://e.test${p}`, html: real, offSite: false, ...(over[p] || {}) }));
+  check('three real trust pages → OK', only(analyzeTrustPages(pages()), 'agent-trust-pages') === SEV.OK);
+  check('one 404 → INFO naming it', only(analyzeTrustPages(pages({ '/privacy': { status: 404 } })), 'agent-trust-pages') === SEV.INFO && analyzeTrustPages(pages({ '/privacy': { status: 404 } }))[0].msg.includes('/privacy'));
+  check('mutant: a page whose length is all nav/footer chrome is thin → INFO', only(analyzeTrustPages(pages({ '/about': { html: `<html><body><nav>${'menu '.repeat(200)}</nav><p>short</p><footer>${'footer '.repeat(200)}</footer></body></html>` } })), 'agent-trust-pages') === SEV.INFO);
+  check('a redirect to another host does not count → INFO', only(analyzeTrustPages(pages({ '/contact': { offSite: true } })), 'agent-trust-pages') === SEV.INFO);
+  check('a sitemap without lastmod → INFO sitemap-lastmod', only(analyzeSitemapLastmod('<urlset><url><loc>https://e/</loc></url></urlset>'), 'sitemap-lastmod') === SEV.INFO);
+  check('a sitemap with lastmod → OK', only(analyzeSitemapLastmod('<urlset><url><loc>https://e/</loc><lastmod>2026-10-08</lastmod></url></urlset>'), 'sitemap-lastmod') === SEV.OK);
+  check('a sitemap index (no <url>) → nothing graded here', analyzeSitemapLastmod('<sitemapindex><sitemap><loc>x</loc></sitemap></sitemapindex>').length === 0);
+}
+{
+  const home = (graph) => P(HEAD(`<script type="application/ld+json">${JSON.stringify({ '@context': 'https://schema.org', '@graph': graph })}</script>`), { url: 'https://example.com/', finalUrl: 'https://example.com/' }).findings;
+  const org = { '@type': 'Organization', name: 'B', sameAs: ['https://x.test/b'] };
+  check('a homepage Organization without description → WARN entity-fields', sevOf(home([org]), 'entity-fields').includes(SEV.WARN));
+  check('…without address and contactPoint → one INFO entity-fields naming both', home([org]).filter((x) => x.id === 'entity-fields' && x.sev === SEV.INFO && /address/.test(x.msg) && /contactPoint/.test(x.msg)).length === 1);
+  check('a telephone counts as contact', !ids(home([{ ...org, description: 'd', telephone: '+30 210 000 0000', address: { '@type': 'PostalAddress' } }, { '@type': 'ItemList' }])).includes('entity-fields'));
+  check('a Person site is never asked for an address or a contactPoint', !ids(home([{ '@type': 'Person', name: 'P', description: 'd', sameAs: ['https://x.test/p'] }])).includes('entity-fields'));
+  check('a split graph: the address and phone on a LocalBusiness next to the Organization count', !ids(home([{ ...org, description: 'd' }, { '@type': 'LocalBusiness', name: 'B shop', telephone: '+30 210 000 0000', address: { '@type': 'PostalAddress' } }, { '@type': 'ItemList' }])).includes('entity-fields'));
+  check('…but an Organization next to an author Person is still asked for them', home([{ ...org, description: 'd' }, { '@type': 'Person', name: 'A' }, { '@type': 'ItemList' }]).some((x) => x.id === 'entity-fields' && x.sev === SEV.INFO));
+  check('entity + WebSite only → INFO homepage-type-breadth', only(home([{ ...org, description: 'd' }, { '@type': 'WebSite' }]), 'homepage-type-breadth') === SEV.INFO);
+  check('…an ItemList on the homepage clears it', !ids(home([{ ...org, description: 'd' }, { '@type': 'WebSite' }, { '@type': 'ItemList' }])).includes('homepage-type-breadth'));
+  check('inner pages are not graded for entity fields', !ids(P(HEAD('<script type="application/ld+json">{"@type":"Organization","name":"B"}</script>')).findings).includes('entity-fields'));
+}
+
 console.log('\n# severity-tier contract');
 check('T0 core is exactly {http-200,title-present,h1-present}', [...T0_CHECKS].sort().join(',') === 'h1-present,http-200,title-present');
 check('promotable T1 set excludes T0 ids', ![...T0_CHECKS].some((c) => T1_CHECKS.has(c)));
 check('noindex is promotable (T1), title-length is not', T1_CHECKS.has('noindex') && !T1_CHECKS.has('title-length'));
 check('external-webfont is promotable T1 and never a T0 (default WARN)', T1_CHECKS.has('external-webfont') && !T0_CHECKS.has('external-webfont'));
+check('the four agent WARNs are promotable T1', ['agent-markdown', 'agent-skills-index', 'agent-ard', 'agent-content-signal'].every((c) => T1_CHECKS.has(c) && !T0_CHECKS.has(c)));
+check('the other agent ids stay advisory (never promotable)', ['agent-link-headers', 'agent-webmcp', 'agent-llms-guidance', 'agent-trust-pages', 'agent-markdown-404', 'sitemap-lastmod', 'entity-fields', 'homepage-type-breadth'].every((c) => !T1_CHECKS.has(c)));
+{
+  // the promise behind promoting them: a site that adopted NONE of the four yields only INFO under their ids
+  const absent = [
+    ...analyzeMarkdownNegotiation({ status: 200, headers: { 'content-type': 'text/html' }, body: '<!doctype html><html>' }),
+    ...analyzeContentSignal('User-agent: *\nAllow: /\n'),
+    ...parseSkillsIndex({ status: 404 }).findings,
+    ...analyzeArd({ status: 404 }, { status: 404 }, 'e.test'),
+  ];
+  check('a site that adopted none of the four: four INFOs, so promoting them blocks nothing', absent.length === 4 && absent.every((x) => x.sev === SEV.INFO), JSON.stringify(absent.map((x) => `${x.id}:${x.sev}`)));
+}
 
 console.log('\n# report + annotation encoding (pure)');
 {
@@ -373,6 +494,65 @@ console.log('\n# check.mjs end to end — the job log carries the report; CRITIC
     check('external-webfont: default WARN does not block (exit 0), reported, never annotated', hf.status === 0 && hf.stdout.includes('`external-webfont`') && commands(hf.stdout).length === 0, why(hf));
     const hp = await run({ URLS: `${BASE}/gfont/`, GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: 'external-webfont' });
     check('external-webfont: promoted via critical-checks BLOCKS with one ::error', hp.status === 1 && JSON.stringify(commands(hp.stdout)) === JSON.stringify([`::error title=seo-aeo external-webfont::external-webfont at ${BASE}/gfont/`]), why(hp) + JSON.stringify(commands(hp.stdout)));
+
+    // (G) agent readiness through the real check.mjs. An adopting site is all ✅ even with the four agent
+    // checks promoted; a broken one blocks on exactly the promoted ids (a 503 is could-not-look, which
+    // blocks a promoted id too); a site that adopted nothing never blocks on them; and the verify token
+    // never leaves the checked host (an off-site skill is never fetched, an off-site redirect hop gets none).
+    const SKILL = Buffer.from('---\nname: product-finder\ndescription: Find a product by room and price.\n---\n# Product finder\n');
+    const extHits = [], ownTokens = [];
+    const external = createServer((req, res) => { extHits.push({ url: req.url, token: req.headers['x-verify-source'] || '' }); res.writeHead(200, { 'content-type': 'text/html' }); res.end(`<html><body><main>${'x'.repeat(600)}</main></body></html>`); });
+    await new Promise((r) => external.listen(0, 'localhost', r));
+    const EXT = `http://localhost:${external.address().port}`;   // another HOST than 127.0.0.1, so headersFor withholds the token
+    const agentSite = (good) => createServer((req, res) => {
+      ownTokens.push(req.headers['x-verify-source'] || '');
+      const base = `http://${req.headers.host}`, url = req.url.split('?')[0], md = /text\/markdown/.test(String(req.headers.accept || ''));
+      const send = (status, type, body, extra = {}) => { res.writeHead(status, { 'content-type': type, ...extra }); res.end(body); };
+      if (url === '/' && md) return send(200, 'text/markdown; charset=utf-8', '# Fixture shop\n\nA fixture site that negotiates Markdown for agents.\n', good ? { vary: 'Accept' } : {});
+      if (url === '/') return send(200, 'text/html', `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Fixture shop</title><link rel="alternate" type="text/markdown" href="${base}/index.md"></head><body><main><h1>Fixture shop</h1><form toolname="search_products" tooldescription="Search the catalog" action="/search"><input name="q"></form></main></body></html>`, { link: `<${base}/llms.txt>; rel="describedby"` });
+      if (url === '/robots.txt') return send(200, 'text/plain', `User-agent: *\nContent-Signal: search=yes, ai-input=yes, ai-train=${good ? 'yes' : 'maybe'}\nAllow: /\nSitemap: ${base}/sitemap.xml\n`);
+      if (url === '/sitemap.xml') return send(200, 'application/xml', `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${base}/</loc><lastmod>2026-10-08</lastmod></url></urlset>`);
+      if (url === '/llms.txt') return send(200, 'text/plain', '# Fixture shop\n\n> A fixture.\n\n## When to use (for AI agents)\n- finding a product\n');
+      if (url === '/.well-known/agent-skills/index.json') {
+        const skill = (name, href) => ({ name, type: 'skill-md', description: 'Find a product.', url: href, digest: `sha256:${sha256hex(SKILL)}` });
+        return send(200, 'application/json', JSON.stringify({ $schema: 'https://schemas.agentskills.io/discovery/0.2.0/schema.json', skills: [skill('product-finder', '/.well-known/agent-skills/product-finder/SKILL.md'), ...(good ? [] : [skill('elsewhere', `${EXT}/SKILL.md`)])] }));
+      }
+      if (url === '/.well-known/agent-skills/product-finder/SKILL.md') return send(200, 'text/markdown', good ? SKILL : Buffer.concat([SKILL, Buffer.from('edited after the index was built\n')]));
+      if (url === '/.well-known/ard.json' || url === '/.well-known/ai-catalog.json') {
+        if (!good) return send(503, 'text/plain', 'busy');
+        return send(200, 'application/json', JSON.stringify({ specVersion: '0.91', host: '127.0.0.1', entries: [{ identifier: 'urn:air:127.0.0.1:skill:product-finder', displayName: 'Product finder', type: 'application/ai-skill+md', url: `${base}/.well-known/agent-skills/product-finder/SKILL.md` }] }));
+      }
+      if (!good && url === '/privacy') { res.writeHead(301, { location: `${EXT}/privacy` }); return res.end(); }
+      if (['/about', '/contact', '/privacy'].includes(url)) return send(200, 'text/html', `<!doctype html><html><body><main><h1>${url}</h1><p>${'Real content about the business. '.repeat(20)}</p></main></body></html>`);
+      if (md) return send(404, 'text/markdown', '# Not found\n\nThe site map is at /llms.txt.\n');
+      return send(404, 'text/html', '<html><head><title>404</title></head><body><h1>Not found</h1></body></html>');
+    });
+    const goodSite = agentSite(true), brokenSite = agentSite(false);
+    await Promise.all([goodSite, brokenSite].map((sv) => new Promise((r) => sv.listen(0, '127.0.0.1', r))));
+    const GOOD = `http://127.0.0.1:${goodSite.address().port}`, BROKEN = `http://127.0.0.1:${brokenSite.address().port}`;
+    const PROMOTE = 'agent-markdown,agent-skills-index,agent-ard,agent-content-signal';
+    const agentSection = (r) => (r.stdout.split('### Agent readiness')[1] || '').split('\n**critical:')[0];
+    try {
+      const ga = await run({ URLS: `${GOOD}/`, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: PROMOTE });
+      const inPlace = (agentSection(ga).match(/✅ in place: (.*)/) || [])[1] || '';
+      const all = ['agent-link-headers', 'agent-webmcp', 'agent-markdown', 'agent-markdown-404', 'agent-content-signal', 'agent-llms-guidance', 'agent-skills-index', 'agent-ard', 'agent-trust-pages', 'sitemap-lastmod'];
+      check('agent e2e, adopting site: exit 0 with all four promoted, nothing annotated', ga.status === 0 && commands(ga.stdout).length === 0, why(ga) + JSON.stringify(commands(ga.stdout)));
+      check('…all ten agent checks in place, no ℹ️/⚠️ in the agent section', all.every((id) => inPlace.includes(`\`${id}\``)) && !/^\s+- (ℹ️|⚠️)/m.test(agentSection(ga)), JSON.stringify(agentSection(ga)));
+
+      ownTokens.length = 0;
+      const gb = await run({ URLS: `${BROKEN}/`, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: PROMOTE, VERIFY_TOKEN: 'e2e-agent-token' });
+      check('agent e2e, broken site: BLOCKED (exit 1) with one ::error per promoted defect, at the origin', gb.status === 1 && JSON.stringify(commands(gb.stdout)) === JSON.stringify(['agent-markdown', 'agent-content-signal', 'agent-skills-index', 'agent-ard'].map((id) => `::error title=seo-aeo ${id}::${id} at ${BROKEN}`)), why(gb) + JSON.stringify(commands(gb.stdout)));
+      check('…the 503 catalog is reported as could-not-look, never as a verdict', /`agent-ard` — could not look at .*HTTP 503/.test(gb.stdout), JSON.stringify(agentSection(gb)));
+      check('…/privacy redirecting to another host is a missing trust page', /ℹ️ `agent-trust-pages` — .*\/privacy/.test(agentSection(gb)), JSON.stringify(agentSection(gb)));
+      check('…the token reached the checked host (the test is not vacuous)', ownTokens.includes('e2e-agent-token'));
+      check('…an off-site skill is never fetched, and the off-site redirect hop got no token', !extHits.some((h) => h.url === '/SKILL.md') && extHits.some((h) => h.url === '/privacy') && extHits.every((h) => h.token === ''), JSON.stringify(extHits));
+      const gr = await run({ URLS: `${BROKEN}/`, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'false', CRITICAL_CHECKS: PROMOTE });
+      check('agent e2e, broken site report-only: exit 0, the same four annotate as ::warning', gr.status === 0 && commands(gr.stdout).length === 4 && commands(gr.stdout).every((l) => l.startsWith('::warning ')), why(gr));
+      const gn = await run({ URLS: `${BASE}/ok/`, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: PROMOTE });
+      check('agent e2e, a site that adopted nothing: the four promoted ids never block (exit 0)', gn.status === 0 && commands(gn.stdout).length === 0 && /ℹ️ `agent-markdown`/.test(gn.stdout), why(gn));
+    } finally {
+      for (const sv of [external, goodSite, brokenSite]) sv.close();
+    }
   } finally {
     server.close();
     fs.rmSync(tmp, { recursive: true, force: true });

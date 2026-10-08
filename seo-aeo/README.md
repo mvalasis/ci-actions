@@ -16,8 +16,8 @@ everything else reports without ever blocking, and a clean caller can opt indivi
 | Tier | Behaviour | Checks |
 |---|---|---|
 | **T0 — CRITICAL** | blocks when `fail-on-critical: true` | `http-200` (page resolves to a real 2xx — a WAF 403/429/timeout is downgraded to infra-WARN, not a block), `title-present`, `h1-present` |
-| **T1 — promotable WARN** | reports; a caller may elevate any of these to CRITICAL via `critical-checks` | `noindex`, `single-h1`, `canonical-present`, `canonical-valid`, `meta-description`, `html-lang`, `viewport`, `jsonld-valid`, `og-core`, `robots-txt`, `sitemap`, `robots-sitemap-directive`, `redirect-consistency`, `external-webfont` |
-| **T2 — advisory WARN/INFO** | reports only, never promotable | length bounds, `charset`, `mixed-content`, `canonical-resolve`, `hreflang`/`hreflang-reciprocity`, `jsonld-type`/`jsonld-fields`/`jsonld-present` (Microdata/RDFa-aware), `entity-sameas`, `twitter-card`, `img-alt`, duplicate title/meta, `search-engine-blocked`, `ai-crawler-allowlist`, `search-verification`, `llms-txt`/`llms-structure`, `trailing-slash`, `soft-404`, `semantic-landmark`, `heading-hierarchy`, freshness, `jsonld-retired` |
+| **T1 — promotable WARN** | reports; a caller may elevate any of these to CRITICAL via `critical-checks` | `noindex`, `single-h1`, `canonical-present`, `canonical-valid`, `meta-description`, `html-lang`, `viewport`, `jsonld-valid`, `og-core`, `robots-txt`, `sitemap`, `robots-sitemap-directive`, `redirect-consistency`, `external-webfont`, and the agent-readiness four (v1.29.0): `agent-markdown`, `agent-skills-index`, `agent-ard`, `agent-content-signal` |
+| **T2 — advisory WARN/INFO** | reports only, never promotable | length bounds, `charset`, `mixed-content`, `canonical-resolve`, `hreflang`/`hreflang-reciprocity`, `jsonld-type`/`jsonld-fields`/`jsonld-present` (Microdata/RDFa-aware), `entity-sameas`, `twitter-card`, `img-alt`, duplicate title/meta, `search-engine-blocked`, `ai-crawler-allowlist`, `search-verification`, `llms-txt`/`llms-structure`, `trailing-slash`, `soft-404`, `semantic-landmark`, `heading-hierarchy`, freshness, `jsonld-retired`, and agent readiness: `entity-fields`, `homepage-type-breadth`, `sitemap-lastmod`, `agent-link-headers`, `agent-webmcp`, `agent-markdown-404`, `agent-llms-guidance`, `agent-trust-pages` |
 
 **`external-webfont` (v1.28.0)** flags, in the served JS-disabled HTML, any `<link>` (`rel` stylesheet / preload /
 preconnect / dns-prefetch — the `media="print" onload=…` async loader is still a `rel=stylesheet` link) or inline
@@ -148,6 +148,54 @@ AEO/GEO is first-class here, not a footnote:
 Content *quality* (quotable answers, entity-chain depth, render proof) stays the advisory
 [`seo-critic`](../README.md) subagent's job, not this gate.
 
+## Agent readiness (v1.29.0)
+
+After the site files, each origin gets a `### Agent readiness` block: does a browsing agent (ChatGPT
+agent, Gemini in Chrome, Claude in Chrome, Claude Code, Cursor) or an agent-readiness scanner find
+what it looks for? Google Search ignores this layer: its AI-optimization guide says Markdown, extra
+machine-readable files and special markup neither help nor hurt there. It serves agents. The entity
+fields and the `Link:` header help classic SEO as well.
+
+Three states, one contract:
+
+- **absent → ℹ️ INFO.** Adopting a capability is a roadmap item, never a defect. INFO is never
+  elevated, so promoting an id cannot block a site that has not adopted it.
+- **present but broken → ⚠️ WARN.** An agent that finds it acts on a wrong answer: a digest that no
+  longer matches its file, a catalog that is a soft-404, Markdown cached without `Vary: Accept`.
+- **adopted →** listed on one `✅ in place:` line.
+
+A leg that **could not look** (a 401/403/429 challenge, 408/425, a 5xx, a network error) is a ⚠️ WARN
+under that leg's id, worded as "could not look … not a verdict about the site". It blocks only where
+the caller promoted that id, because a promoted check never passes on a response it never got. Set
+`verify-token` on a WAF-fronted origin.
+
+| ID | Tier | What is fetched | ℹ️ absent | ⚠️ broken |
+|---|---|---|---|---|
+| `agent-markdown` | T1 | `/` with `Accept: text/markdown` | HTML or a non-2xx answer | `text/markdown` over an HTML or near-empty body; `Vary` without `Accept` |
+| `agent-markdown-404` | T2 | a random nonexistent path, same `Accept` | an HTML 404 (graded once `/` negotiates) | a 2xx for a path that cannot exist (soft-404), adopted or not |
+| `agent-content-signal` | T1 | robots.txt `Content-Signal:` lines | none declared | a key other than `search` / `ai-input` / `ai-train`, or a value other than `yes` / `no` |
+| `agent-skills-index` | T1 | `/.well-known/agent-skills/index.json`, then each same-origin skill it lists (≤10, raw bytes) | 404 | soft-404, not JSON, not `application/json`, no agentskills.io `$schema`, an invalid entry, a listed skill that fails, a `SKILL.md` not served as `text/markdown`, a `digest` that is not the sha256 of the bytes served |
+| `agent-ard` | T1 | `/.well-known/ard.json` and `/.well-known/ai-catalog.json` | neither (INFO too when only one name serves) | soft-404, not JSON, no entries, an entry whose `urn:air:<domain>:` identifier is malformed or names another domain, no `displayName`, no media `type`, not exactly one of `url` / `data` |
+| `agent-link-headers` | T2 | `Link:` on `/` | none an agent follows: `sitemap`, `describedby`, a `text/markdown` alternate, `api-catalog`, `service-desc` / `service-doc`, `ard`, `ai-catalog` (WordPress's REST-discovery `api.w.org` link, `shortlink`, resource hints and a language alternate do not count) | — |
+| `agent-webmcp` | T2 | `<form toolname>`, and `modelContext.registerTool` inline or in ≤6 same-origin bundles (`modulepreload` included) | no tool | — |
+| `agent-llms-guidance` | T2 | an llms.txt `##` heading such as "When to use (for AI agents)" | none | — |
+| `agent-trust-pages` | T2 | `/about`, `/contact`, `/privacy`, redirects followed (a page on another host counts as missing) | missing, or under 500 chars outside nav/header/footer | — |
+| `sitemap-lastmod` | T2 | `<lastmod>` in the sitemap (of an index: its first child) | no entry dated | — |
+| `entity-fields` | T2 | the homepage JSON-LD entity nodes (a field on any of them counts) | no address / contactPoint (never asked of a Person) | no `description` |
+| `homepage-type-breadth` | T2 | the homepage JSON-LD types | only the entity and WebSite | — |
+
+Every fetch stays on the checked origin, so the action stays air-gapped: about 25 extra GETs per
+origin at most (`/` twice, ≤6 bundles, the 404 probe, the skills index and ≤10 skills, the two catalog
+names, three trust pages, one child sitemap). A skill listed on another host is reported, never
+fetched, so its digest is never claimed verified and the token never leaves the checked host. Once a
+site has adopted one, lock it in:
+
+```yaml
+with:
+  fail-on-critical: 'true'
+  critical-checks: 'agent-markdown,agent-skills-index,agent-ard,agent-content-signal'
+```
+
 ## Self-test
 
 `node scripts/selftest.mjs` runs the engine against offline fixtures (no network) and asserts
@@ -159,12 +207,20 @@ the start of a line, a local run printing once with no commands (stdout a socket
 child_process gives it — the case that crashes an `appendFileSync('/dev/stdout')` fallback on Linux),
 report-only annotating as `::warning`, an unwritable summary still reaching the log under the
 caller's exit setting, and the two early exits that run before the first `await`. 21 targeted
-mutants each turn it red. It runs in CI (`.github/workflows/seo-aeo-selftest.yml`).
+mutants each turn it red. The agent-readiness layer (v1.29.0) adds offline cases per analyzer
+(absent, broken and adopted, plus near-miss mutants), the tier contract (the four promotable ids; a
+site that adopted none of them yields only INFO) and an end-to-end leg through the real `check.mjs`:
+an adopting site is all ✅ with the four promoted, a broken one blocks on exactly those four (its 503
+catalog reported as could-not-look), a site that adopted nothing never blocks, and the verify token
+never leaves the checked host. 49 targeted mutants of that layer each turn it red. It runs in CI
+(`.github/workflows/seo-aeo-selftest.yml`).
 
 ## Implementation
 
 `scripts/checks.mjs` — pure, network-free check engine, plus the report's `safe()` and the
 annotation encoding (all unit-tested by `selftest.mjs`).
+`scripts/agent.mjs` — the agent-readiness analyzers, pure like `checks.mjs`; `check.mjs` fetches
+each origin's agent-facing surface and feeds the responses in.
 `scripts/check.mjs` — CLI: builds the URL list (sitemap expansion + retry), fetches JS-disabled
 with one transient-retry + manual redirect probes, renders a per-page report to
 `GITHUB_STEP_SUMMARY` and the job log, annotates each CRITICAL, exits non-zero only on a CRITICAL

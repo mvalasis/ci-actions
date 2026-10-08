@@ -20,6 +20,9 @@ export const T1_CHECKS = new Set([
   'noindex', 'single-h1', 'canonical-present', 'canonical-valid', 'meta-description',
   'html-lang', 'viewport', 'jsonld-valid', 'og-core', 'robots-txt', 'sitemap',
   'robots-sitemap-directive', 'redirect-consistency', 'external-webfont',
+  // agent readiness (agent.mjs): absent is INFO and never elevated, so promoting one of these
+  // locks in an adopted capability without blocking a site that has not adopted it yet
+  'agent-markdown', 'agent-skills-index', 'agent-ard', 'agent-content-signal',
 ]);
 // Everything else is T2 (advisory; ignored if a caller tries to promote it).
 
@@ -365,8 +368,9 @@ export function analyzePage(input) {
     for (const t of types) if (RETIRED_RICH_RESULT.has(t)) add(f('jsonld-retired', SEV.INFO, `${t} present — valid schema (AI/parse value), but no rich result since 2026-05-07`));
     // entity signal (AEO/GEO): the homepage's Organization/Person should carry a sameAs chain
     if (pageType === 'home') {
-      const entity = nodes.find((n) => typesOf(n).some((t) => /Organization|LocalBusiness|Store|Person|Business/i.test(t)));
+      const entity = nodes.find(isEntity);
       if (entity && !has(entity, 'sameAs')) add(f('entity-sameas', SEV.WARN, 'homepage entity (Organization/Person) has no sameAs links — weakens entity disambiguation for AI/search answer engines'));
+      add(...analyzeHomeEntity(nodes));
     }
     // freshness on article-shaped pages (T2)
     if (['article'].includes(pageType)) {
@@ -376,6 +380,34 @@ export function analyzePage(input) {
     }
   }
 
+  return out;
+}
+
+// The homepage entity behind the site: an Organization (or a subtype) or a Person.
+const isEntity = (n) => typesOf(n).some((t) => /Organization|LocalBusiness|Store|Person|Business|Corporation/i.test(t));
+// Types that only say WHO the site is; anything beyond them lets an agent answer a second question.
+const BASE_TYPES = new Set(['Organization', 'WebSite', 'WebPage', 'LocalBusiness', 'Store', 'OnlineStore', 'OnlineBusiness', 'Corporation', 'Person', 'ContactPoint', 'PostalAddress', 'SearchAction', 'EntryPoint', 'ImageObject', 'Brand', 'GeoCoordinates', 'OpeningHoursSpecification', 'BreadcrumbList', 'ListItem', 'PropertyValueSpecification']);
+
+// Homepage entity completeness + type breadth (agent readiness). Agent-readiness scanners read the
+// HOMEPAGE's JSON-LD only, so this is home-scoped: description (WARN — every answer about the site
+// starts there), address + contactPoint (INFO — a Person's site never needs them), and one content
+// type beyond the entity (INFO). A field on ANY entity node counts: WP graphs often split the
+// Organization from a LocalBusiness that carries the address and the phone.
+export function analyzeHomeEntity(nodes) {
+  const out = [];
+  const entities = nodes.filter(isEntity);
+  const anyHas = (p) => entities.some((n) => has(n, p));
+  if (entities.length) {
+    if (!anyHas('description')) out.push(f('entity-fields', SEV.WARN, 'homepage entity (Organization/Store) has no description — agents and answer engines cannot say what the business does'));
+    if (!entities.every((n) => typesOf(n).every((t) => /Person/i.test(t)))) {
+      const miss = [];
+      if (!anyHas('address')) miss.push('address (PostalAddress)');
+      if (!['contactPoint', 'telephone', 'email'].some(anyHas)) miss.push('contactPoint');
+      if (miss.length) out.push(f('entity-fields', SEV.INFO, `homepage entity has no ${miss.join(' and no ')} — agents use them to verify a real business (an online-only one may omit the address)`));
+    }
+  }
+  const all = new Set(nodes.flatMap(typesOf));
+  if (all.size && [...all].every((t) => BASE_TYPES.has(t))) out.push(f('homepage-type-breadth', SEV.INFO, 'homepage JSON-LD stops at the entity and WebSite — add one content type (ItemList of featured items with Offers, FAQPage, Service) so agents can answer more than "who is this"'));
   return out;
 }
 

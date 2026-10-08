@@ -4,10 +4,16 @@
 // and exits non-zero only when a CRITICAL check fails AND fail-on-critical is set.
 // Air-gapped: only touches the target site (no SaaS, no telemetry).
 import fs from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import {
   SEV, T1_CHECKS, analyzePage, analyzeRobots, analyzeSitemap, analyzeLlms, analyzeRedirects,
   safe, annotations,
 } from './checks.mjs';
+import {
+  analyzeAgentHome, analyzeWebmcp, analyzeMarkdownNegotiation, analyzeMarkdown404, analyzeContentSignal,
+  analyzeLlmsGuidance, parseSkillsIndex, gradeSkillArtifacts, analyzeArd, analyzeTrustPages,
+  analyzeSitemapLastmod, sameSite,
+} from './agent.mjs';
 
 const env = process.env;
 const FAIL_ON_CRITICAL = env.FAIL_ON_CRITICAL === 'true';
@@ -57,22 +63,31 @@ async function fetchOnce(url, opts = {}) {
   return { status: r.status, finalUrl: r.url, redirected: r.redirected, headers: Object.fromEntries(r.headers), body, location: r.headers.get('location') };
 }
 // Page fetches follow redirects MANUALLY (re-evaluating headersFor each hop) so the token is
-// never carried to an off-host redirect target.
-async function followFetch(url, maxHops = 6) {
+// never carried to an off-host redirect target. `accept` sets the Accept header (the agent legs ask
+// for text/markdown); `raw` also returns the body's bytes (a skill digest is over the bytes served).
+// TextDecoder is what r.text() uses: UTF-8, a leading BOM dropped.
+async function followFetch(url, { accept = '', raw = false } = {}, maxHops = 6) {
   let current = url, redirected = false;
   for (let i = 0; i < maxHops; i++) {
-    const r = await fetch(current, { headers: headersFor(current), redirect: 'manual', signal: AbortSignal.timeout(25000) });
+    const headers = accept ? { ...headersFor(current), accept } : headersFor(current);
+    const r = await fetch(current, { headers, redirect: 'manual', signal: AbortSignal.timeout(25000) });
     const loc = r.headers.get('location');
     if (r.status >= 300 && r.status < 400 && loc) { current = new URL(loc, current).href; redirected = true; continue; }
-    return { status: r.status, finalUrl: current, redirected, headers: Object.fromEntries(r.headers), body: await r.text() };
+    const bytes = Buffer.from(await r.arrayBuffer());
+    return { status: r.status, finalUrl: current, redirected, headers: Object.fromEntries(r.headers), body: new TextDecoder().decode(bytes), ...(raw ? { bytes } : {}) };
   }
   throw new Error('too many redirects');
 }
 // Retry once on a NETWORK/timeout error (transient) — never on a real HTTP status.
-async function fetchPage(url) {
-  try { return await followFetch(url); }
-  catch (e1) { await sleep(1500); try { return await followFetch(url); } catch (e2) { return { error: e2.message || String(e2) }; } }
+async function fetchPage(url, opts = {}) {
+  try { return await followFetch(url, opts); }
+  catch (e1) { await sleep(1500); try { return await followFetch(url, opts); } catch (e2) { return { error: e2.message || String(e2) }; } }
 }
+const ok2xx = (s) => s >= 200 && s < 300;
+// A WAF/bot challenge, a transient origin error or a network failure: the leg could not look. Never a
+// verdict about the site — the per-page loop treats the same statuses as infra, not content.
+const couldNotLook = (r) => (r.error ? `fetch failed (${safe(r.error, 100)})`
+  : ([401, 403, 408, 425, 429].includes(r.status) || (r.status >= 500 && r.status < 600)) ? `HTTP ${r.status}` : '');
 
 // Manual redirect chain (≤5 hops) for one host variant.
 async function probeRedirect(label, host, startUrl) {
@@ -202,6 +217,7 @@ function finish(code) {
   const origins = [...new Set(pages.map((p) => { try { return new URL(p.finalUrl).origin; } catch { return null; } }).filter(Boolean))];
   note('');
   note('### Site files & hygiene');
+  const siteFiles = new Map();   // origin -> the robots/sitemap/llms responses, re-read by the agent legs
   for (const origin of origins) {
     note(`**${safe(origin)}**`);
     const hostFindings = [];
@@ -218,6 +234,7 @@ function finish(code) {
 
     const llmsResp = await fetchPage(origin + '/llms.txt');
     hostFindings.push(...analyzeLlms(llmsResp.error ? { status: 0, body: '' } : llmsResp));
+    siteFiles.set(origin, { robotsResp, smResp, llmsResp });
 
     // redirect hygiene
     let host = ''; try { host = new URL(origin).host; } catch { /* skip */ }
@@ -247,6 +264,19 @@ function finish(code) {
     const nonOk = elevated.filter((x) => x.sev !== SEV.OK);
     if (nonOk.length) renderFindings(elevated);
     else note('  - ✅ robots.txt · sitemap · llms.txt · redirects — all clean');
+  }
+
+  // ---- agent readiness (per distinct origin) ----
+  note('');
+  note('### Agent readiness');
+  note('_absent = ℹ️ (a roadmap item, never a defect) · present but broken = ⚠️_');
+  for (const origin of origins) {
+    note(`**${safe(origin)}**`);
+    const found = (await agentReadiness(origin, siteFiles.get(origin))).map(elevate);
+    tally(found, origin);
+    if (found.some((x) => x.sev !== SEV.OK)) renderFindings(found);
+    const inPlace = [...new Set(found.filter((x) => x.sev === SEV.OK).map((x) => x.id))];
+    if (inPlace.length) note(`  - ✅ in place: \`${inPlace.join('`, `')}\``);
   }
 
   // ---- cross-page duplicate detection (group by canonical to exclude hreflang alternates) ----
@@ -301,6 +331,93 @@ function finish(code) {
   try { flush(); } catch { /* summary sink unwritable; the job log already has the report */ }
   process.exit(FAIL_ON_CRITICAL ? 1 : 0);
 });
+
+// ---- agent readiness for one origin: fetch the agent-facing surface, agent.mjs grades it ----
+// Same origin only (a skill on another host is listed, never fetched). A leg that could not look is a
+// WARN under that leg's id: listed, and a fault that blocks only where the caller promoted the id —
+// a promoted check never passes on a response it never got.
+async function agentReadiness(origin, { robotsResp, smResp, llmsResp }) {
+  const out = [];
+  const cnl = (id, what, why) => out.push({ id, sev: SEV.WARN, msg: `could not look at ${what}: ${why} — not a verdict about the site (set verify-token if WAF-fronted)` });
+  let host = ''; try { host = new URL(origin).host; } catch { /* none */ }
+
+  // the homepage as a browser asks for it: Link headers, the Markdown alternate, WebMCP
+  const home = await fetchPage(origin + '/', { accept: 'text/html' });
+  let mdAlternate = '';
+  if (couldNotLook(home)) cnl('agent-webmcp', 'the homepage (Link headers, WebMCP)', couldNotLook(home));
+  else if (ok2xx(home.status)) {
+    const h = analyzeAgentHome({ finalUrl: home.finalUrl, headers: home.headers, html: home.body });
+    out.push(...h.findings);
+    mdAlternate = h.mdAlternate;
+    const bundles = [];
+    for (const src of h.scripts) { const b = await fetchPage(src); if (!b.error && ok2xx(b.status)) bundles.push({ url: src, body: b.body }); }
+    out.push(...analyzeWebmcp({ toolForms: h.toolForms, webmcpInline: h.webmcpInline, bundles }));
+  }
+
+  // the homepage as an agent asks for it, then a path that cannot exist, asked the same way
+  const md = await fetchPage(origin + '/', { accept: 'text/markdown' });
+  let adopted = false;
+  if (couldNotLook(md)) cnl('agent-markdown', 'the homepage with Accept: text/markdown', couldNotLook(md));
+  else {
+    out.push(...analyzeMarkdownNegotiation(md, { mdAlternate }));
+    adopted = ok2xx(md.status) && /^text\/markdown\b/i.test(String(md.headers['content-type'] || '').trim());
+  }
+  const m404 = await fetchPage(`${origin}/__seo-aeo-404-probe-${randomBytes(6).toString('hex')}`, { accept: 'text/markdown' });
+  if (couldNotLook(m404)) cnl('agent-markdown-404', 'a nonexistent path', couldNotLook(m404));
+  else out.push(...analyzeMarkdown404(m404, { adopted }));
+
+  // robots.txt Content Signals + the llms.txt agent section: the files the site loop already fetched
+  if (couldNotLook(robotsResp)) cnl('agent-content-signal', '/robots.txt', couldNotLook(robotsResp));
+  else out.push(...analyzeContentSignal(ok2xx(robotsResp.status) && !/<html|<!doctype/i.test(robotsResp.body.slice(0, 200)) ? robotsResp.body : ''));
+  out.push(...analyzeLlmsGuidance(llmsResp.error ? { status: 0 } : llmsResp));
+
+  // the Agent Skills discovery index, then each skill it lists (capped; the digest is over the raw bytes)
+  const idx = await fetchPage(origin + '/.well-known/agent-skills/index.json');
+  if (couldNotLook(idx)) cnl('agent-skills-index', '/.well-known/agent-skills/index.json', couldNotLook(idx));
+  else {
+    const { findings, entries } = parseSkillsIndex(idx);
+    const artifacts = [];
+    for (const e of entries.slice(0, 10)) {
+      let u = null; try { u = new URL(e.url, idx.finalUrl); } catch { /* unparseable */ }
+      if (!u || !/^https?:$/.test(u.protocol)) { artifacts.push({ ...e, status: 0 }); continue; }
+      if (!sameSite(u.host, host)) { artifacts.push({ ...e, offSite: true }); continue; }
+      const a = await fetchPage(u.href, { raw: true });
+      artifacts.push({ ...e, url: u.href, status: a.error ? 0 : a.status, headers: a.headers || {}, bytes: a.bytes || Buffer.alloc(0) });
+    }
+    out.push(...findings, ...gradeSkillArtifacts(artifacts, findings));
+  }
+
+  // the Agentic Resource Discovery catalog, under both of its names
+  const ard = await fetchPage(origin + '/.well-known/ard.json');
+  const catalog = await fetchPage(origin + '/.well-known/ai-catalog.json');
+  const ardWhy = couldNotLook(ard) || couldNotLook(catalog);
+  if (ardWhy) cnl('agent-ard', '/.well-known/ard.json + ai-catalog.json', ardWhy);
+  else out.push(...analyzeArd(ard, catalog, host.replace(/:\d+$/, '')));   // an identifier names a domain, never a port
+
+  // the trust pages an agent checks before recommending the site (a redirect to a localized page is fine)
+  const trust = [];
+  let trustWhy = '';
+  for (const p of ['/about', '/contact', '/privacy']) {
+    const r = await fetchPage(origin + p);
+    if (couldNotLook(r)) { trustWhy = `${p} ${couldNotLook(r)}`; break; }
+    let offSite = true; try { offSite = !sameSite(new URL(r.finalUrl).host, host); } catch { /* stays off-site */ }
+    trust.push({ path: p, status: r.status, finalUrl: r.finalUrl, html: r.body, offSite });
+  }
+  if (trustWhy) cnl('agent-trust-pages', 'the trust pages', trustWhy);
+  else out.push(...analyzeTrustPages(trust));
+
+  // <lastmod> on the sitemap's entries (an index: its first child sitemap)
+  if (ok2xx(smResp.status)) {
+    let urlset = smResp.body;
+    if (/<sitemapindex\b/i.test(urlset)) {
+      const first = extractLocs(urlset)[0];
+      const child = first ? await fetchPage(first) : { error: 'no child sitemap' };
+      urlset = !child.error && ok2xx(child.status) ? child.body : '';
+    }
+    out.push(...analyzeSitemapLastmod(urlset));
+  }
+  return out;
+}
 
 function sevRank(s) { return { critical: 0, warn: 1, info: 2, ok: 3 }[s] ?? 9; }
 function pageIcon(findings) {

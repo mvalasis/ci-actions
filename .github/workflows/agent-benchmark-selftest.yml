@@ -1,0 +1,61 @@
+name: agent-benchmark self-test
+
+# Two layers, mirroring the other actions' self-tests:
+#
+# (1) offline-selftest — the real regression guard. Two node:http servers on 127.0.0.1 stand in
+#     for ora.ai and isitagentready.com and the real benchmark.mjs runs against them: complete,
+#     cached, 202-polled, stale-CDN, stuck, rate-limited, could-not-look and hostile answers. No
+#     network.
+#
+# (2) live-smoke — the action through its real action.yml against a live site. Proves the composite
+#     step, the env wiring and the outputs end to end. It asserts the wiring (exit 0, a JSON file
+#     at the `json` output naming the target), never a score: a scanner that is down or
+#     rate-limits the runner's shared IP is could-not-look, and must not turn ci-actions red.
+#     Every run is a scan ora.ai lists on its public leaderboard, for a site of our own.
+
+on:
+  push:
+    branches: [main]
+    paths: ['agent-benchmark/**', '.github/workflows/agent-benchmark-selftest.yml']
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'The site the live smoke run scans'
+        required: false
+        default: 'https://www.lampakia.gr/'
+
+permissions:
+  contents: read
+
+jobs:
+  offline-selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Offline self-test (stand-in scanners on 127.0.0.1)
+        run: node agent-benchmark/scripts/selftest.mjs
+
+  live-smoke:
+    runs-on: ubuntu-latest
+    needs: offline-selftest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - id: bench
+        uses: ./agent-benchmark
+        with:
+          url: ${{ inputs.url || 'https://www.lampakia.gr/' }}
+      - name: The outputs are wired and the JSON names the target
+        env:
+          JSON_PATH: ${{ steps.bench.outputs.json }}
+          ORA_SCORE: ${{ steps.bench.outputs.ora-score }}
+          ORA_GRADE: ${{ steps.bench.outputs.ora-grade }}
+          IIAR_LEVEL: ${{ steps.bench.outputs.isitagentready-level }}
+        run: |
+          echo "ora-score=$ORA_SCORE ora-grade=$ORA_GRADE isitagentready-level=$IIAR_LEVEL json=$JSON_PATH"
+          [ -n "$JSON_PATH" ] || { echo "::error::the json output is empty"; exit 1; }
+          [ -s "$JSON_PATH" ] || { echo "::error::the json output names no file"; exit 1; }
+          node -e 'const j = JSON.parse(require("fs").readFileSync(process.env.JSON_PATH, "utf8")); if (!/^https:\/\//.test(j.target) || !("ora" in j) || !("isitagentready" in j)) { console.log("::error::the JSON lacks target, ora or isitagentready"); process.exit(1); }'

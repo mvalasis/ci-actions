@@ -4,7 +4,9 @@ description: >-
   the crawler's-eye. Parses the served HTML with a real DOM parser (cheerio), not
   regex: title/meta length, canonical validity, accidental noindex, Open Graph,
   hreflang, robots/sitemap sanity, parsed-and-typed JSON-LD, redirect hygiene, plus
-  AEO (llms.txt structure, AI-crawler allow-list, entity/freshness signals). CRITICAL
+  AEO (llms.txt structure, AI-crawler allow-list, entity/freshness signals) and agent
+  readiness (Markdown negotiation, Agent Skills index, ARD catalog, Content Signals, WebMCP,
+  Link headers, trust pages). CRITICAL
   set is tiny and config-free (HTTP 200 + title + h1); everything else is WARN, with a
   per-caller opt-in to promote individual checks. Air-gapped: only fetches the target.
 
@@ -37,7 +39,9 @@ inputs:
       (default) = the CRITICAL core only, so a caller is never newly-blocked by an upgrade.
       Promotable IDs: noindex, single-h1, canonical-present, canonical-valid,
       meta-description, html-lang, viewport, jsonld-valid, og-core, robots-txt, sitemap,
-      robots-sitemap-directive, redirect-consistency, external-webfont.
+      robots-sitemap-directive, redirect-consistency, external-webfont, agent-markdown,
+      agent-skills-index, agent-ard, agent-content-signal (an agent check that is absent is
+      INFO and never elevated, so promoting one blocks only a broken or regressed adoption).
     required: false
     default: ''
 

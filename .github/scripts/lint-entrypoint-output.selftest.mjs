@@ -581,8 +581,8 @@ say('\n# the selftest exemption still holds');
 const selftests = fs.readdirSync(root, { withFileTypes: true })
   .filter((d) => d.isDirectory() && fs.existsSync(path.join(root, d.name, 'scripts', 'selftest.mjs')))
   .map((d) => path.join(d.name, 'scripts', 'selftest.mjs'));
-check('seven action selftests exist and are out of scope',
-  selftests.length === 7 && !found.some((f) => selftests.includes(f)), `(${selftests.length})`);
+check('eight action selftests exist and are out of scope',
+  selftests.length === 8 && !found.some((f) => selftests.includes(f)), `(${selftests.length})`);
 
 say(failed === 0 ? '\n✅ all lint-entrypoint-output self-tests passed\n' : `\n❌ ${failed} self-test(s) failed\n`);
 process.exit(failed === 0 ? 0 : 1);
