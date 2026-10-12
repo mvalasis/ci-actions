@@ -5,7 +5,8 @@
 // (caller ∪ action ∪ declared extras — the 2026-08 ownership split), and the
 // report-spoofing/disclosure guard; then runs the real scan.mjs against a stub osv-scanner and a
 // stub gh to assert what reaches the job log (the report, one annotation per at/above-floor
-// advisory, and what happened to the tracking issue).
+// advisory, and what happened to the tracking issue) and what reaches the issue (its body, cut
+// under GitHub's limit since v1.29.4).
 // Run: node scripts/selftest.mjs (also runs in CI). Exits non-zero on any regression — the
 // action's own regression guard, mirroring security-baseline/selftest.mjs.
 //
@@ -23,7 +24,7 @@ import {
   SEV, normalizeFloor, bucketFor, atOrAboveFloor, parseOsv, filterByFloor,
   scanUnpinnedActions, normalizeOwners, resolveFirstPartyOwners, issueDecision, blockDecision,
   renderReport, safe, escapeData, escapeProperty, repoRelative, annotation, annotations,
-  osvOutcome, scrub, errorLine, faultAnnotation,
+  osvOutcome, scrub, errorLine, faultAnnotation, capIssueBody,
 } from './engine.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -544,7 +545,8 @@ console.log('\n# scan.mjs end to end — the job log carries the report; at/abov
     // exit 0 — a clean sweep, for the issue-close cases below. OSV_STUB_EXIT answers with that exit
     // status, OSV_STUB_OUT on stdout and OSV_STUB_ERR on stderr — the could-not-look cases (G).
     // OSV_STUB_KILL prints the whole report and is then killed, as a timeout would kill it.
-    fs.writeFileSync(stub, `#!/bin/sh\n[ "$1" = "--version" ] && { echo 0.0.0-stub; exit 0; }\n[ -n "$OSV_STUB_EXIT" ] && { printf '%s' "$OSV_STUB_OUT"; [ -n "$OSV_STUB_ERR" ] && printf '%s\\n' "$OSV_STUB_ERR" >&2; exit "$OSV_STUB_EXIT"; }\n[ -n "$OSV_STUB_CLEAN" ] && { echo '{"results":[]}'; exit 0; }\ncat <<'JSON'\n${JSON.stringify(osv)}\nJSON\n[ -n "$OSV_STUB_KILL" ] && kill -9 $$\nexit 1\n`);
+    // OSV_STUB_FILE answers with that file's report, exit 1 (one too big for an environment variable).
+    fs.writeFileSync(stub, `#!/bin/sh\n[ "$1" = "--version" ] && { echo 0.0.0-stub; exit 0; }\n[ -n "$OSV_STUB_FILE" ] && { cat "$OSV_STUB_FILE"; exit 1; }\n[ -n "$OSV_STUB_EXIT" ] && { printf '%s' "$OSV_STUB_OUT"; [ -n "$OSV_STUB_ERR" ] && printf '%s\\n' "$OSV_STUB_ERR" >&2; exit "$OSV_STUB_EXIT"; }\n[ -n "$OSV_STUB_CLEAN" ] && { echo '{"results":[]}'; exit 0; }\ncat <<'JSON'\n${JSON.stringify(osv)}\nJSON\n[ -n "$OSV_STUB_KILL" ] && kill -9 $$\nexit 1\n`);
     fs.chmodSync(stub, 0o755);
     const summaryPath = path.join(tmp, 'summary.md');
     // The env is built from scratch so a CI runner's own GITHUB_ACTIONS / GITHUB_STEP_SUMMARY never
@@ -621,11 +623,15 @@ console.log('\n# scan.mjs end to end — the job log carries the report; at/abov
     // never go on to `create`, which duplicates an issue that is open. ECOSYSTEMS adds a scanner
     // note, which must stay in the report and only there.
     const gh = path.join(tmp, 'gh-stub');
-    // GH_STUB_BODIES gets every --body it is handed, so a comment's text is asserted too.
+    // GH_STUB_BODIES gets every --body it is handed, so a comment's text is asserted too. GH_STUB_BODY
+    // gets the last one byte for byte, and a body over 65,536 bytes is refused, as GitHub refuses one
+    // over 65,536 characters (bytes are never fewer).
     fs.writeFileSync(gh, String.raw`#!/bin/sh
 [ "$1" = "--version" ] && { echo 'gh version 0.0.0-stub'; exit 0; }
 [ -n "$GH_STUB_CALLS" ] && echo "$2" >> "$GH_STUB_CALLS"
 [ -n "$GH_STUB_BODIES" ] && { prev=; for a in "$@"; do [ "$prev" = --body ] && printf '%s\n' "$a" >> "$GH_STUB_BODIES"; prev=$a; done; }
+[ -n "$GH_STUB_BODY" ] && { prev=; for a in "$@"; do [ "$prev" = --body ] && printf '%s' "$a" > "$GH_STUB_BODY"; prev=$a; done; }
+[ -n "$GH_STUB_BODY" ] && [ -f "$GH_STUB_BODY" ] && [ "$(wc -c < "$GH_STUB_BODY" | tr -d ' ')" -gt 65536 ] && { echo 'Body is too long (maximum is 65536 characters)' >&2; exit 1; }
 case " $GH_STUB_DENY " in *" $2 "*) printf 'HTTP 403: Resource not accessible by integration\n::error title=forged::planted-by-gh\n' >&2; exit 1 ;; esac
 [ "$2" = list ] && [ -n "$GH_STUB_LIST" ] && { echo "$GH_STUB_LIST"; exit 0; }
 [ "$2" = list ] && { [ -n "$GH_STUB_OPEN" ] && printf '[{"number":%s,"title":"deps-currency: dependency advisories"}]\n' "$GH_STUB_OPEN" || echo '[]'; }
@@ -773,6 +779,114 @@ exit 0
     check('…annotations: the fault first, then 9 advisories — GitHub keeps 10 — and one line counting the other 3',
       pc.length === 10 && pc[0].startsWith('::warning title=deps-currency could not look::') && pc.slice(1).every((l) => l.startsWith('::warning file=package-lock.json,'))
         && p.stdout.includes('\ndeps-currency: 3 more advisory(ies) not annotated (GitHub keeps 10 per step)'), JSON.stringify(pc.map((l) => l.slice(0, 60))));
+
+    // (H) The issue body stays under GitHub's limit (v1.29.4). GitHub refuses an issue or comment body
+    // over 65,536 characters, and past 128 KiB Linux will not start gh with it; either was one lifecycle
+    // note in a green run, so the issue went missing when the tree carried the most advisories. The real
+    // manageIssue, the stub gh keeping the exact --body: 900 advisories under `severity-floor: LOW`,
+    // handed over LOW first so the order is the engine's, every other one in a Greek-named directory
+    // (two bytes a letter). Their body must come back at most 60,000 bytes: the report's head, whole
+    // rows from the top, the rest of the report, and a note counting the rows left out.
+    const runUrl = (id) => `https://github.com/creme-ypsilon/lampakia-astro/actions/runs/${id}`;
+    const RULE = '|---|---|---|---|---|---|';
+    const rankOf = (row) => ({ CRITICAL: 0, HIGH: 1, MODERATE: 2, LOW: 3 })[(row.match(/^\| \S+ ([A-Z]+) \|/) || [])[1]] ?? 9;
+    const LOCK = '/home/runner/work/lampakia-astro/lampakia-astro/package-lock.json';
+    const GREEK = '/home/runner/work/ηλεκτρολογικά/ηλεκτρολογικά/εφαρμογή/package-lock.json';
+    const osvFile = path.join(tmp, 'osv-report.json');
+    const bodyFile = path.join(tmp, 'gh-body');
+    // `plan`: [[severity, how many], …] in the order osv lists them, one package each.
+    const advisories = (plan, where = () => LOCK) => {
+      const by = new Map();
+      let i = 0;
+      for (const [sev, n] of plan) for (let j = 0; j < n; j++, i++) {
+        const id = String(i).padStart(4, '0');
+        if (!by.has(where(i))) by.set(where(i), []);
+        by.get(where(i)).push({ package: { name: `@acme/pkg-${id}`, version: '4.17.21', ecosystem: 'npm' },
+          groups: [{ ids: [`GHSA-${id}-q2w3-e4r5`, `CVE-2021-2${id}`], max_severity: { CRITICAL: '9.8', HIGH: '7.5', MODERATE: '5.3', LOW: '3.1' }[sev] }] });
+      }
+      fs.writeFileSync(osvFile, JSON.stringify({ results: [...by].map(([p, packages]) => ({ source: { path: p, type: 'lockfile' }, packages })) }));
+    };
+    // One run that opens the issue (or, GH_STUB_OPEN, comments on it): the report as the log carries it,
+    // the exact body gh was handed (null: none), and v1.29.3's body for that report — its lead, then all of it.
+    const post = (extra = {}) => {
+      fs.rmSync(bodyFile, { force: true });
+      const id = extra.GITHUB_RUN_ID || '33911783576';
+      const r = scanGh({ OSV_STUB_FILE: osvFile, SEVERITY_FLOOR: 'LOW', GITHUB_RUN_ID: id, GITHUB_STEP_SUMMARY: summaryPath, GH_BIN: gh, MANAGE_ISSUE: 'true', GH_STUB_BODY: bodyFile, ...extra });
+      const at = r.summary.indexOf('\n\n**at/above floor: ');
+      const report = at < 0 ? '' : r.summary.slice(0, at);
+      const sent = fs.existsSync(bodyFile) ? fs.readFileSync(bodyFile) : null;
+      const stamp = (String(sent || '').match(/^Scheduled [^\n]* \((\d{4}-\d{2}-\d{2})\)\.\n/) || [])[1];
+      const lead = `Scheduled dependency-currency sweep found advisories on **creme-ypsilon/lampakia-astro** (${stamp}).\n\nRun: ${runUrl(id)}\n\nThis issue auto-closes when the next scheduled run is clean.\n\n`;
+      return { ...r, id, report, sent, lead, before: Buffer.from(lead + report) };
+    };
+    // What a cut body owes, each property on its own; `kept` and `rows` are the body's and the report's.
+    const grade = (r) => {
+      const text = String(r.sent || '');
+      const m = text.startsWith(r.lead) ? text.slice(r.lead.length).match(/^([\s\S]*)\n\n\(truncated — (\d+) more rows; the full report is in the run log: (\S+)\)$/) : null;
+      const lines = m ? `${m[1]}\n`.split('\n') : [];   // the report's own trailing newline put back
+      const rep = r.report.split('\n');
+      const first = rep.indexOf(RULE) + 1;
+      let end = first;
+      while (first && end < rep.length && rep[end].startsWith('| ')) end++;
+      let k = first;
+      while (k < lines.length && lines[k].startsWith('| ')) k++;
+      const rows = rep.slice(first, end);
+      const kept = lines.slice(first, k);
+      const have = new Set(rep);
+      return { rows, kept,
+        size: !!r.sent && r.sent.length <= 60000 && text.length <= 65536,
+        shape: !!m && m[3] === runUrl(r.id),
+        head: first > 0 && lines.slice(0, first).join('\n') === rep.slice(0, first).join('\n'),
+        whole: lines.length > 0 && lines.every((l) => have.has(l)) && new Set(kept).size === kept.length,
+        top: kept.length > 0 && kept.join('\n') === rows.slice(0, kept.length).join('\n'),
+        tail: k < lines.length && lines.slice(k).join('\n') === rep.slice(end).join('\n'),
+        count: !!m && Number(m[2]) === rows.length - kept.length,
+        fill: !!r.sent && kept.length < rows.length && 60000 - r.sent.length < Buffer.byteLength(rows[kept.length]) + 11 };
+    };
+
+    advisories([['LOW', 400], ['MODERATE', 300], ['HIGH', 150], ['CRITICAL', 50]], (i) => (i % 2 ? GREEK : LOCK));
+    const big = post();
+    const g = grade(big);
+    check('issue body, 900 advisories handed over LOW first: listed CRITICAL first, v1.29.3\'s body past 128 KiB',
+      g.rows.length === 900 && rankOf(g.rows[0]) === 0 && g.rows.every((row, i) => !i || rankOf(g.rows[i - 1]) <= rankOf(row)) && big.before.length > 131072, `${big.before.length} B`);
+    check('…the issue opens', big.verbs === 'list create' && count(big.stdout, '\n- opened tracking issue\n') === 1, why(big));
+    check('…its body is at most 60,000 bytes', g.size, `${big.sent && big.sent.length} B`);
+    check('…the lead, then the report cut, then the note with the run URL', g.shape);
+    check('…the report\'s head kept, the table\'s header rows included', g.head);
+    check('…whole rows only, each one of the report\'s', g.whole);
+    check('…the rows kept are the report\'s first ones', g.top);
+    const by = [0, 1, 2, 3].map((n) => g.kept.filter((row) => rankOf(row) === n).length);
+    check(`…every CRITICAL and HIGH row, the cut inside MODERATE, no LOW (kept ${by.join('/')})`, by[0] === 50 && by[1] === 150 && by[2] > 0 && by[2] < 300 && by[3] === 0);
+    check('…the rest of the report follows whole, the unpinned action too', g.tail && big.sent && String(big.sent).includes('oven-sh/setup-bun@v2.2.0'));
+    check(`…the note counts the ${900 - g.kept.length} rows left out`, g.count);
+    check('…and fills the room: the first row left out would not fit', g.fill, `${big.sent && big.sent.length} B`);
+    check('…the job log still carries all 900 rows', big.stdout.includes(big.report) && g.rows.length === 900);
+    const again = post({ GH_STUB_OPEN: '7' });
+    check('…#7 open: the comment carries the same cut body',
+      again.verbs === 'list comment' && count(again.stdout, '\n- updated tracking issue #7\n') === 1 && !!big.sent && String(again.sent) === again.lead + String(big.sent).slice(big.lead.length), why(again));
+
+    // A report under the cap goes as v1.29.3 posted it, byte for byte, on both paths.
+    advisories([['MODERATE', 1], ['CRITICAL', 1], ['LOW', 1]], (i) => (i === 1 ? GREEK : LOCK));
+    const small = post();
+    check('issue body, 3 advisories: v1.29.3\'s body, byte for byte', small.verbs === 'list create' && !!small.sent && small.sent.equals(small.before), why(small));
+    const smallAgain = post({ GH_STUB_OPEN: '7' });
+    check('…and the comment on #7 too', smallAgain.verbs === 'list comment' && !!smallAgain.sent && smallAgain.sent.equals(smallAgain.before), why(smallAgain));
+
+    // The boundary, both sides: HIGH rows of one width, the run ID padded until v1.29.3's body is exactly
+    // 60,000 bytes, then one byte more.
+    advisories([['HIGH', 300]]);
+    const base = post();
+    const width = Buffer.byteLength(grade(base).rows[0] || '') + 1;
+    const n = 300 + Math.floor((60000 - base.before.length) / width);
+    advisories([['HIGH', n]]);
+    const pad = 60000 - (base.before.length + (n - 300) * width);
+    const exact = post({ GITHUB_RUN_ID: `33911783576${'0'.repeat(pad)}` });
+    check(`issue body, ${n} rows built to a v1.29.3 body of exactly 60,000 bytes: posted whole`, exact.before.length === 60000 && !!exact.sent && exact.sent.equals(exact.before), `${exact.before.length} B`);
+    const over = post({ GITHUB_RUN_ID: `33911783576${'0'.repeat(pad + 1)}` });
+    const o = grade(over);
+    check('…one byte more: cut to at most 60,000, whole rows from the top, the rest counted',
+      over.before.length === 60001 && o.size && o.shape && o.head && o.whole && o.top && o.tail && o.count && o.fill, `${over.sent && over.sent.length} B`);
+    check('…no table to cut: an over-cap body goes whole, with no note', capIssueBody('', `${'x'.repeat(60001)}\n`, runUrl(1)) === `${'x'.repeat(60001)}\n`);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

@@ -59,14 +59,13 @@
 // result: a restructured tree must not silently pass a blocking gate, and a rule
 // that has switched itself off looks exactly like a rule with nothing to report.
 //
-// The seven `*/scripts/selftest.mjs` files legitimately end in `console.log(...)`
+// The eight `*/scripts/selftest.mjs` files legitimately end in `console.log(...)`
 // then `process.exit(...)`. They are exempt because they CANNOT hit the bug:
-// measured output is 4296–20998 bytes (contract-check 5907, seo-aeo 5387,
-// form-protection 5660, deps-currency 20998 since v1.19.5's exit-128 cases,
-// security-baseline 18307 since v1.19.5's exit-128 legs, test-suite 9074
-// since v1.24.0's isolate-files legs, verify-homepage 4296 since v1.19.1's
-// report-routing legs) — at least three times under the 65,536-byte pipe buffer.
-// Do not "fix" them; the exemption is the finding, not an oversight.
+// measured output is 4650–33565 bytes (2026-10-12, v1.29.4: agent-benchmark
+// 4650, contract-check 5907, form-protection 6842, test-suite 9074, seo-aeo
+// 14131, verify-homepage 21842, deps-currency 22132 since v1.29.4's issue-body
+// legs, security-baseline 33565) — the largest just over half the 65,536-byte
+// pipe buffer. Do not "fix" them; the exemption is the finding, not an oversight.
 //
 // ALLOWANCES (both deliberate, both narrow)
 //   1. The sync-write fallback itself: a `console.*` that is the `catch` arm of

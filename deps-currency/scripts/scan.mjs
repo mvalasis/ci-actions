@@ -19,7 +19,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   parseOsv, osvOutcome, filterByFloor, scanUnpinnedActions, resolveFirstPartyOwners, issueDecision,
-  blockDecision, renderReport, normalizeFloor, safe, repoRelative, annotations, faultAnnotation,
+  blockDecision, renderReport, normalizeFloor, safe, repoRelative, annotations, faultAnnotation, capIssueBody,
 } from './engine.mjs';
 
 const env = process.env;
@@ -188,7 +188,8 @@ function manageIssue(decision, body, osvReason = '') {
     return;
   }
   if (decision.action === 'open') {
-    const issueBody = `Scheduled dependency-currency sweep found advisories on **${repo}** (${stamp}).\n\nRun: ${runUrl}\n\nThis issue auto-closes when the next scheduled run is clean.\n\n${body}`;
+    // Capped under GitHub's 65,536 characters: whole rows, most severe first, then a note (capIssueBody).
+    const issueBody = capIssueBody(`Scheduled dependency-currency sweep found advisories on **${repo}** (${stamp}).\n\nRun: ${runUrl}\n\nThis issue auto-closes when the next scheduled run is clean.\n\n`, body, runUrl);
     if (num) { const r = run(GH_BIN, ['issue', 'comment', String(num), '-R', repo, '--body', issueBody], { timeout: 60000 }); infra.push(r.status === 0 ? `updated tracking issue #${num}` : `failed to update tracking issue #${num}: ${ghFailure(r)}`); }
     else { const r = run(GH_BIN, ['issue', 'create', '-R', repo, '--title', ISSUE_TITLE, '--body', issueBody], { timeout: 60000 }); infra.push(r.status === 0 ? 'opened tracking issue' : `failed to open tracking issue: ${ghFailure(r)}`); }
   } else if (decision.action === 'close') {

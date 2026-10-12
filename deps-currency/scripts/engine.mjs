@@ -292,6 +292,8 @@ export const safe = (s, max = 200) => String(s == null ? '' : s)
   .slice(0, max);
 
 const SEV_ICON = { CRITICAL: '🔴', HIGH: '🟠', MODERATE: '🟡', LOW: '⚪' };
+// The advisory table's header rule. capIssueBody() finds the table's rows below it.
+const TABLE_RULE = '|---|---|---|---|---|---|';
 
 // Render the full markdown report (used for BOTH the job summary and the issue body — one source
 // of truth). `meta` carries scan context (floor, lockfiles found, ecosystems, totals).
@@ -321,7 +323,7 @@ export function renderReport(floorFindings, unpinned, meta = {}) {
     p(`### Vulnerable / advisory-flagged dependencies (${floorFindings.length})`);
     p('');
     p('| Sev | Package | Version | Advisory | CVSS | Lockfile |');
-    p('|---|---|---|---|---|---|');
+    p(TABLE_RULE);
     for (const f of floorFindings) {
       const icon = SEV_ICON[f.severity] || '';
       const ab = f.abandoned ? ' _(unmaintained/malicious)_' : '';
@@ -343,6 +345,37 @@ export function renderReport(floorFindings, unpinned, meta = {}) {
     p('');
   }
   return L.join('\n');
+}
+
+// The tracking issue's body: `lead` (the issue's own opening lines) and the report. GitHub refuses
+// an issue or comment body over 65,536 characters, and past 128 KiB Linux will not start `gh` with
+// it (MAX_ARG_STRLEN caps one argument). scan.mjs notes the failure under the issue lifecycle and
+// the run goes on, so until v1.29.4 the issue went missing when the tree carried the most
+// advisories: past ~400 table rows at a typical 160 bytes, ~240 at the 272 that safe()'s caps allow
+// (an old JS lockfile, or `severity-floor: LOW`). A body over ISSUE_BODY_CAP BYTES keeps the
+// report's head, the table's header rows included, as many WHOLE rows as fit (filterByFloor sorts
+// them CRITICAL first, then HIGH, MODERATE, LOW), and the rest of the report — the unpinned-action
+// list is capped at 25 above — and ends with how many rows it left out and the run URL; the job log
+// carries every row. Bytes are never fewer than characters, so the cap holds however GitHub counts.
+// A body under the cap is returned byte-identical, and so is one with no table to cut. Known limit:
+// a head over the cap on its own (hundreds of lockfiles in `lockfiles scanned`) still comes back
+// over it, and gh's refusal is what the lifecycle block reports.
+export const ISSUE_BODY_CAP = 60000;
+export function capIssueBody(lead, report, runUrl, cap = ISSUE_BODY_CAP) {
+  const lines = String(report).split('\n');
+  const first = lines.indexOf(TABLE_RULE) + 1;
+  let end = first;
+  while (first && end < lines.length && lines[end].startsWith('| ')) end++;
+  const rows = lines.slice(first, end);
+  const whole = `${lead}${report}`;
+  if (!rows.length || Buffer.byteLength(whole) <= cap) return whole;
+  const body = (k) => `${lead}${[...lines.slice(0, first), ...rows.slice(0, k), ...lines.slice(end)].join('\n')}\n`
+    + `(truncated — ${rows.length - k} more rows; the full report is in the run log: ${runUrl})`;
+  // What the rows may take once the head, the tail and the longest note (every row left out) are paid for.
+  let room = cap - Buffer.byteLength(body(0));
+  let k = 0;
+  while (k < rows.length && (room -= Buffer.byteLength(rows[k]) + 1) >= 0) k++;
+  return body(k);
 }
 
 // ---------------------------------------------------------------------------

@@ -46,8 +46,9 @@ did in v1.25.0.
 or comment body over 65,536 characters is refused. A report with one row per page or per finding
 gets a byte cap: whole rows, worst first, the verdict line kept, then how many rows were left out
 and the run URL; under the cap it stays byte-identical. Pin the cap with an executed selftest at
-exactly the cap and one byte over. Current implementation: `linkcheck/scripts/fit-report.py`
-(issue body at 60,000 bytes since v1.29.2, step summary at 900,000 since v1.29.3).
+exactly the cap and one byte over. Current implementations: `linkcheck/scripts/fit-report.py`
+(issue body at 60,000 bytes since v1.29.2, step summary at 900,000 since v1.29.3) and
+`deps-currency/scripts/engine.mjs` `capIssueBody()` (issue body at 60,000 bytes since v1.29.4).
 
 **Known limit, not papered over:** for bash the crash-guard check matches any `trap … EXIT`, so a
 pure cleanup trap reads as a guard. A behavioural self-test that actually crashes the real

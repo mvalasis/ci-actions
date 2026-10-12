@@ -34,7 +34,8 @@ blocking only after it has cleared its backlog.
   **`deps-currency: dependency advisories`** tracking issue, auto-closing it when the next run is
   clean — the same issue lifecycle as `linkcheck`. What happened to the issue (opened, updated,
   closed, or the error that stopped it) follows the report in both places; a run that cannot look
-  the open issue up opens, updates and closes nothing.
+  the open issue up opens, updates and closes nothing. A report too long for an issue reaches it
+  cut, most severe rows first.
 - Exits non-zero **only** under `fail-on-vuln: true`: when an advisory at/above the floor exists,
   or when osv-scanner could not look (below).
 - **A scan that did not happen is not a clean one.** osv-scanner's run is judged on its exit status
@@ -213,6 +214,18 @@ Since **v1.18.0** the report is in three places, so a scheduled run's findings n
   word, and a dirty one went on to create one, a duplicate whenever an issue was open and the
   create went through. `linkcheck` already stopped there: its lookup runs under
   `bash -eo pipefail`, so a failed `gh issue list` ends the step before it creates or closes.
+- **A huge report still reaches the issue (v1.29.4).** GitHub refuses an issue or comment body over
+  65,536 characters, and past 128 KiB Linux will not start `gh` with it. Every advisory at or above
+  the floor is a row of its own, so until v1.29.4 a tree carrying the most — past ~400 rows at a
+  typical 160 bytes, ~240 at the widest (an old JS lockfile, or `severity-floor: LOW`) — got a
+  green run, `failed to open tracking issue` in the block, and no issue. A body over 60,000 bytes
+  keeps the report's head, the table's header rows included, and as many whole rows as fit,
+  CRITICAL first, then HIGH, MODERATE, LOW (the order the report lists them in), then the rest of
+  the report, and ends with `(truncated — N more rows; the full report is in the run log: <run
+  URL>)`. The cap counts bytes, so a Greek path only makes it stricter. The job log carries every
+  row whatever the size, and a body under the cap is posted byte for byte as before, as an issue
+  or a comment. Known limit: a head over the cap on its own — hundreds of lockfiles under
+  `lockfiles scanned` — is still refused, and the block says so.
 - **A scan that could not look.** When osv-scanner could not look (see
   [What it does](#what-it-does)), the scanner notes name why, with osv-scanner's own exit and error
   line — `osv-scanner could not look — exit 129: <its last stderr line>` — the report reads
@@ -343,6 +356,21 @@ assertions turns red under at least one of 17 targeted mutants, all of which tur
 actions now read on every `osv-version` bump: a truncated `package-lock.json` is no verdict naming
 the extraction error, a valid one with no dependency passes, and a `bun.lockb` alone is no verdict
 naming it.
+
+**Issue-body legs (v1.29.4).** The real `scan.mjs` opens the issue through a stub `gh` that keeps
+the exact `--body` and refuses one over 65,536 bytes, as GitHub refuses one over 65,536 characters
+(bytes are never fewer); the stub `osv-scanner` answers from a file (`OSV_STUB_FILE`), the report
+being too big for an environment variable. 900 advisories under `severity-floor: LOW`, handed over
+LOW first and every other one in a Greek-named directory (two bytes a letter): v1.29.3's body
+would be past 128 KiB; the issue opens with a body of at most 60,000 bytes — the lead, the report's
+head with the table's header rows, whole rows of the report's own from the top (every CRITICAL and
+HIGH, the cut inside MODERATE, no LOW), the rest of the report, and the note counting the rows left
+out with the run URL — and the first row left out would not have fit. The job log still carries
+all 900, and with #7 open the comment carries the same cut body. Three advisories post v1.29.3's
+body byte for byte, as an issue and as a comment; rows built to a v1.29.3 body of exactly 60,000
+bytes post it whole, and one byte more is cut; a report with no table goes whole. v1.29.3's
+`manageIssue` fails 11 of the 18 checks, and each of the 18 turns red under at least one of 25
+targeted mutants, all of which turn the self-test red.
 
 > The owner-set fixtures deliberately use **different** literals for the caller's owner and the
 > action's owner (`creme-ypsilon` vs `mvalasis`). The original fixture used the same literal for
