@@ -26,11 +26,18 @@ link to it would be — one re-check for a transient 5xx, a WAF fingerprint to
 REVIEW, an excluded path not at all — and counted once when it is also a link
 target (page_outcome_checks).
 
+And that the broken-links issue still gets posted when the report is huge
+(v1.29.2): a body over 60,000 bytes keeps the summary and as many whole rows as
+fit, FATAL first, and says how many it left out; one under that is posted
+byte-identical to before (issue_body_checks).
+
 Run: `python3 linkcheck/scripts/selftest.py`  (exit 0 = pass, 1 = a leak/regression)
 """
 import atexit
+import contextlib
 import http.server
 import importlib.util
+import io
 import os
 import re
 import shlex
@@ -689,13 +696,15 @@ def main():
 
     crash_guard_checks()
     crawl_floor_checks()
+    issue_body_checks(linkcheck)
 
     print()
     if FAILS:
         print(f"FAIL — {len(FAILS)} check(s) failed: {', '.join(FAILS)}")
         raise SystemExit(1)
     print("PASS — token scoping, sitemap pages graded on their own response, the "
-          "hostile-sitemap refusals, crash-guard attribution and the crawl-size floor hold.")
+          "hostile-sitemap refusals, crash-guard attribution, the crawl-size floor and "
+          "the issue-body cap hold.")
 
 
 def crash_guard_checks():
@@ -1035,6 +1044,262 @@ def crawl_floor_checks():
           "steps.floor.outputs.decision != 'collapsed'" in record_step)
     check("only a real verdict extends the baseline",
           "outputs.verdict == 'clean'" in record_step and "outputs.verdict == 'broken'" in record_step)
+
+
+def issue_body_checks(linkcheck, ay=None):
+    """The broken-links issue is still posted when the report is huge (v1.29.2).
+
+    GitHub refuses an issue or comment body over 65,536 characters, and past
+    128 KiB Linux will not even start `gh` with it (one argument is capped there).
+    The step is continue-on-error, so a report that long opened and commented
+    NOTHING. Since v1.29.1 every dead sitemap page is a row of its own, so a site
+    that goes down mid-crawl lists one row per page: the issue went missing exactly
+    when the breakage was largest.
+
+    The REAL `run:` body is executed, out of action.yml (or `ay`, the text a
+    mutation run feeds in), under GitHub's bash flags with `gh` and `date` stubbed.
+    Every report comes from the REAL linkcheck.main() with only its two fetches
+    replaced, so a change to the report's format meets the trimmer here, not as a
+    caller's missing issue.
+    """
+    print("\n# the issue body: under GitHub's limit, whole rows, FATAL first (v1.29.2)")
+    if ay is None:
+        ay = open(os.path.join(HERE, "..", "action.yml"), encoding="utf-8").read()
+    step = ay.split("- name: Open / update the broken-links issue\n")[1].split("\n    - name:")[0]
+    src = textwrap.dedent(step.split("      run: |\n", 1)[1])
+    check("the issue step's run: body was extracted, and runs as written (no ${{ }} in it)",
+          "gh issue create" in src and "${{" not in src)
+
+    repo, run_id, day = "example-org/example-site", "33911783576", "2026-10-12"
+    run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+    stubs = tempfile.mkdtemp(prefix="lc-selftest-gh.")
+    atexit.register(shutil.rmtree, stubs, True)
+    with open(os.path.join(stubs, "gh"), "w", encoding="utf-8") as f:
+        f.write(textwrap.dedent("""\
+            #!/usr/bin/env bash
+            # The calls the step makes. `issue list` answers $STUB_OPEN_ISSUE; create
+            # and comment record their verb and their exact --title and --body.
+            case "$1 $2" in
+              "issue list") [ -z "$STUB_OPEN_ISSUE" ] || printf '%s\\n' "$STUB_OPEN_ISSUE" ;;
+              "issue create"|"issue comment")
+                verb="$1 $2"; [ "$2" = comment ] && verb="$verb $3"
+                printf '%s' "$verb" > "$STUB_OUT/verb"
+                while [ $# -gt 0 ]; do
+                  case "$1" in
+                    --title) printf '%s' "$2" > "$STUB_OUT/title"; shift ;;
+                    --body) printf '%s' "$2" > "$STUB_OUT/body"; shift ;;
+                  esac
+                  shift
+                done ;;
+              *) echo "gh stub: unexpected call: $*" >&2; exit 1 ;;
+            esac
+            """))
+    with open(os.path.join(stubs, "date"), "w", encoding="utf-8") as f:
+        f.write(f"#!/bin/sh\necho {day}\n")     # the step's one `date -u +%Y-%m-%d`
+    for name in ("gh", "date"):
+        os.chmod(os.path.join(stubs, name), 0o755)
+
+    def post(report, open_issue=""):
+        """Run the step on `report`. Returns the gh verb, --title and --body it
+        posted, as bytes; None for a call never made."""
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "linkcheck-report.txt"), "w", encoding="utf-8") as f:
+                f.write(report)
+            out = os.path.join(td, "gh-calls")
+            os.mkdir(out)
+            subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", src],
+                           cwd=td, capture_output=True,
+                           env={"PATH": stubs + os.pathsep + os.environ.get("PATH", ""),
+                                # the runner's locale, where `wc -m` counts characters
+                                "LANG": "C.UTF-8",
+                                "GH_TOKEN": "x", "REPO": repo, "SERVER_URL": "https://github.com",
+                                "RUN_ID": run_id, "STUB_OUT": out, "STUB_OPEN_ISSUE": open_issue})
+            return tuple(open(os.path.join(out, n), "rb").read()
+                         if os.path.exists(os.path.join(out, n)) else None
+                         for n in ("verb", "title", "body"))
+
+    def report_of(pages, page_of, link_of=lambda url: (200, False)):
+        """The REAL linkcheck.main()'s report for `pages`, its fetches replaced:
+        page_of(url) -> (code, blocked, html), link_of(url) -> (code, blocked)."""
+        saved = linkcheck.fetch_html, linkcheck.status, sys.argv, os.getcwd()
+        tmp, out = tempfile.mkdtemp(prefix="lc-selftest-tmp."), io.StringIO()
+        try:
+            linkcheck.fetch_html, linkcheck.status = page_of, link_of
+            sys.argv = ["linkcheck.py", *pages]
+            os.chdir(tmp)                      # main() writes linkcheck-review.txt here
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    linkcheck.main()
+                except SystemExit:
+                    pass
+        finally:
+            linkcheck.fetch_html, linkcheck.status, sys.argv = saved[:3]
+            os.chdir(saved[3])
+            shutil.rmtree(tmp, True)
+        return out.getvalue()
+
+    # Bytes and characters part ways on a Greek URL, which is the point of using one.
+    page = "http://www.localhost/κατηγορία/ηλεκτρολογικό-υλικό/προϊόν-{:04d}/".format
+    ext = "https://ext-{0:03d}.example.org/σελίδα-{0:04d}/".format
+
+    def html(links):
+        return "<html>" + "".join(f'<a href="{u}">x</a>' for u in links) + "</html>"
+
+    def fenced(report):
+        """What the step fences: from the `=== link check` line on, as awk and $( ) cut it."""
+        m = re.search(r"^=== link check", report or "", re.M)
+        return report[m.start():].rstrip("\n") if m else "(report unavailable — open the run log)"
+
+    head = (f"The weekly full-site check found broken links on **{day}**.\n\nRun: {run_url}\n\n"
+            "This issue auto-closes when the next run is clean.\n\n```\n")
+
+    def v1290(report):
+        """v1.29.0's body for `report`: what any body under the cap must still be, to the byte."""
+        return (head + fenced(report) + "\n```").encode()
+
+    def rows(text):
+        """[(section title, row)] in order. A row is its `  [code] url` line and the
+        `      on: …` line under it; a line of either kind without its partner
+        comes back as (section, None)."""
+        found, section, lines, i = [], None, text.split("\n"), 0
+        while i < len(lines):
+            ln = lines[i]
+            if ln.startswith("  [") and i + 1 < len(lines) and lines[i + 1].startswith("      on: "):
+                found.append((section, ln + "\n" + lines[i + 1]))
+                i += 2
+                continue
+            if ln.startswith(" "):
+                found.append((section, None))
+            elif ln:
+                section = ln
+            i += 1
+        return found
+
+    def rank(section):
+        return {"FATAL": 0, "REVIEW": 1, "WARN": 2}.get((section or "").split(" ")[0], 3)
+
+    shape = re.compile(re.escape(head) + r"(.*)\n```\n\n\(truncated — (\d+) more rows; the full "
+                       r"report is in the run log: " + re.escape(run_url) + r"\)", re.S)
+
+    def capped(label, report, body):
+        """What every cut body owes, whatever the report. Returns the rows it kept."""
+        text = body.decode("utf-8") if body is not None else ""
+        check(f"{label}: an issue body was posted", body is not None)
+        check(f"{label}: …at most 60,000 bytes, so under GitHub's 65,536 characters",
+              body is not None and len(body) <= 60000 and len(text) <= 65536)
+        m = shape.fullmatch(text)
+        check(f"{label}: …the v1.29.0 wrapper and fence, then a note of how many rows it left "
+              "out and the run URL", m is not None)
+        if m is None:
+            return []
+        lines, left_out = m.group(1).split("\n"), int(m.group(2))
+        want, got = rows(fenced(report)), rows(m.group(1))
+        heads = {ln for ln in fenced(report).split("\n") if ln and not ln.startswith(" ")}
+        sections = {s for s, _ in want}
+        check(f"{label}: …the fence opens with the report's summary line",
+              lines[0] == fenced(report).split("\n")[0])
+        check(f"{label}: …only WHOLE rows, each one of the report's, none twice",
+              all(r is not None for _, r in got) and set(got) <= set(want)
+              and len(set(got)) == len(got))
+        check(f"{label}: …no line the report does not have", all(
+            not ln or ln.startswith(" ") or ln in heads for ln in lines))
+        check(f"{label}: …no section title without its first row", all(
+            i + 1 < len(lines) and lines[i + 1].startswith("  [")
+            for i, ln in enumerate(lines) if ln in sections))
+        check(f"{label}: …the rows kept are the report's first ones, FATAL then REVIEW then WARN",
+              got == sorted(want, key=lambda sr: rank(sr[0]))[:len(got)])
+        check(f"{label}: …kept + left out = every row ({len(got)} + {left_out} = {len(want)})",
+              len(got) + left_out == len(want))
+        check(f"{label}: …and it fills the room: within 600 bytes of 60,000 (a summary-only "
+              "body would pass every check above)", 60000 - len(body) < 600)
+        return got
+
+    # (1) THE BUG: the site goes down mid-crawl. One row per dead sitemap page,
+    #     ~180 KB of report, which v1.29.1 posted whole and GitHub refused.
+    pages = [page(i) for i in range(1500)]
+    live = {p: [ext(2 * i), ext(2 * i + 1)] for i, p in enumerate(pages[:12])}
+    down = {p: (404, 502, 0)[i % 3] for i, p in enumerate(pages)}     # 0: no response
+    report = report_of(pages, lambda u: (200, False, html(live[u])) if u in live
+                       else (down[u], False, ""), lambda u: (502, False))
+    check("site down mid-crawl, 1,488 dead pages: the whole report is over GitHub's 65,536 "
+          "characters (v1.29.1 posted no issue at all)", len(v1290(report).decode()) > 65536)
+    verb, title, body = post(report)
+    check("site down: it OPENS the issue, titled as before",
+          verb == b"issue create" and title == b"Weekly link check: broken links found")
+    got = capped("site down", report, body)
+    check("site down: the dead pages come first; the 24 WARN rows printed above them wait",
+          bool(got) and all(s.startswith("FATAL") for s, _ in got))
+    verb, _, comment = post(report, open_issue="17")
+    check("site down, an issue already open: it COMMENTS, with the same capped body",
+          verb == b"issue comment 17" and comment == body)
+
+    # (2) The report prints WARN first. A flood of flaky externals must not crowd
+    #     out the broken links the issue is about.
+    dead = [page(i) for i in range(100)]
+    hubs = {page(100 + k): [ext(j) for j in range(k, 630, 10)] for k in range(10)}
+    waf = {ext(j) for j in range(30)}
+    report = report_of(dead + list(hubs), lambda u: (200, False, html(hubs[u])) if u in hubs
+                       else (404, False, ""),
+                       lambda u: (403, True) if u in waf else (500, False))
+    want = rows(fenced(report))
+    warn = [r for s, r in want if s.startswith("WARN")]
+    check("WARN flood: 100 FATAL, 30 REVIEW and 600 WARN rows, the WARN ones printed first "
+          "and over 60,000 bytes on their own",
+          [len([r for s, r in want if rank(s) == k]) for k in range(3)] == [100, 30, 600]
+          and rank(want[0][0]) == 2 and len("\n".join(warn).encode()) > 60000)
+    got = capped("WARN flood", report, post(report)[2])
+    kept = [len([r for s, r in got if rank(s) == k]) for k in range(3)]
+    check(f"WARN flood: every FATAL and REVIEW row is kept, the cut falls inside WARN "
+          f"(kept {kept})", kept[:2] == [100, 30] and 0 < kept[2] < 600)
+
+    # (3) The cap counts BYTES, as the trimmer does: a Greek report GitHub would
+    #     count as under 60,000 characters is cut too, whatever the locale says.
+    report = report_of([page(i) for i in range(560)], lambda u: (404, False, ""))
+    size = v1290(report)
+    check("Greek report: under 60,000 characters, over 60,000 bytes",
+          len(size.decode()) < 60000 < len(size))
+    capped("Greek report", report, post(report)[2])
+
+    # (4) A report that fits is posted exactly as v1.29.0 posted it, on both paths.
+    report = report_of([page(7), page(8)], lambda u: (404, False, "") if u == page(7)
+                       else (200, False, html([ext(1)])), lambda u: (500, False))
+    check("small report: a FATAL row and a WARN row, Greek URLs",
+          [rank(s) for s, _ in rows(fenced(report))] == [2, 0])
+    verb, _, body = post(report)
+    check("small report: the new issue's body is v1.29.0's, byte for byte",
+          verb == b"issue create" and body == v1290(report))
+    verb, _, body = post(report, open_issue="17")
+    check("small report, an issue already open: the comment is v1.29.0's, byte for byte",
+          verb == b"issue comment 17" and body == v1290(report))
+    verb, _, body = post("")
+    check("a report with no summary line: v1.29.0's '(report unavailable — open the run "
+          "log)' body", verb == b"issue create" and body == v1290(""))
+
+    # (5) The boundary, both sides: n dead pages and one WARN row, a page's URL
+    #     padded until the v1.29.0 body is exactly 60,000 bytes, then one byte more.
+    #     One byte over costs the last row in posting order, the WARN one, and its
+    #     section title must go with it.
+    hub = page(9999)
+
+    def sized(n, pad):
+        pages = [page(i) for i in range(n)] + [hub]
+        pages[-2] += "x" * pad
+        return report_of(pages, lambda u: (200, False, html([ext(0)])) if u == hub
+                         else (404, False, ""), lambda u: (500, False))
+
+    n = (60000 - len(v1290(sized(1, 0)))) // (len(v1290(sized(2, 0))) - len(v1290(sized(1, 0))))
+    while n > 1 and len(v1290(sized(n, 0))) > 60000:
+        n -= 1
+    report = sized(n, 60000 - len(v1290(sized(n, 0))))
+    check("boundary: a real report built to a v1.29.0 body of exactly 60,000 bytes",
+          len(v1290(report)) == 60000)
+    check("boundary: exactly 60,000 bytes is posted whole, byte for byte",
+          post(report)[2] == v1290(report))
+    report = sized(n, 60001 - len(v1290(sized(n, 0))))
+    check("boundary: the same report one byte longer (60,001)", len(v1290(report)) == 60001)
+    got = capped("60,001 bytes", report, post(report)[2])
+    check(f"60,001 bytes: only the WARN row goes, its title with it; all {n} FATAL rows stay",
+          len(got) == n and all(rank(s) == 0 for s, _ in got))
 
 
 if __name__ == "__main__":

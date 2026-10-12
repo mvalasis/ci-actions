@@ -88,6 +88,18 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.29.2** *(tag not yet cut)* — `linkcheck` fix, no new input. The broken-links issue went missing when a run found the
+most: GitHub refuses an issue or comment body over 65,536 characters (and past 128 KiB Linux will not start `gh` with it), the
+issue step is `continue-on-error`, and since v1.29.1 every dead sitemap page is a row of its own, so a site that went down
+mid-crawl opened and commented nothing. A body over 60,000 bytes now keeps the summary line and as many whole rows as fit,
+FATAL first, then REVIEW, then WARN (the report prints WARN first, and a flood of flaky externals must not crowd out the broken
+links), and ends with `(truncated — N more rows; the full report is in the run log: <run URL>)`. The cap counts bytes, so a
+Greek URL only makes it stricter; a body under it is posted byte-identical to before. Touches the `Open / update the
+broken-links issue` step of `linkcheck/action.yml` and `selftest.py` (`issue_body_checks`: the real step body under GitHub's
+bash flags with `gh` stubbed, on reports from the real `linkcheck.main()`; the v1.29.1 step fails 11 of its checks, and 8
+mutants are each caught). **Caller-visible:** an oversized report now reaches the issue, cut as above; one under the cap
+reads as before.
+
 **v1.29.1** *(anchor `ff3ef80`; `v1` moved onto it 2026-10-12)* — `linkcheck` fix, no new input. A sitemap page's own response was never graded:
 `fetch_html()` returned the body of any response, a 404 or 500 page included, and only the links extracted from it were
 checked, so a dead page in the sitemap failed the run only if another crawled page linked to it (a theme's 404 template has
@@ -1632,6 +1644,14 @@ count: `=== link check: N checked (P sitemap pages + L other links/images) |
 F fatal | W warn | R review ===`. A dead page that belongs in the sitemap is a
 fix on the site; one that should be gone belongs out of the sitemap, not in
 the allow-list.
+
+### A huge report still reaches the issue (v1.29.2)
+
+GitHub refuses an issue or comment body over 65,536 characters. A body over
+60,000 bytes keeps the summary line and as many whole rows as fit, FATAL
+first, then REVIEW, then WARN, and ends with `(truncated — N more rows; the
+full report is in the run log: <run URL>)`. The run log holds every row
+whatever the size. A report under the cap is posted as before.
 
 ### A hostile sitemap is refused, not parsed
 

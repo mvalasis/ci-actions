@@ -276,12 +276,74 @@ runs:
         REPO: ${{ github.repository }}
         SERVER_URL: ${{ github.server_url }}
         RUN_ID: ${{ github.run_id }}
+      # GitHub refuses an issue or comment body over 65,536 characters, and past 128 KiB
+      # Linux will not even start `gh` with it (one argument is capped there). This step
+      # is continue-on-error, so a report that long opened and commented NOTHING: the
+      # notification failed exactly when the breakage was largest. Since v1.29.1 every
+      # dead sitemap page is a row of its own, so a site that goes down mid-crawl, or a
+      # stale sitemap, lists hundreds or thousands.
+      #
+      # So a body over 60,000 BYTES keeps the summary line and as many WHOLE rows as fit,
+      # FATAL first (then REVIEW, then WARN: a flood of flaky externals must not crowd out
+      # the broken links the issue is about), and ends with how many rows it left out and
+      # the run URL. Bytes are never fewer than characters, so a Greek URL only makes the
+      # cap safer. The run log holds every row whatever the size (the crawl step tees
+      # it); a body under the cap is posted byte-identical to before.
+      #
+      # selftest.py (issue_body_checks) executes this body as written, so it takes its
+      # inputs from `env:`, never from `${{ }}` inline.
       run: |
         TITLE="Weekly link check: broken links found"
         run_url="${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
         report="$(awk '/^=== link check/{p=1} p' linkcheck-report.txt 2>/dev/null)"
         [ -n "$report" ] || report="(report unavailable — open the run log)"
-        body="$(printf 'The weekly full-site check found broken links on **%s**.\n\nRun: %s\n\nThis issue auto-closes when the next run is clean.\n\n```\n%s\n```\n' "$(date -u +%Y-%m-%d)" "$run_url" "$report")"
+        day="$(date -u +%Y-%m-%d)"
+        body_of() {   # $1 the report, $2 a line under it ('' for none)
+          printf 'The weekly full-site check found broken links on **%s**.\n\nRun: %s\n\nThis issue auto-closes when the next run is clean.\n\n```\n%s\n```\n\n%s\n' "$day" "$run_url" "$1" "$2"
+        }
+        note() { printf '(truncated — %s more rows; the full report is in the run log: %s)' "$1" "$run_url"; }
+        nbytes() { printf '%s' "$1" | wc -c | tr -d ' '; }
+        body="$(body_of "$report" '')"
+        ceiling=60000
+        if [ "$(nbytes "$body")" -gt "$ceiling" ]; then
+          # What the report may take once the wrapper and the longest note are paid for.
+          room=$(( ceiling - $(nbytes "$(body_of '' "$(note 999999999)")") ))
+          # Prints the number of rows it left out, then the report cut to `room` bytes.
+          IFS= read -r -d '' fit <<'PY' || true
+        import sys
+        room = int(sys.argv[1])
+        lines = sys.stdin.buffer.read().rstrip(b"\n").split(b"\n")
+        head, blocks = lines[0], []              # blocks: [title, [row, ...]]; a row is its lines
+        for ln in lines[1:]:
+            if not ln.strip():
+                continue
+            if not ln.startswith(b" "):          # a section title, or the verdict line
+                blocks.append([ln, []])
+            elif ln.startswith(b"   ") and blocks and blocks[-1][1]:
+                blocks[-1][1][-1].append(ln)     # "      on: ..." belongs to the row above
+            else:
+                if not blocks:
+                    blocks.append([None, []])
+                blocks[-1][1].append([ln])       # "  [404] <url>" starts a row
+        rank = {b"FATAL": 0, b"REVIEW": 1, b"WARN": 2}
+        blocks.sort(key=lambda b: rank.get((b[0] or b"").split(b" ")[0], 3))
+        units = []                               # (lines, 1 if a row), in posting order
+        for title, rows in blocks:
+            lead = [b""] + ([title] if title is not None else [])
+            units += [((lead if i == 0 else []) + row, 1) for i, row in enumerate(rows)] or [(lead, 0)]
+        out, used, kept = [head], len(head), 0
+        for add, is_row in units:
+            cost = sum(1 + len(x) for x in add)
+            if used + cost > room:
+                break
+            out += add
+            used += cost
+            kept += is_row
+        sys.stdout.buffer.write(b"%d\n" % (sum(r for _, r in units) - kept) + b"\n".join(out))
+        PY
+          fitted="$(printf '%s\n' "$report" | python3 -c "$fit" "$room")"
+          body="$(body_of "${fitted#*$'\n'}" "$(note "${fitted%%$'\n'*}")")"
+        fi
         num="$(gh issue list -R "$REPO" --state open --search "$TITLE in:title" --json number,title --jq ".[] | select(.title==\"$TITLE\") | .number" | head -1)"
         if [ -n "$num" ]; then
           gh issue comment "$num" -R "$REPO" --body "$body" && echo "Commented on issue #$num"
