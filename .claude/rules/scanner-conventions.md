@@ -41,6 +41,14 @@ extension test matches and no file exists by that name, so the leg drops it and 
 `security-baseline/scripts/selftest.mjs` (a Greek-named file it must grade), as `wp-rest-gate-case`
 did in v1.25.0.
 
+**Output that grows with the caller's site is capped below GitHub's limits.** A step summary over
+1 MiB is dropped (the upload fails with an error annotation, so the run shows none), and an issue
+or comment body over 65,536 characters is refused. A report with one row per page or per finding
+gets a byte cap: whole rows, worst first, the verdict line kept, then how many rows were left out
+and the run URL; under the cap it stays byte-identical. Pin the cap with an executed selftest at
+exactly the cap and one byte over. Current implementation: `linkcheck/scripts/fit-report.py`
+(issue body at 60,000 bytes since v1.29.2, step summary at 900,000 since v1.29.3).
+
 **Known limit, not papered over:** for bash the crash-guard check matches any `trap … EXIT`, so a
 pure cleanup trap reads as a guard. A behavioural self-test that actually crashes the real
 entrypoint — not a static check — is what proves the guard fires. Mutation-test every new
