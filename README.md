@@ -88,6 +88,23 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.29.3** *(tag not yet cut)* — `linkcheck` fix, no new input. The step summary went missing on the same runs as v1.29.2's
+issue: GitHub refuses a step summary over 1 MiB (the upload fails with an error annotation and the run shows none), and since
+v1.29.1 every dead sitemap page is a row of its own, so a site that went down mid-crawl lost its summary exactly when it had the
+most to say. A summary over 900,000 bytes now gets the issue body's cut, from one shared `scripts/fit-report.py`: the summary
+line, as many whole rows as fit, FATAL first, then REVIEW, then WARN, then the verdict line and anything after it (a collapsed
+crawl's notice that the verdict is void), and `(truncated — N more rows; the full report is in the run log: <run URL>)`. A
+summary under the cap is written byte-identical to before, and a fault in the cut costs only the summary: a `::warning::`, the
+step's own exit code kept. Also: the floor step's summary line was `_crawl-floor: $d_`, and bash reads `$d_` as the unset
+variable `d_`, so since v1.13.0 it never named the decision; it now reads `_crawl-floor: collapsed_` (or `ok`, …). Touches three
+steps of `linkcheck/action.yml` (the crawl, the floor and the issue step, whose inline trimmer moved into the new
+`linkcheck/scripts/fit-report.py`) and `selftest.py`: `step_summary_checks` runs the real crawl step under GitHub's bash flags, a
+stub crawler printing reports from the real `linkcheck.main()`, with the env its own `env:` block declares, and
+`crawl_floor_checks` now runs the real floor step. The v1.29.2 action fails 26 of these checks (17 summary, 5 floor, 4 issue
+body), and 65 mutants are each caught. **Caller-visible:** an oversized report now gets a summary, cut as above, where it got
+none; one under the cap reads as before. A cut issue body now also ends with the verdict line, `link check: FAIL`, and the
+floor step's summary names its decision.
+
 **v1.29.2** *(anchor `fa770f4`; `v1` moved onto it 2026-10-12)* — `linkcheck` fix, no new input. The broken-links issue went missing when a run found the
 most: GitHub refuses an issue or comment body over 65,536 characters (and past 128 KiB Linux will not start `gh` with it), the
 issue step is `continue-on-error`, and since v1.29.1 every dead sitemap page is a row of its own, so a site that went down
@@ -1645,13 +1662,16 @@ F fatal | W warn | R review ===`. A dead page that belongs in the sitemap is a
 fix on the site; one that should be gone belongs out of the sitemap, not in
 the allow-list.
 
-### A huge report still reaches the issue (v1.29.2)
+### A huge report still reaches the issue and the summary (v1.29.2, v1.29.3)
 
-GitHub refuses an issue or comment body over 65,536 characters. A body over
-60,000 bytes keeps the summary line and as many whole rows as fit, FATAL
-first, then REVIEW, then WARN, and ends with `(truncated — N more rows; the
-full report is in the run log: <run URL>)`. The run log holds every row
-whatever the size. A report under the cap is posted as before.
+GitHub refuses an issue or comment body over 65,536 characters, and a step
+summary over 1 MiB. A body over 60,000 bytes, or a summary over 900,000,
+keeps the summary line and as many whole rows as fit, FATAL first, then
+REVIEW, then WARN, then the verdict line and anything after it (on a
+collapsed crawl, the notice that the verdict is void), and ends with
+`(truncated — N more rows; the full report is in the run log: <run URL>)`.
+The run log holds every row whatever the size. A report under the caps is
+posted as before.
 
 ### A hostile sitemap is refused, not parsed
 
@@ -1683,7 +1703,9 @@ proves a condition exists and never that it fires. `linkcheck-selftest.yml`'s
 `issue-lifecycle` job adds the server-side half: its COLLAPSED pass crawls the
 **same one-page clean fixture as the CLEAN pass** and differs only in the
 baseline file, so a broken floor does not fail quietly — it closes the issue,
-which is the production defect itself.
+which is the production defect itself. The **issue-body and step-summary
+caps** (v1.29.2, v1.29.3) are pinned the same way: the real issue and crawl
+`run:` bodies, on reports from the real `linkcheck.main()`.
 
 ### Exit codes, and why the issue lifecycle keys on them
 

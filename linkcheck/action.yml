@@ -118,7 +118,9 @@ runs:
              echo "crawl-floor: no decision token was produced — treating as unjudged" ;;
         esac
         echo "decision=$d" >> "$GITHUB_OUTPUT"
-        { echo "_crawl-floor: $d_"; cat floor.err; } >> "$GITHUB_STEP_SUMMARY"
+        # ${d}, never $d_: `_` is a name character, so bash reads `$d_` as the unset
+        # variable d_, and from v1.13.0 to v1.29.2 this line never named the decision.
+        { echo "_crawl-floor: ${d}_"; cat floor.err; } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Crawl + check every link & image
       id: crawl
@@ -133,6 +135,11 @@ runs:
         # the decision set directly. The 2026-09-04 bug shipped because the
         # assertions could only read the wiring, never run it.
         LINKCHECK_FLOOR_DECISION: ${{ steps.floor.outputs.decision }}
+        # The step summary's cut (see its comment at the end of the body).
+        FIT_REPORT: ${{ github.action_path }}/scripts/fit-report.py
+        REPO: ${{ github.repository }}
+        SERVER_URL: ${{ github.server_url }}
+        RUN_ID: ${{ github.run_id }}
       # The crawl publishes a step OUTPUT so the issue steps below can tell a link
       # VERDICT from a tool FAULT — `failure()` cannot, and keying on it is what used
       # to file a false "broken links found" issue whenever our own crawler died.
@@ -215,7 +222,32 @@ runs:
         # so the file is the only oracle available to the issue-lifecycle self-test.
         # Inert for real callers: one 7-byte file in the workspace.
         printf '%s\n' "$verdict" > linkcheck-verdict.txt
-        { echo '## Weekly full-site link & image check'; echo; echo '```'; cat linkcheck-report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        # GitHub refuses a step summary over 1 MiB: the upload is aborted with an error
+        # annotation. Since v1.29.1 every dead sitemap page is a row of its own, so a site
+        # that went down mid-crawl (~7,000+ rows) lost its summary exactly when it had the
+        # most to say. A summary over 900,000 BYTES gets the issue body's cut
+        # (scripts/fit-report.py): the summary line, as many whole rows as fit, FATAL
+        # first, then REVIEW, then WARN, the verdict line and anything after it (a
+        # collapsed crawl's notice), then how many rows it left out and the run URL. Under
+        # the cap the summary is byte-identical to before; the run log above holds every
+        # row whatever the size, and linkcheck-report.txt stays whole for the issue step.
+        # The cut runs inside an `if`: a summary must never cost the step its exit code.
+        whole_summary() { echo '## Weekly full-site link & image check'; echo; echo '```'; cat linkcheck-report.txt; echo '```'; }
+        cut_summary() {   # $1 the cut report, $2 the note under it
+          printf '## Weekly full-site link & image check\n\n```\n%s\n```\n\n%s\n' "$1" "$2"
+        }
+        note() { printf '(truncated — %s more rows; the full report is in the run log: %s)' "$1" "${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"; }
+        cap=900000
+        if [ "$(whole_summary | wc -c | tr -d ' ')" -le "$cap" ]; then
+          whole_summary >> "$GITHUB_STEP_SUMMARY"
+        else
+          room=$(( cap - $(cut_summary '' "$(note 999999999)" | wc -c) ))
+          if fitted="$(awk '/^=== link check/{p=1} p' linkcheck-report.txt | python3 "$FIT_REPORT" "$room")"; then
+            cut_summary "${fitted#*$'\n'}" "$(note "${fitted%%$'\n'*}")" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::linkcheck: the report is over the step summary's limit and could not be cut, so it has no summary; the run log holds every row"
+          fi
+        fi
         exit "$rc"
 
     # Only a run we TRUST extends the history: a real verdict (the crawl ran to a
@@ -276,6 +308,7 @@ runs:
         REPO: ${{ github.repository }}
         SERVER_URL: ${{ github.server_url }}
         RUN_ID: ${{ github.run_id }}
+        FIT_REPORT: ${{ github.action_path }}/scripts/fit-report.py
       # GitHub refuses an issue or comment body over 65,536 characters, and past 128 KiB
       # Linux will not even start `gh` with it (one argument is capped there). This step
       # is continue-on-error, so a report that long opened and commented NOTHING: the
@@ -285,10 +318,11 @@ runs:
       #
       # So a body over 60,000 BYTES keeps the summary line and as many WHOLE rows as fit,
       # FATAL first (then REVIEW, then WARN: a flood of flaky externals must not crowd out
-      # the broken links the issue is about), and ends with how many rows it left out and
-      # the run URL. Bytes are never fewer than characters, so a Greek URL only makes the
-      # cap safer. The run log holds every row whatever the size (the crawl step tees
-      # it); a body under the cap is posted byte-identical to before.
+      # the broken links the issue is about), and the verdict line, and ends with how many
+      # rows it left out and the run URL. Bytes are never fewer than characters, so a
+      # Greek URL only makes the cap safer. The run log holds every row whatever the size
+      # (the crawl step tees it); a body under the cap is posted byte-identical to before.
+      # The cut is scripts/fit-report.py, which also cuts the crawl step's summary.
       #
       # selftest.py (issue_body_checks) executes this body as written, so it takes its
       # inputs from `env:`, never from `${{ }}` inline.
@@ -309,39 +343,7 @@ runs:
           # What the report may take once the wrapper and the longest note are paid for.
           room=$(( ceiling - $(nbytes "$(body_of '' "$(note 999999999)")") ))
           # Prints the number of rows it left out, then the report cut to `room` bytes.
-          IFS= read -r -d '' fit <<'PY' || true
-        import sys
-        room = int(sys.argv[1])
-        lines = sys.stdin.buffer.read().rstrip(b"\n").split(b"\n")
-        head, blocks = lines[0], []              # blocks: [title, [row, ...]]; a row is its lines
-        for ln in lines[1:]:
-            if not ln.strip():
-                continue
-            if not ln.startswith(b" "):          # a section title, or the verdict line
-                blocks.append([ln, []])
-            elif ln.startswith(b"   ") and blocks and blocks[-1][1]:
-                blocks[-1][1][-1].append(ln)     # "      on: ..." belongs to the row above
-            else:
-                if not blocks:
-                    blocks.append([None, []])
-                blocks[-1][1].append([ln])       # "  [404] <url>" starts a row
-        rank = {b"FATAL": 0, b"REVIEW": 1, b"WARN": 2}
-        blocks.sort(key=lambda b: rank.get((b[0] or b"").split(b" ")[0], 3))
-        units = []                               # (lines, 1 if a row), in posting order
-        for title, rows in blocks:
-            lead = [b""] + ([title] if title is not None else [])
-            units += [((lead if i == 0 else []) + row, 1) for i, row in enumerate(rows)] or [(lead, 0)]
-        out, used, kept = [head], len(head), 0
-        for add, is_row in units:
-            cost = sum(1 + len(x) for x in add)
-            if used + cost > room:
-                break
-            out += add
-            used += cost
-            kept += is_row
-        sys.stdout.buffer.write(b"%d\n" % (sum(r for _, r in units) - kept) + b"\n".join(out))
-        PY
-          fitted="$(printf '%s\n' "$report" | python3 -c "$fit" "$room")"
+          fitted="$(printf '%s\n' "$report" | python3 "$FIT_REPORT" "$room")"
           body="$(body_of "${fitted#*$'\n'}" "$(note "${fitted%%$'\n'*}")")"
         fi
         num="$(gh issue list -R "$REPO" --state open --search "$TITLE in:title" --json number,title --jq ".[] | select(.title==\"$TITLE\") | .number" | head -1)"
