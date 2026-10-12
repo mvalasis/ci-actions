@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.29.1** *(tag not yet cut)* — `linkcheck` fix, no new input. A sitemap page's own response was never graded:
+**v1.29.1** *(anchor `ff3ef80`; `v1` moved onto it 2026-10-12)* — `linkcheck` fix, no new input. A sitemap page's own response was never graded:
 `fetch_html()` returned the body of any response, a 404 or 500 page included, and only the links extracted from it were
 checked, so a dead page in the sitemap failed the run only if another crawled page linked to it (a theme's 404 template has
 working nav). Each sitemap page now gets the verdict a link to it would get: internal 404/410/500/502/504/no response FATAL,
