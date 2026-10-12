@@ -2,8 +2,9 @@
 """Full-site link / image / outbound checker (curl-based, robust).
 
 Reads page URLs (CLI args, or one-per-line on stdin), fetches each with
-curl, extracts every <a href> and <img src>, dedupes the targets across
-all pages, and checks each unique URL once.
+curl, grades each page's own response, extracts every <a href> and
+<img src>, dedupes the targets across all pages, and checks each unique
+URL once — a page that is also a link target is graded on its own fetch.
 
 Why curl and not a Rust/Go link checker: lychee 0.24.2 hard-panics on
 CF/Kinsta edges when a connection closes without a TLS close_notify
@@ -25,7 +26,7 @@ Configure via environment:
 
 Exit status:
   0  no fatal breakage
-  1  one or more fatal broken links/images
+  1  one or more fatal broken links/images/pages
 
 Policy (tuned so external rot never cries wolf on a weekly cron):
   * INTERNAL link/image not OK            -> FATAL (our own site must work)
@@ -33,6 +34,8 @@ Policy (tuned so external rot never cries wolf on a weekly cron):
   * EXTERNAL anything else not OK         -> WARN  (timeout / 5xx / no-conn)
   * ANY response with a WAF fingerprint   -> REVIEW (status untrusted: a block
                                                     or challenge, not a verdict)
+  * a SITEMAP PAGE's own response         -> graded exactly as a link to it
+                                             would be, reported `on: sitemap`
   OK = 2xx/3xx, or an "alive but blocking" code (401/403/429/503/999).
 
 REVIEW URLs (WAF-fronted, status unknowable from a datacenter IP) are written
@@ -217,12 +220,28 @@ def _follow(start_url, method, body_path=None):
 
 
 def fetch_html(url):
+    """GET a sitemap page. Returns (code, blocked, html): the page's OWN outcome in
+    status()'s terms — final code after the redirect chain (0 = no response) and
+    whether any hop carried a WAF fingerprint — plus the final body to extract
+    links from ('' with no response).
+
+    Until v1.29.1 this returned the body of ANY response and nothing else, so a
+    sitemap page that 404s or 500s was never graded: it failed the run only if
+    another page happened to link to it, and a theme's 404 template has working
+    nav. The page now gets the verdict a link to it would get, so it also gets
+    status()'s one re-check for a transient edge 5xx — a GET, since the body is
+    needed anyway."""
     with tempfile.NamedTemporaryFile(suffix=".html") as tf:
-        code, _ = _follow(url, [], body_path=tf.name)
+        code, hdrs = _follow(url, [], body_path=tf.name)
+        if code in (0, 500, 502, 503, 504):
+            r_code, r_hdrs = _follow(url, [], body_path=tf.name)
+            if r_code:
+                code, hdrs = r_code, r_hdrs
+        blocked = bool(WAF_BLOCK_RE.search(hdrs))
         if not code:                       # transport failure, no HTTP response
-            return ""
+            return 0, blocked, ""
         tf.seek(0)
-        return tf.read().decode("utf-8", "ignore")
+        return code, blocked, tf.read().decode("utf-8", "ignore")
 
 
 def extract(page_url, page_html):
@@ -291,14 +310,24 @@ def main():
     print(f"Crawling {len(pages)} pages with {WORKERS} workers...", file=sys.stderr)
 
     targets = {}  # url -> set(source pages)
+    results = {}  # url -> (code, blocked): each sitemap page's own fetch, then each link's
+    # A sitemap page's own response is graded like a link to it — an EXCLUDE path
+    # not at all, as extract() never checks one — so a page that 404s or 500s fails
+    # the run even when nothing links to it.
     with concurrent.futures.ThreadPoolExecutor(WORKERS) as ex:
-        for page, html in zip(pages, ex.map(fetch_html, pages)):
+        for page, (code, blocked, html) in zip(pages, ex.map(fetch_html, pages)):
+            if not EXCLUDE.search(page):
+                results[page] = (code, blocked)
             for u in extract(page, html):
                 targets.setdefault(u, set()).add(page)
-    print(f"Checking {len(targets)} unique links/images...", file=sys.stderr)
+    graded_pages = set(results)
+    # A page that is also a link target already has its answer: one URL, one
+    # request, one row in the report.
+    links = [u for u in targets if u not in graded_pages]
+    print(f"Checking {len(links)} more unique links/images...", file=sys.stderr)
 
     with concurrent.futures.ThreadPoolExecutor(WORKERS) as ex:
-        results = dict(zip(targets, ex.map(status, targets)))  # url -> (code, blocked)
+        results.update(zip(links, ex.map(status, links)))
 
     fatal, warn, review = [], [], []
     for url, (code, blocked) in sorted(results.items()):
@@ -313,9 +342,9 @@ def main():
     def show(title, rows):
         print(f"\n{title} ({len(rows)})")
         for url, code in rows:
-            src = next(iter(targets[url]))
-            n = len(targets[url])
-            where = f"{src}" + (f" (+{n - 1} more)" if n > 1 else "")
+            srcs = sorted(targets.get(url, ()))
+            where = ", ".join((["sitemap"] if url in graded_pages else []) + srcs[:1])
+            where += f" (+{len(srcs) - 1} more)" if len(srcs) > 1 else ""
             print(f"  [{code or 'conn-fail'}] {url}\n      on: {where}")
 
     # REVIEW queue: URLs whose CI status can't be trusted (WAF-fronted). Written
@@ -325,7 +354,8 @@ def main():
         with open("linkcheck-review.txt", "w", encoding="utf-8") as f:
             f.write("\n".join(url for url, _ in review) + "\n")
 
-    print(f"\n=== link check: {len(targets)} checked | "
+    print(f"\n=== link check: {len(results)} checked ({len(graded_pages)} sitemap pages + "
+          f"{len(links)} other links/images) | "
           f"{len(fatal)} fatal | {len(warn)} warn | {len(review)} review ===")
     if warn:
         show("WARN (external, non-fatal)", warn)

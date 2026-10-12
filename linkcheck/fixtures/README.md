@@ -10,7 +10,7 @@ weeks closing its own broken-links issue on every run that found broken links.
 
 | pass | sitemap | host | crawler | verdict | the action must |
 |---|---|---|---|---|---|
-| broken | `sitemap_index.xml` → `broken.html` | `127.0.0.1` | rc 1 | `broken` | OPEN the issue |
+| broken | `sitemap_index.xml` → `broken.html` + `gone.html` | `127.0.0.1` | rc 1 | `broken` | OPEN the issue |
 | fault | `sitemap_index_clean.xml` | *(empty)* | rc 2 | `fault` | do NOTHING |
 | unset | `no-such-sitemap.xml` | `127.0.0.1` | never runs | *(null)* | do NOTHING |
 | clean | `sitemap_index_clean.xml` → `clean.html` | `127.0.0.1` | rc 0 | `clean` | CLOSE the issue |
@@ -25,6 +25,12 @@ The bogus sitemap makes `sitemap-urls.py` yield zero URLs, so `action.yml`'s
 `[ "$N" -gt 0 ]` aborts the composite **before** the crawl step, which is what makes
 `steps.crawl.outputs.verdict` genuinely null. Its oracle is the **absence** of
 `linkcheck-verdict.txt` (the crawl step deletes that file on entry and writes it on exit).
+
+The broken pass fails twice over, and the job asserts each by name: `broken.html` links to a
+page that does not exist, and `gone.html` is listed in the sitemap but deliberately absent, so
+the page itself 404s and is reported `on: sitemap` (v1.29.1). A sitemap page that 500s is graded
+offline instead, in `scripts/selftest.py` (`page_outcome_checks`): `python3 -m http.server`
+cannot serve a 500.
 
 ## Two rules when editing these fixtures
 

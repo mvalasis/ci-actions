@@ -1,9 +1,10 @@
 name: 'Full-site link & image check'
 description: >-
   Curl-based broken-link / image / outbound crawl of a WordPress site,
-  driven by its Rank Math sitemap. A broken internal link/image or a dead
-  outbound (404/410) fails the step; flaky externals are non-fatal. Can
-  open and auto-close a GitHub issue with the broken-link report.
+  driven by its Rank Math sitemap. A broken internal link/image, a sitemap
+  page that itself 404s/500s, or a dead outbound (404/410) fails the step;
+  flaky externals are non-fatal. Can open and auto-close a GitHub issue
+  with the broken-link report.
 
 inputs:
   sitemap-url:

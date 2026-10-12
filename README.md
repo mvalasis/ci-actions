@@ -88,6 +88,20 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.29.1** *(tag not yet cut)* — `linkcheck` fix, no new input. A sitemap page's own response was never graded:
+`fetch_html()` returned the body of any response, a 404 or 500 page included, and only the links extracted from it were
+checked, so a dead page in the sitemap failed the run only if another crawled page linked to it (a theme's 404 template has
+working nav). Each sitemap page now gets the verdict a link to it would get: internal 404/410/500/502/504/no response FATAL,
+listed `on: sitemap`; 401/403/429/503 alive; a WAF fingerprint to REVIEW; one re-check on a transient 5xx; an excluded path not
+graded; the allow-list honoured. A page that is also a link target is fetched and listed once (`on: sitemap, <page> (+N
+more)`): one request where it used to take two. The summary line splits its count, `N checked (P sitemap pages + L
+other links/images)`, and the issue body still starts at `=== link check`. Touches `linkcheck/scripts/linkcheck.py`,
+`selftest.py` (`page_outcome_checks`: 19 checks red on the old crawler, 7 mutants each caught), the fixture sitemap
+(`gone.html`, deliberately absent) and the `issue-lifecycle` broken pass, which now asserts `gone.html` is reported `on:
+sitemap` (red on the old crawler, rehearsed locally); `crawl-floor.py` is unchanged, as it counts the sitemap step's page
+list. **Caller-visible:** a caller whose sitemap lists a dead page goes red on its next run, naming that page `on:
+sitemap`. The `v1` move can newly-block such a caller, which is the point of the fix.
+
 **v1.29.0** *(anchor `0a561bc`; `v1` moved onto it 2026-10-08)* — `seo-aeo` gains an **agent-readiness** layer, and a new action, **`agent-benchmark`**.
 After the site files, each origin gets a `### Agent readiness` block: does a browsing agent or an agent-readiness scanner
 find what it looks for? Markdown negotiation (`Accept: text/markdown` on `/`, and on a random path that must 404), robots.txt
@@ -1500,11 +1514,12 @@ version bump and no `v1` tag move**.
 
 Curl-based (not lychee — lychee 0.24.2 hard-panics on CF/Kinsta edges that
 close a connection without a TLS `close_notify`). Expands a Rank Math
-`sitemap_index.xml`, fetches every page, checks every `<a href>` and
-`<img src>` once. A broken **internal** link/image or a clearly-dead
-**outbound** (404/410) fails the run; flaky externals (timeout / 5xx /
-bot-block) are reported but non-fatal. Optionally opens and auto-closes a
-GitHub issue with the report.
+`sitemap_index.xml`, fetches every page, grades each page's own response
+as it would a link to it, and checks every `<a href>` and `<img src>` once.
+A broken **internal** link/image, a sitemap page that itself 404s or 500s,
+or a clearly-dead **outbound** (404/410) fails the run; flaky externals
+(timeout / 5xx / bot-block) are reported but non-fatal. Optionally opens and
+auto-closes a GitHub issue with the report.
 
 ### Use it
 
@@ -1595,6 +1610,29 @@ Keep a `scripts/linkcheck-allow.txt` in each caller repo (one URL per line,
 genuinely-low-value legacy cruft, never to hide a real outage. It is read
 from **your** checkout, not from this action.
 
+### A dead sitemap page is a finding (v1.29.1)
+
+Until v1.29.1 each sitemap page was fetched only for its links. A page that
+404'd or 500'd was never graded itself: it failed the run only if another
+crawled page happened to link to it, and a theme's 404 template has working
+nav. Each sitemap page's own response now gets the verdict a link to it would
+get:
+
+- internal 404 / 410 / 500 / 502 / 504 (any other non-2xx/3xx) or no
+  response → **FATAL**, listed `on: sitemap`;
+- 401 / 403 / 429 / 503 / 999 → alive, as for a link;
+- a WAF fingerprint → **REVIEW** (`linkcheck-review.txt`), never FATAL;
+- one re-check on no response or a 500 / 502 / 503 / 504;
+- an excluded path (`/cart/`, `/checkout/`, `/wp-admin`…) is fetched for its
+  links but not graded, and an `allow-file` entry counts as OK here too.
+
+A page that is also a link target is fetched once and listed once, as
+`on: sitemap, <first linking page> (+N more)`. The summary line splits the
+count: `=== link check: N checked (P sitemap pages + L other links/images) |
+F fatal | W warn | R review ===`. A dead page that belongs in the sitemap is a
+fix on the site; one that should be gone belongs out of the sitemap, not in
+the allow-list.
+
 ### A hostile sitemap is refused, not parsed
 
 A sitemap body can come from any host your index or a redirect names. `sitemap-urls.py`
@@ -1636,7 +1674,7 @@ a **verdict** apart from a **fault**:
 | exit | meaning | issue lifecycle |
 | --- | --- | --- |
 | `0` | crawled clean | close the tracking issue |
-| `1` | crawled, found broken links | open / comment on it |
+| `1` | crawled, found broken links/images or a dead sitemap page | open / comment on it |
 | `2` | **could not crawl** — the tool faulted, `LINKCHECK_HOST` is unset, or the page set **collapsed** (v1.13.0) | do **neither** |
 
 Before v1.12.0 the issue steps keyed on `failure()`, which cannot see the

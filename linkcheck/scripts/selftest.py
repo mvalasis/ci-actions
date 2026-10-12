@@ -20,6 +20,12 @@ And that a hostile sitemap cannot exhaust the machine parsing it (v1.16.1): a
 DOCTYPE is refused inside expat before ElementTree runs, and the body is capped at
 the protocol's 50 MB as read and as gunzipped (hostile_sitemap_checks).
 
+And that a sitemap page's OWN response is a verdict (v1.29.1): one that 404s or
+500s fails the run named `on: sitemap` even when nothing links to it, graded as a
+link to it would be — one re-check for a transient 5xx, a WAF fingerprint to
+REVIEW, an excluded path not at all — and counted once when it is also a link
+target (page_outcome_checks).
+
 Run: `python3 linkcheck/scripts/selftest.py`  (exit 0 = pass, 1 = a leak/regression)
 """
 import atexit
@@ -44,6 +50,14 @@ EXT_PORT = 0   # the "external" host (127.0.0.1) — must NEVER receive the toke
 
 REC = []                       # [{server, method, path, token}]
 REC_LOCK = threading.Lock()
+FLAPPED = set()                # /sm/flaky* paths that have served their one transient 502
+
+
+def _first_hit(path):
+    with REC_LOCK:
+        first = path not in FLAPPED
+        FLAPPED.add(path)
+        return first
 
 
 def _record(server, handler):
@@ -64,6 +78,16 @@ def _make_handler(label):
         def _ok(self, body):
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def _status(self, code, body, extra=()):
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html")
+            for k, v in extra:
+                self.send_header(k, v)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             if self.command != "HEAD":
@@ -112,6 +136,26 @@ def _make_handler(label):
                           f'schemas/sitemap/0.9"><sitemap><loc>http://localhost:{INT_PORT}/'
                           f'dtd-child.xml</loc></sitemap><sitemap><loc>http://localhost:{INT_PORT}'
                           '/sitemap.xml</loc></sitemap></sitemapindex>').encode())
+            elif p.startswith("/sm/"):       # sitemap PAGES graded on their own response (v1.29.1)
+                # Every body carries the same working nav link, as a theme's 404 or
+                # error template does, so only the page's own status can fail it.
+                nav = f'<html><a href="http://a.localhost:{INT_PORT}/int-landing">home</a>'
+                if p == "/sm/home":
+                    self._ok((nav + "</html>").encode())
+                elif p == "/sm/links-to-404":   # links to a page the sitemap ALSO lists
+                    self._ok((nav + f'<a href="http://a.localhost:{INT_PORT}/sm/linked-404">'
+                              'x</a></html>').encode())
+                elif p in ("/sm/404", "/sm/linked-404"):
+                    self._status(404, (nav + "</html>").encode())
+                elif p in ("/sm/500", "/sm/cart/"):   # /cart/ is an EXCLUDE path
+                    self._status(500, (nav + "</html>").encode())
+                elif p.startswith("/sm/flaky"):  # one transient edge 502 per path, then 200
+                    self._status(502 if _first_hit(p) else 200, (nav + "</html>").encode())
+                elif p == "/sm/waf":             # a Cloudflare challenge on our own page
+                    self._status(403, b"<html>Just a moment...</html>",
+                                 [("cf-mitigated", "challenge")])
+                else:
+                    self._status(404, b"<html>no such fixture</html>")
             elif p == "/dtd-child.xml":      # a HARMLESS entity: only the refusal keeps its URL out
                 self._ok(('<?xml version="1.0"?><!DOCTYPE urlset [<!ENTITY u "http://localhost:'
                           f'{INT_PORT}/from-a-dtd">]><urlset xmlns="http://www.sitemaps.org/'
@@ -143,6 +187,20 @@ def _load(name, filename):
 
 def _tokens(server):
     return {r["token"] for r in REC if r["server"] == server}
+
+
+def _page(linkcheck, url):
+    """fetch_html()'s (code, blocked, html). Any other shape comes back as
+    (None, None, html), so a regression reads as failed checks, not a traceback
+    that hides every check after it."""
+    r = linkcheck.fetch_html(url)
+    if isinstance(r, tuple) and len(r) == 3:
+        return r
+    return None, None, r if isinstance(r, str) else ""
+
+
+def _hits(path, method):
+    return sum(1 for r in REC if r["path"] == path and r["method"] == method)
 
 
 SHIM_LOG = ""
@@ -314,6 +372,94 @@ def extraction_checks(linkcheck):
           a_of('<use xlink:href="#icon-badResponse"/>') == [])
 
 
+def page_outcome_checks(linkcheck):
+    """A sitemap page's OWN response is a verdict (v1.29.1).
+
+    main() fetched each sitemap page with fetch_html(), which returned the body of
+    ANY response, a 404 or 500 page included, and graded only the links extracted
+    from that body. The page itself was never graded: a sitemap page that 404s or
+    500s failed the run only if some other crawled page happened to link to it,
+    and a theme's 404 template has working nav, so the dead page came back clean.
+
+    It is graded the way status() grades a link to it, so one URL gets one answer
+    whichever way the crawl reached it: one re-check for a transient edge 5xx, a
+    WAF fingerprint routed to REVIEW, an EXCLUDE path not graded, and a page that
+    is also a link target fetched and counted once.
+    """
+    print("linkcheck.py — a sitemap page's own response is graded like a link to it")
+    base = f"http://a.localhost:{INT_PORT}"
+
+    # --- fetch_html() returns the page's own outcome --------------------------
+    REC.clear()
+    code, blocked, html = _page(linkcheck, base + "/sm/404")
+    check("fetch_html 404 page: the page's own code comes back (404), not blocked",
+          code == 404 and blocked is False)
+    check("…and so does its body, so a 404 template's links are still crawled",
+          "int-landing" in html)
+    code, _, _ = _page(linkcheck, base + "/sm/500")
+    check("fetch_html 500 page: the page's own code comes back (500)", code == 500)
+    check("…after exactly one re-check, as status() gives a link (2 GETs)",
+          _hits("/sm/500", "GET") == 2)
+    code, _, _ = _page(linkcheck, base + "/sm/flaky-unit")
+    check("fetch_html: a transient edge 502 is re-checked, and the re-check's 200 stands",
+          code == 200)
+    _, blocked, _ = _page(linkcheck, base + "/sm/waf")
+    check("fetch_html: a WAF fingerprint on a page marks its status untrusted", blocked is True)
+    for path in ("/sm/404", "/sm/500", "/sm/waf"):
+        url = base + path
+        code, blocked, _ = _page(linkcheck, url)
+        check(f"{path}: the page's verdict is the one a link to it gets",
+              code is not None
+              and linkcheck.verdict(url, code, blocked) == linkcheck.verdict(url, *linkcheck.status(url)))
+
+    # --- end to end, through main() --------------------------------------------
+    def crawl(paths):
+        tmp = tempfile.mkdtemp(prefix="lc-selftest-tmp.")
+        REC.clear()
+        r = subprocess.run([sys.executable, os.path.join(HERE, "linkcheck.py"), "-"],
+                           input="".join(base + p + "\n" for p in paths), capture_output=True,
+                           text=True, cwd=tmp, env=dict(os.environ, TMPDIR=tmp))
+        rq = os.path.join(tmp, "linkcheck-review.txt")
+        review = open(rq, encoding="utf-8").read() if os.path.exists(rq) else ""
+        shutil.rmtree(tmp, True)
+        summary = next((ln for ln in r.stdout.splitlines() if ln.startswith("=== link check:")), "")
+        fatal = r.stdout.split("FATAL (broken)")[1] if "FATAL (broken)" in r.stdout else ""
+        return r, summary, fatal, review
+
+    def listed(section, code, path, on):
+        return re.search(rf"^  \[{code}\] {re.escape(base + path)}\n +on: {re.escape(on)}$",
+                         section, re.M) is not None
+
+    # THE BUG: two dead pages nothing links to, beside a healthy one. Before
+    # v1.29.1 this run PASSED, because no link on any of the bodies is broken.
+    r, summary, fatal, _ = crawl(["/sm/home", "/sm/404", "/sm/500", "/sm/cart/"])
+    check("THE BUG: a crawl whose only defect is two dead sitemap pages FAILS (exit 1)",
+          r.returncode == 1 and "link check: FAIL" in r.stdout)
+    check("…the page that 404s is FATAL, named `on: sitemap`", listed(fatal, 404, "/sm/404", "sitemap"))
+    check("…the page that 500s is FATAL, named `on: sitemap`", listed(fatal, 500, "/sm/500", "sitemap"))
+    check("…both are counted: 4 checked (3 graded pages + 1 link), 2 fatal",
+          "link check: 4 checked " in summary and "| 2 fatal |" in summary)
+    check("…a page on an EXCLUDE path (/cart/) is fetched for its links but never graded, "
+          "as a link to it would not be", _hits("/sm/cart/", "GET") >= 1 and "/sm/cart/" not in r.stdout)
+
+    # ONE URL, ONE ANSWER: a dead page that is also linked to, a page that 502s
+    # once, and a page behind a WAF challenge.
+    r, summary, fatal, review = crawl(["/sm/links-to-404", "/sm/linked-404", "/sm/flaky-e2e", "/sm/waf"])
+    check("a dead page that is ALSO a link target is listed once, naming the sitemap and the "
+          "page linking to it", r.stdout.count(f"] {base}/sm/linked-404\n") == 1
+          and listed(fatal, 404, "/sm/linked-404", f"sitemap, {base}/sm/links-to-404"))
+    check("…and fetched once, as a page: no second request as a link (HEAD)",
+          _hits("/sm/linked-404", "HEAD") == 0)
+    check("a page that 502s once is re-checked (2 GETs) and is not FATAL",
+          _hits("/sm/flaky-e2e", "GET") == 2 and f"{base}/sm/flaky-e2e" not in fatal)
+    check("a WAF-challenged page goes to REVIEW (linkcheck-review.txt), not FATAL",
+          f"{base}/sm/waf" in review.split() and f"{base}/sm/waf" not in fatal)
+    check("…each counted once: 5 checked (4 graded pages + 1 link), 1 fatal, 1 review",
+          "link check: 5 checked " in summary and "| 1 fatal |" in summary
+          and "| 1 review ===" in summary)
+    check("…and the one dead page still fails the run (exit 1)", r.returncode == 1)
+
+
 SM_NS = 'xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
 
 
@@ -475,8 +621,9 @@ def main():
 
     # 3) fetch_html follows the chain, returns the FINAL (external) body, no leak.
     REC.clear()
-    html = linkcheck.fetch_html(f"http://localhost:{INT_PORT}/to-external")
+    code, _, html = _page(linkcheck, f"http://localhost:{INT_PORT}/to-external")
     check("fetch_html int→ext: returned the final external body", "EXTERNAL-LANDING" in html)
+    check("fetch_html int→ext: …and the final hop's code (200)", code == 200)
     check("fetch_html int→ext: external host did NOT get the token", TOKEN not in _tokens("EXT"))
     check("fetch_html int→ext: internal hop carried the token", TOKEN in _tokens("INT"))
 
@@ -487,7 +634,7 @@ def main():
 
     # 4b) fetch_html transparently decompresses a Content-Encoding: gzip body
     #     (guards the --compressed flag) so extract() still sees the links.
-    html_gz = linkcheck.fetch_html(f"http://localhost:{INT_PORT}/gz-html")
+    _, _, html_gz = _page(linkcheck, f"http://localhost:{INT_PORT}/gz-html")
     check("fetch_html gzip: body was decompressed", "sub.localhost/gz-link" in html_gz)
     check("fetch_html gzip: extract() recovered the link",
           any("sub.localhost/gz-link" in u for u in
@@ -499,8 +646,9 @@ def main():
     REC.clear()
     loop_code, _ = linkcheck.status(f"http://localhost:{INT_PORT}/loop")
     check("status redirect-loop: returns 0 (no final answer)", loop_code == 0)
-    check("fetch_html redirect-loop: returns empty",
-          linkcheck.fetch_html(f"http://localhost:{INT_PORT}/loop") == "")
+    loop_page = _page(linkcheck, f"http://localhost:{INT_PORT}/loop")
+    check("fetch_html redirect-loop: code 0 (no final answer) and no body",
+          loop_page[0] == 0 and loop_page[2] == "")
 
     # 5) host predicate: subdomains internal, look-alikes external.
     check("is_internal(localhost)", linkcheck.is_internal("http://localhost/x"))
@@ -508,6 +656,8 @@ def main():
     check("is_internal(127.0.0.1) is False", not linkcheck.is_internal("http://127.0.0.1/x"))
     check("is_internal(localhost.evil.com) is False",
           not linkcheck.is_internal("http://localhost.evil.com/x"))
+
+    page_outcome_checks(linkcheck)
 
     print("sitemap-urls.py — fetch() host-gated, per-hop token scoping")
     sitemap._seed_allowed("localhost")
@@ -544,8 +694,8 @@ def main():
     if FAILS:
         print(f"FAIL — {len(FAILS)} check(s) failed: {', '.join(FAILS)}")
         raise SystemExit(1)
-    print("PASS — token scoping, the hostile-sitemap refusals, crash-guard attribution "
-          "and the crawl-size floor hold.")
+    print("PASS — token scoping, sitemap pages graded on their own response, the "
+          "hostile-sitemap refusals, crash-guard attribution and the crawl-size floor hold.")
 
 
 def crash_guard_checks():

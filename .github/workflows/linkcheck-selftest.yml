@@ -136,6 +136,16 @@ jobs:
             || { echo "::error::the broken fixture stopped failing the crawl — everything below would pass vacuously"; exit 1; }
           v=$(cat linkcheck-verdict.txt 2>/dev/null || true)
           [ "$v" = "broken" ] || { echo "::error::expected verdict=broken, got '$v' — a positive oracle, not a side-effect proxy"; exit 1; }
+          # Both sources of `broken`, each named: a dead link on a live page, and a
+          # sitemap page that itself 404s (gone.html, deliberately absent). Before
+          # v1.29.1 nothing graded a page's own response, so the second never showed.
+          grep -qF '[404] http://127.0.0.1:8099/this-page-does-not-exist.html' linkcheck-report.txt \
+            || { echo "::error::the dead link on broken.html is not in the report"; exit 1; }
+          gone=$(grep -A1 -F '[404] http://127.0.0.1:8099/gone.html' linkcheck-report.txt || true)
+          case "$gone" in
+            *'on: sitemap'*) ;;
+            *) echo "::error::the sitemap page that 404s (gone.html) is not reported 'on: sitemap' — the pre-v1.29.1 bug is back: a dead sitemap page is graded only when another page links to it"; exit 1 ;;
+          esac
 
       # REST list, not search: the search index lags a just-created issue, and this
       # assertion must grade the ACTION, never GitHub's indexing latency.
