@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.29.2** *(tag not yet cut)* — `linkcheck` fix, no new input. The broken-links issue went missing when a run found the
+**v1.29.2** *(anchor `fa770f4`; `v1` moved onto it 2026-10-12)* — `linkcheck` fix, no new input. The broken-links issue went missing when a run found the
 most: GitHub refuses an issue or comment body over 65,536 characters (and past 128 KiB Linux will not start `gh` with it), the
 issue step is `continue-on-error`, and since v1.29.1 every dead sitemap page is a row of its own, so a site that went down
 mid-crawl opened and commented nothing. A body over 60,000 bytes now keeps the summary line and as many whole rows as fit,
