@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.29.3** *(tag not yet cut)* — `linkcheck` fix, no new input. The step summary went missing on the same runs as v1.29.2's
+**v1.29.3** *(anchor `5370b22`; `v1` moved onto it 2026-10-12)* — `linkcheck` fix, no new input. The step summary went missing on the same runs as v1.29.2's
 issue: GitHub refuses a step summary over 1 MiB (the upload fails with an error annotation and the run shows none), and since
 v1.29.1 every dead sitemap page is a row of its own, so a site that went down mid-crawl lost its summary exactly when it had the
 most to say. A summary over 900,000 bytes now gets the issue body's cut, from one shared `scripts/fit-report.py`: the summary
