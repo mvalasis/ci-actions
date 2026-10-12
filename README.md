@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.29.4** *(tag not yet cut)* — `deps-currency` fix, no new input. The advisories issue went missing when the tree carried
+**v1.29.4** *(anchor `dc9ed5f`; `v1` moved onto it 2026-10-12)* — `deps-currency` fix, no new input. The advisories issue went missing when the tree carried
 the most: GitHub refuses an issue or comment body over 65,536 characters (and past 128 KiB Linux will not start `gh` with it),
 a failed `gh` call is one note in the `ℹ️ issue lifecycle` block of a green run, and every advisory at or above the floor is
 a row of its own — past ~400 rows at a typical 160 bytes, ~240 at the widest (an old JS lockfile, or `severity-floor: LOW`).
