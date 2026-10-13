@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.29.6** *(tag not yet cut)* — `deps-currency`, `seo-aeo`, `form-protection` and `verify-homepage` fix, no new input. Their
+**v1.29.6** *(anchor `6da8c6b`; `v1` moved onto it 2026-10-13)* — `deps-currency`, `seo-aeo`, `form-protection` and `verify-homepage` fix, no new input. Their
 step summaries went missing on the biggest runs, as `linkcheck`'s did until v1.29.3: GitHub drops a step summary over 1 MiB (the
 upload fails with an error annotation and the run shows none), and each of these reports gives every page, finding or advisory a row
 of its own. A summary over 900,000 bytes now keeps the report's fixed lines and as many whole rows as fit, worst first and in report
