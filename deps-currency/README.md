@@ -181,7 +181,8 @@ the same ratchet pattern as `security-baseline`'s `critical-checks`.
 
 Since **v1.18.0** the report is in three places, so a scheduled run's findings never need a browser:
 
-- **Job log** — the whole report, the same lines as the step summary, byte for byte:
+- **Job log** — the whole report, the same lines as the step summary, byte for byte (past the
+  summary's cap, below, every row it leaves out too):
   `gh run view <run-id> --log-failed` (or `--log`). Before v1.18.0 the log carried none of it.
 - **Annotations** — one per advisory at/above the floor (exactly what `fail-on-vuln` blocks on), at
   the end of the log: `::error file=<lockfile>,title=deps-currency <SEVERITY>::<SEVERITY>
@@ -193,7 +194,10 @@ Since **v1.18.0** the report is in three places, so a scheduled run's findings n
   `fail-on-vuln: false`) annotates at `::warning`; `fail-on-vuln: true` at `::error`. GitHub keeps
   10 per step; past that, one log line counts the rest (the report lists every advisory either way).
   Below-floor advisories and unpinned-action advisories are never annotated.
-- **Step summary** — unchanged: the same report, rendered.
+- **Step summary** — the same report, rendered. GitHub drops a summary over 1 MiB, so since
+  v1.29.6 one over 900,000 bytes gets the issue body's cut at that cap: the head with the table's
+  header rows, whole rows CRITICAL first, the rest of the report, then
+  `(truncated — N more rows; the full report is in the run log: <run URL>)`.
 - **Issue lifecycle** — with `manage-issue` on, a `### ℹ️ issue lifecycle` block follows the report
   in the job log and the step summary, before the annotations: `opened tracking issue`,
   `updated tracking issue #N`, `closed tracking issue #N — the sweep is clean`, or what stopped it,
@@ -394,6 +398,20 @@ legs' 900 advisories, their lockfiles moved into the workspace, are named worksp
 keep 505 rows where 351 fit, cut by the same rules. v1.29.4's `engine.mjs` and `scan.mjs` fail 5 of
 the 7 checks — the other two pin what must not change, the fallback and the annotation — and each of
 the 7 turns red under at least one of 8 targeted mutants, all of which turn the self-test red.
+
+**Step-summary legs (v1.29.6).** 7,000 advisories under `severity-floor: LOW`, handed over LOW
+first, half of them in a Greek-named directory: the block runs past 1 MiB, and the summary is at
+most 900,000 bytes — the head with the table's header rows, whole rows of the log's own from the
+top (every CRITICAL, HIGH and MODERATE, the cut inside LOW), the rest of the block (the unpinned
+action, the scanner notes, the verdict) and the note counting the rows left out with the run URL —
+and the first row left out would not have fit; the job log carries all 7,000. Rows built to a block
+of exactly 900,000 bytes reach the summary whole, byte for byte, and one byte more is cut.
+`capSummary` is checked against the cut owed at every cap across a small report, and a report with
+no table goes whole. A fault injected into the cut costs only the summary: the log carries the
+block, then one plain line naming the fault; exit 0 in report mode, still 1 under `fail-on-vuln`.
+Each of the 18 checks but that leg's anchor turns red under at least one of 20 targeted mutants;
+19 turn the self-test red, and the 20th is equivalent (the size check ahead of `capSummary`,
+which checks again). With the cut switched off, as before v1.29.6, 11 of the 18 go red.
 
 > The owner-set fixtures deliberately use **different** literals for the caller's owner and the
 > action's owner (`creme-ypsilon` vs `mvalasis`). The original fixture used the same literal for

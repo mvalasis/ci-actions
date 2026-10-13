@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   SEV, classifySitekey, parseEndpointMap, analyzeForms, buildProbeBody, judgeProbe,
-  safe, escapeData, escapeProperty, annotation, annotations,
+  safe, escapeData, escapeProperty, annotation, annotations, fitReport,
 } from './checks.mjs';
 
 let failed = 0;
@@ -210,6 +210,94 @@ console.log('\n# report + annotation encoding (pure)');
   check('annotations: a WARN finding is never annotated', !out.some((l) => l.includes('probe-inconclusive')) && annotations([warnOnly]).length === 0);
 }
 
+console.log("\n# the step summary's cut (pure)");
+{
+  // Reports in check.mjs's grammar, each line labelled by hand: F fixed, P a parent, [rank, parent] a row.
+  // The cut at a cap is then built here the long way — the largest k for which the fixed lines, the first
+  // k rows (❌ first, report order within a rank) with their parents, a blank line and the longest note
+  // (every row left out) fit — and fitReport must give exactly that, at every cap.
+  const C = 'https://shop.example/contact/', G = 'https://shop.example/επικοινωνία/', E = 'https://shop.example/api/contact';
+  const NL = 'https://shop.example/api/newsletter';
+  const HEAD = [
+    ['## 🛡️ form-protection — bot-gate enforced end-to-end', 'F'], ['', 'F'],
+    ['- mode: report-only (never blocks)', 'F'], ['- pages checked: 4', 'F'],
+    ['- submit probe: on (tokenless + junk-token POST per endpoint)', 'F'],
+  ];
+  const SPEC = [
+    ...HEAD,
+    ['- ⚠️ unparseable `form-endpoints` line (want `selector => endpoint [mode=json] [token=…] [expect=…]`): `#checkout-form - /api/order`', 'F'],
+    ['', 'F'], ['### Pages', 'F'],
+    ['- ⚠️ https://shop.example/old-form/ — HTTP 404 (page missing?) — nothing to check here; fix the wired URL', [1, -1]],
+    [`- ❌ [${C}](${C})  \`HTTP 200\` · 2 gated form(s)`, 'P'],
+    [`  - ❌ \`sitekey-real\` — form#contact on ${C} — sitekey "1x00000000000000000000AA" is a KNOWN TEST/PLACEHOLDER key (test keys pass every client, so the widget is decorative)`, [0, 9]],
+    [`  - ⚠️ \`endpoint-unknown\` — form#callback on ${C} — no form action and no form-endpoints entry matches; server-rejects probe skipped (add a form-endpoints mapping)`, [1, 9]],
+    [`  - ℹ️ \`widget-not-static\` — form#newsletter on ${C} — mapped for probing but no bot widget (or sitekey) in the static HTML; widget is client-rendered, static sitekey-real check skipped`, [2, 9]],
+    ['- ⚠️ https://shop.example/quote/ — fetch failed (ECONNRESET) — infra issue, not a content defect (not counted as critical)', [1, -1]],
+    [`- ✅ [${G}](${G})  \`HTTP 200\` · 1 gated form(s)`, 'P'],
+    [`  - ✅ form#epafi → ${E}`, [3, 14]],
+    ['', 'F'], ['### Submit probes (tokenless + junk-token POST must hard-reject)', 'F'],
+    [`- **${E}** (form) ← form#contact @ ${C} · form#epafi @ ${G}`, 'P'],
+    [`  - ✅ ${E} (tokenless POST) — hard reject (HTTP 403)`, [3, 18]],
+    [`  - ❌ \`server-rejects\` — ${E} (junk-token POST) — endpoint ACCEPTED the POST (HTTP 200) — the server never verifies the token (skip-verify): bot protection is a client-side decoration`, [0, 18]],
+    [`- **${NL}** (json) ← form#newsletter @ ${C}`, 'P'],
+    ['  - ⚠️ tokenless POST — network error (ECONNRESET); probe inconclusive', [1, 21]],
+    ['  - ⚠️ junk-token POST — network error (ECONNRESET); probe inconclusive', [1, 21]],
+    ['', 'F'], ['**critical: 2 · warnings: 6 · info: 1**', 'F'],
+    ['report-only — 2 critical check(s) would BLOCK under `fail-on-critical: true`.', 'F'],
+  ];
+  // No endpoint to probe: the section's one line is a row with no icon, ranked with ✅.
+  const BARE = [
+    ...HEAD, ['', 'F'], ['### Pages', 'F'],
+    [`- ❌ [${C}](${C})  \`HTTP 200\` · 0 gated form(s)`, 'P'],
+    [`  - ❌ \`sitekey-real\` — form#contact on ${C} — bot widget has no data-sitekey and no sitekey found in inline scripts (missing key)`, [0, 7]],
+    [`  - ⚠️ \`endpoint-unknown\` — form#contact on ${C} — no form action and no form-endpoints entry matches; server-rejects probe skipped (add a form-endpoints mapping)`, [1, 7]],
+    [`- ⚠️ [${G}](${G})  \`HTTP 200\` · 0 gated form(s)`, 'P'],
+    [`  - ⚠️ \`no-gated-form\` — ${G} — no bot-widget form and no form-endpoints match on this page (widget removed, selector drifted, or the wrong URL is wired)`, [1, 10]],
+    ['', 'F'], ['### Submit probes (tokenless + junk-token POST must hard-reject)', 'F'],
+    ['- no probe-able endpoints resolved (no gated forms found, or all lacked an endpoint)', [3, -1]],
+    ['', 'F'], ['**critical: 1 · warnings: 2 · info: 0**', 'F'],
+    ['report-only — 1 critical check(s) would BLOCK under `fail-on-critical: true`.', 'F'],
+  ];
+  const RUN = 'https://github.com/acme/site/actions/runs/33911783576';
+  const by = (spec) => {
+    const lines = spec.map(([l]) => l);
+    const whole = `${lines.join('\n')}\n`;
+    const order = spec.map((_, i) => i).filter((i) => Array.isArray(spec[i][1])).sort((a, b) => spec[a][1][0] - spec[b][1][0] || a - b);
+    const built = (k, n) => {
+      const keep = new Set(spec.map((_, i) => i).filter((i) => spec[i][1] === 'F'));
+      for (const i of order.slice(0, k)) { keep.add(i); if (spec[i][1][1] >= 0) keep.add(spec[i][1][1]); }
+      return `${[...lines.filter((_, i) => keep.has(i)), '', `(truncated — ${n} more rows; the full report is in the run log: ${RUN})`].join('\n')}\n`;
+    };
+    const expect = (cap) => {
+      if (Buffer.byteLength(whole) <= cap) return whole;
+      let k = 0;
+      while (k < order.length && Buffer.byteLength(built(k + 1, order.length)) <= cap) k++;
+      return built(k, order.length - k);
+    };
+    const lo = Buffer.byteLength(built(0, order.length)), hi = Buffer.byteLength(whole) + 1;
+    const bad = [];
+    for (let cap = lo - 3; cap <= hi; cap++) if (fitReport(lines, RUN, cap) !== expect(cap)) bad.push(cap);
+    return { lines, order, built, lo, hi, bad };
+  };
+  const full = by(SPEC), bare = by(BARE);
+  for (const [label, s] of [['a report with every kind of line', full], ['a report with no endpoint to probe', bare]]) {
+    check(`fitReport, ${label}: at every cap from ${s.lo - 3} to ${s.hi} bytes it is the cut built by hand`, s.bad.length === 0, `wrong at ${s.bad.slice(0, 5).join(', ')}`);
+  }
+  const { lines, built, order } = full;
+  const mid = fitReport(lines, RUN, Buffer.byteLength(built(4, order.length)));
+  check('…a mid cut: both ❌ rows with their page and endpoint, the first two ⚠️, the note counting the other 6',
+    mid === built(4, order.length - 4) && mid.includes('`server-rejects`') && mid.includes('/old-form/ — HTTP 404') && !mid.includes('fetch failed') && mid.endsWith(`(truncated — 6 more rows; the full report is in the run log: ${RUN})\n`), JSON.stringify(mid.slice(-300)));
+  // Ranked ❌, the short row with no icon would take the second place; with ✅, a ⚠️ row has it.
+  const low = fitReport(bare.lines, RUN, Buffer.byteLength(bare.built(2, 4)));
+  check('…a row with no icon ranks with ✅, after every ⚠️', low === bare.built(2, 2) && !low.includes('no probe-able endpoints'), JSON.stringify(low.slice(-300)));
+  // A crash mid-report: no totals, the crash note last — kept where no row fits, so never a row.
+  const crashed = [...lines.slice(0, 16), '- ❌ form-protection crashed: TypeError: x is not a function'];
+  const one = `${[...lines.slice(0, 8), crashed[16], '', `(truncated — 6 more rows; the full report is in the run log: ${RUN})`].join('\n')}\n`;
+  check('…a report cut short by a crash: the crash note is kept where no row fits', fitReport(crashed, RUN, Buffer.byteLength(one)) === one, JSON.stringify(fitReport(crashed, RUN, Buffer.byteLength(one))));
+  const noRows = [lines[0], '', '- ❌ **no URLs resolved** — `sitemap-url`/`urls` was set but expanded to nothing (the gate checked zero pages).', '', '**critical: 1 · warnings: 0**', 'x'.repeat(200)];
+  check('…no row to cut: an over-cap report goes whole, with no note', fitReport(noRows, RUN, 100) === `${noRows.join('\n')}\n`);
+}
+
 // ---------------------------------------------------------------------------
 console.log('\n# e2e — local http server + the real CLI');
 
@@ -254,11 +342,12 @@ const BASE = `http://127.0.0.1:${PORT}`;
 // GITHUB_ACTIONS=true), which the cases below assert. The env is built from
 // scratch, so a CI runner's own GITHUB_ACTIONS / GITHUB_STEP_SUMMARY never leak
 // into a case; a case unsets the summary with `GITHUB_STEP_SUMMARY: undefined`.
-function runCli(extraEnv) {
+// `script`: a copy with a fault injected (F).
+function runCli(extraEnv, script = fileURLToPath(new URL('./check.mjs', import.meta.url))) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'form-prot-'));
   const summary = path.join(dir, 'summary.md');
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [fileURLToPath(new URL('./check.mjs', import.meta.url))], {
+    const child = spawn(process.execPath, [script], {
       env: { PATH: process.env.PATH, HOME: dir, TMPDIR: dir, GITHUB_STEP_SUMMARY: summary, MAX_URLS: '15', ...extraEnv },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -408,6 +497,131 @@ console.log('\n# the job log carries the report; CRITICALs annotate');
   const f = await runCli({ URLS: ' ', GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'true' });
   check('input resolving to no URL: BLOCKED (exit 1), printed once, no crash', f.code === 1 && once(f) && f.stdout.includes('BLOCKED — gate checked nothing.'), why(f));
   check('…annotated as the one CRITICAL it counts', JSON.stringify(commands(f.stdout)) === JSON.stringify(['::error title=form-protection no-urls-resolved::no-urls-resolved']), JSON.stringify(commands(f.stdout)));
+
+  // (F) The step summary stays under GitHub's limit (v1.29.6). GitHub drops a step summary over 1 MiB (the
+  // upload fails with an error annotation, so the run shows none), so a report over 900,000 bytes is cut for
+  // the summary alone (fitReport, pinned cap by cap above): the fixed lines, as many whole rows as fit, worst
+  // first, each with its page or endpoint line, then a note counting the rows left out. The log keeps every
+  // line. No GITHUB_ACTIONS here, so a run's log is its report whole.
+  const CAP = 900000;
+  const RUN_URL = 'https://github.com/acme/site/actions/runs/33911783576';
+  // Pages of four kinds, five in turn: 20 forms on a test sitekey (a ❌ row each) and 20 with no action (a ⚠️
+  // row each); 40 with no action; a mapped form with no widget (an ℹ️ row); a clean form (✅), twice. Every
+  // probe-able form posts to /api/reject with one token field, so the probes come to one endpoint.
+  const forms = (n, html) => Array.from({ length: n }, (_, j) => html(String(j).padStart(2, '0'))).join('');
+  const onTestKey = (id) => `<form id="t${id}" action="/api/reject"><div class="cf-turnstile" data-sitekey="1x00000000000000000000AA"></div></form>`;
+  const noAction = (id) => `<form id="w${id}"><div class="cf-turnstile" data-sitekey="${REAL_KEY}"></div></form>`;
+  const KINDS = [
+    forms(20, onTestKey) + forms(20, noAction),
+    forms(40, noAction),
+    '<form id="m" class="m"></form>',
+    `<form id="ok" action="/api/reject"><div class="cf-turnstile" data-sitekey="${REAL_KEY}"></div></form>`,
+  ];
+  const big = createServer((req, res) => {
+    const n = Number((req.url.match(/^\/sitemap-(\d+)\.xml$/) || [])[1]), m = req.url.match(/^\/p\/(\d{5})\/$/);
+    if (req.method === 'POST' && req.url === '/api/reject') { res.writeHead(403, { 'content-type': 'application/json' }); return res.end('{"ok":false,"error":"turnstile_failed"}'); }
+    if (n) { res.writeHead(200, { 'content-type': 'application/xml' }); return res.end(`<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${Array.from({ length: n }, (_, i) => `<url><loc>http://${req.headers.host}/p/${String(i).padStart(5, '0')}/</loc></url>`).join('')}</urlset>`); }
+    if (!m) { res.writeHead(404); return res.end('not found'); }
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end(`<html><body>${KINDS[Math.min(Number(m[1]) % 5, 3)]}</body></html>`);
+  });
+  await new Promise((r) => big.listen(0, '127.0.0.1', r));
+  const SITE = `http://127.0.0.1:${big.address().port}`;
+  // K unparseable `form-endpoints` lines in every run, a head line each, with `pad` bytes spread over them: the
+  // knob for the boundary below (each prints whole up to 120 characters, and a constant K keeps the counts).
+  const K = 250;
+  const pages = (n, pad = 0, extra = {}) => ({
+    GITHUB_REPOSITORY: 'acme/site', GITHUB_RUN_ID: '33911783576', SITEMAP_URL: `${SITE}/sitemap-${n}.xml`, MAX_URLS: String(n),
+    FORM_ENDPOINTS: ['.m => /api/reject token=cf-turnstile-response', ...Array.from({ length: K }, (_, j) => 'x'.repeat(1 + Math.floor(pad / K) + (j < pad % K ? 1 : 0)))].join('\n'),
+    ...extra,
+  });
+  // What a cut summary owes against its report (`log`), each property on its own. A row is an indented line
+  // (this site prints no other); its parent is the margin line above it, unless a heading comes between.
+  const ICONS = ['❌', '⚠️', 'ℹ️', '✅'];
+  const rankOf = (l) => { const k = ICONS.findIndex((c) => l.trimStart().slice(2).startsWith(c)); return k < 0 ? 3 : k; };
+  const cutOf = (summary, log, cap = CAP) => {
+    const m = summary.match(/^([\s\S]*)\n\n\(truncated — (\d+) more rows; the full report is in the run log: (\S+)\)\n$/);
+    const rep = log.slice(0, -1).split('\n');
+    let j = 0;
+    const at = (m ? m[1].split('\n') : []).map((l) => { while (j < rep.length && rep[j] !== l) j++; return j++; });
+    const kept = new Set(at);
+    const first = rep.findIndex((l) => l.startsWith('### ')), tail = rep.findLastIndex((l) => l.startsWith('**critical: '));
+    const body = (i) => i > first && i < tail && rep[i] !== '' && !rep[i].startsWith('### ');
+    const parentOf = [];
+    let p = -1;
+    rep.forEach((l, i) => { if (l.startsWith(' ')) parentOf[i] = p; else p = body(i) ? i : -1; });
+    const rows = rep.map((_, i) => i).filter((i) => body(i) && rep[i].startsWith(' '));
+    const order = [...rows].sort((a, b) => rankOf(rep[a]) - rankOf(rep[b]) || a - b);
+    const k = order.findIndex((i) => !kept.has(i));
+    const keptRows = rows.filter((i) => kept.has(i));
+    const under = new Set(keptRows.map((i) => parentOf[i]));
+    const size = Buffer.byteLength(summary);
+    const cost = (i) => Buffer.byteLength(rep[i]) + 1 + (parentOf[i] >= 0 && !kept.has(parentOf[i]) ? Buffer.byteLength(rep[parentOf[i]]) + 1 : 0);
+    return { size, rep, rows, keptRows,
+      under: size <= cap,
+      shape: !!m && m[3] === RUN_URL,
+      inOrder: at.length > 0 && at.every((x) => x < rep.length),
+      fixed: rep.every((_, i) => body(i) || kept.has(i)),
+      prefix: k > 0 && order.slice(k).every((i) => !kept.has(i)),
+      parents: keptRows.every((i) => parentOf[i] < 0 || kept.has(parentOf[i])) && at.every((i) => !body(i) || rep[i].startsWith(' ') || under.has(i)),
+      count: !!m && Number(m[2]) === rows.length - keptRows.length,
+      // The first row left out would not fit, the note budgeted at its longest (every row left out).
+      fill: k > 0 && cap - size - (String(rows.length).length - String(rows.length - k).length) < cost(order[k]) };
+  };
+  const owed = (c) => c.under && c.shape && c.inOrder && c.fixed && c.prefix && c.parents && c.count && c.fill;
+  const N = 350;
+  try {
+    const huge = await runCli(pages(N));
+    const h = cutOf(huge.summary, huge.stdout);
+    check(`summary, ${N} pages: exit 0, the report in the log once, past 1 MiB`, huge.code === 0 && once(huge) && Buffer.byteLength(huge.stdout) > 1048576, `${why(huge)} ${Buffer.byteLength(huge.stdout)} B`);
+    check('…the summary is at most 900,000 bytes', h.under, `${h.size} B`);
+    check('…the report cut, then the note with the run URL', h.shape, JSON.stringify(huge.summary.slice(-200)));
+    check("…every line is the log's, in the log's order", h.inOrder);
+    check('…the head (its unparseable-line warnings too), every heading, the totals and the verdict kept', h.fixed);
+    const counts = [0, 1, 2, 3].map((r) => [h.rows, h.keptRows].map((set) => set.filter((i) => rankOf(h.rep[i]) === r).length));
+    check(`…every ❌ row kept, the cut inside ⚠️ (kept ${counts.map(([all, kept]) => `${kept}/${all}`).join(', ')})`,
+      counts[0][0] > 0 && counts[0][1] === counts[0][0] && counts[1][1] > 0 && counts[1][1] < counts[1][0] && counts[2][0] > 0 && counts[2][1] === 0 && counts[3][0] > 0 && counts[3][1] === 0);
+    check('…the rows kept are the first in rank order, report order within a rank', h.prefix);
+    check('…each with its page or endpoint line, and no such line without one', h.parents);
+    check(`…the note counts the ${h.rows.length - h.keptRows.length} rows left out`, h.count);
+    check('…and fills the room: the first row left out would not fit', h.fill, `${h.size} B`);
+
+    // The boundary, both sides: whole groups of five pages to a little under 900,000 bytes, then the K head
+    // lines lengthened to exactly 900,000 — the summary must be the report, byte for byte — then one byte more.
+    const n = 5 * Math.floor((N * (CAP - 8000)) / (5 * Buffer.byteLength(huge.stdout)));
+    const pad = CAP - Buffer.byteLength((await runCli(pages(n))).stdout);
+    const atCap = await runCli(pages(n, pad));
+    check(`summary, ${n} pages built to a report of exactly 900,000 bytes: the summary is the report, byte for byte`,
+      pad >= 0 && pad + 1 <= 118 * K && Buffer.byteLength(atCap.stdout) === CAP && atCap.summary === atCap.stdout, `pad ${pad}, ${Buffer.byteLength(atCap.stdout)} B`);
+    const pastCap = await runCli(pages(n, pad + 1));
+    check('…one byte more: cut to at most 900,000, whole rows worst first, the rest counted',
+      Buffer.byteLength(pastCap.stdout) === CAP + 1 && owed(cutOf(pastCap.summary, pastCap.stdout)), `${Buffer.byteLength(pastCap.summary)} B`);
+
+    // A fault in the cut costs the run its summary, never its exit code: the log keeps the report whole and
+    // names the fault in one plain line. A copy of the scripts whose fitReport throws.
+    const HERE = path.dirname(fileURLToPath(import.meta.url));
+    const faulty = fs.mkdtempSync(path.join(os.tmpdir(), 'form-prot-faulty-'));
+    try {
+      const source = fs.readFileSync(path.join(HERE, 'checks.mjs'), 'utf8');
+      const CUT = 'export function fitReport(lines, runUrl, cap = SUMMARY_CAP) {';
+      check('fault-injection anchor still present in checks.mjs', source.includes(CUT));
+      fs.writeFileSync(path.join(faulty, 'checks.mjs'), source.replace(CUT, `${CUT} throw new Error('injected cut fault');`));
+      fs.copyFileSync(path.join(HERE, 'check.mjs'), path.join(faulty, 'check.mjs'));
+      fs.symlinkSync(path.join(HERE, '..', 'node_modules'), path.join(faulty, 'node_modules'));
+      const FAULT = "form-protection: the report is over the step summary's limit and could not be cut, so the summary does not carry it; the job log above holds every row (injected cut fault)";
+      const sunk = await runCli(pages(N), path.join(faulty, 'check.mjs'));
+      check('a fault in the cut: the log is the report whole, then one plain line naming it; no summary; exit 0',
+        sunk.stdout === `${huge.stdout}${FAULT}\n` && sunk.summary === '' && sunk.code === 0, `${why(sunk)} ${JSON.stringify(sunk.stdout.slice(-200))}`);
+      const sunkEnforcing = await runCli(pages(N, 0, { FAIL_ON_CRITICAL: 'true' }), path.join(faulty, 'check.mjs'));
+      check('…under fail-on-critical: the criticals still BLOCK (exit 1), the fault a line, not a crash',
+        sunkEnforcing.code === 1 && /\nBLOCKED — \d+ critical check\(s\) failed\. Fix the ❌ items above\.\n$/.test(sunkEnforcing.stdout.slice(0, -FAULT.length - 1))
+          && sunkEnforcing.stdout.endsWith(`\n${FAULT}\n`) && !sunkEnforcing.stdout.includes('crashed') && sunkEnforcing.summary === '', why(sunkEnforcing));
+    } finally {
+      fs.rmSync(faulty, { recursive: true, force: true });
+    }
+  } finally {
+    big.close();
+  }
 }
 
 server.close();

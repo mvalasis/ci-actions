@@ -88,6 +88,31 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.29.6** *(tag not yet cut)* — `deps-currency`, `seo-aeo`, `form-protection` and `verify-homepage` fix, no new input. Their
+step summaries went missing on the biggest runs, as `linkcheck`'s did until v1.29.3: GitHub drops a step summary over 1 MiB (the
+upload fails with an error annotation and the run shows none), and each of these reports gives every page, finding or advisory a row
+of its own. A summary over 900,000 bytes now keeps the report's fixed lines and as many whole rows as fit, worst first and in report
+order within a rank, the kept lines in the report's order, then `(truncated — N more rows; the full report is in the run log: <run
+URL>)`. `seo-aeo` and `form-protection` keep the head, every heading, the totals and the verdict, and rank ❌, ⚠️, ℹ️, ✅ (a row with
+no icon with ✅), each row with the page, origin or endpoint line it sits under (one `fitReport()`, restated byte for byte in both
+`checks.mjs`); `verify-homepage` keeps the head and everything from the first `---` (the advisory and the verdicts), and ranks ❌
+lines, the lines under a ❌ family, ⚠️ families, the lines under them, then the rest, each row with its page's heading (`fitReport()`
+in `ux-report.mjs`); `deps-currency` gives the summary v1.29.4's issue-body cut at 900,000 bytes (`capSummary()` in `engine.mjs`).
+The cap counts bytes; a summary under it is written byte-identical to before, and the job log carries every line. A fault in the
+cut costs only the summary: one plain line in the log, never an annotation (GitHub keeps 10 per level, the findings'), the exit
+code kept. Also: `verify-homepage`'s job log stopped at 64 KiB, on Linux too. Playwright's import creates `process.stdout`, libuv
+opens a pipe or socket stdout non-blocking, and `say`'s one `fs.writeSync` then wrote only what the fd had room for (65,536 bytes
+to a pipe, measured on macOS and Linux) and dropped the rest unseen, the verdicts with it; `say`/`sayErr` now loop until every byte
+is out. Touches `engine.mjs` and `scan.mjs` in `deps-currency`, `check.mjs` and `checks.mjs` in `seo-aeo` and `form-protection`,
+`render-check.mjs` and `ux-report.mjs` in `verify-homepage`, and each one's `selftest.mjs`: the real entrypoint past 1 MiB (at most
+900,000 bytes, the worst rows first, the first row left out too big for the room, the log whole), at exactly 900,000 bytes
+(byte-identical) and one over (cut), and with a fault injected into the cut, and the fitter against the cut built by hand at every
+cap. The four self-tests gain 18, 19, 21 and 19 checks (`deps-currency`, `seo-aeo`, `form-protection`, `verify-homepage`): with
+the cut switched off, 11, 11, 11 and 12 of them go red, and each but a fault-injection anchor turns red under at least one of 20,
+31, 31 and 35 targeted mutants (19, 29, 28 and 33 caught, the other eight proved equivalent). **Caller-visible:** an oversized
+report now gets a summary, cut as above, where it got none; one under the cap reads as before; `verify-homepage`'s job log
+carries a report past 64 KiB whole.
+
 **v1.29.5** *(anchor `5e321ba`; `v1` moved onto it 2026-10-13)* — `deps-currency` fix, no new input. The report's Lockfile column named each lockfile by the
 absolute runner path osv-scanner prints, cut at 60 characters like every cell, so a typical row ended
 `| /home/runner/work/lampakia-astro/lampakia-astro/apps/web/pac |`: the lockfile's name cut off, in the job log, the step
@@ -1503,6 +1528,14 @@ const say    = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.
 const sayErr = (s = '') => { try { fs.writeSync(2, `${s}\n`); } catch { console.error(s); } };
 ```
 
+One `fs.writeSync` is not always every byte, though. Once anything in the process
+creates `process.stdout` (playwright's import does), libuv has opened a pipe or
+socket stdout **non-blocking**, on Linux too, and a write then takes only what the
+fd has room for and returns the short count. `verify-homepage`'s `say` ignored it,
+so its job log stopped at 65,536 bytes until v1.29.6; its `say`/`sayErr` now loop
+until every byte is out (`writeAll`, waiting out `EAGAIN`). The lint below cannot
+see what an import does, so this one is not mechanized.
+
 Mechanized by [`.github/scripts/lint-entrypoint-output.mjs`](.github/scripts/lint-entrypoint-output.mjs),
 run as a **blocking** job on every push and PR
 ([`lint.yml`](.github/workflows/lint.yml)); its own fixture suite
@@ -1559,9 +1592,9 @@ Known limit, stated rather than papered over: for bash, rule 3 matches any
 it was deleted in v1.15.0), and why the behavioural self-tests — not this lint —
 are the load-bearing layer.
 
-The seven `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
-`console.log(…)` then `process.exit(…)`, but emit 4296–17124 bytes, at least three
-times under the pipe buffer, so they cannot truncate. Don't "fix" them.
+The eight `*/scripts/selftest.mjs` are **exempt on purpose** — they do end in
+`console.log(…)` then `process.exit(…)`, but emit well under the pipe buffer (the
+lint's header keeps the measured sizes), so they cannot truncate. Don't "fix" them.
 
 Repo-internal only: no caller consumes this lint, so changing it needs **no
 version bump and no `v1` tag move**.

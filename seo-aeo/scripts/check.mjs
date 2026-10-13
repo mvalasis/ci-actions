@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import {
   SEV, T1_CHECKS, analyzePage, analyzeRobots, analyzeSitemap, analyzeLlms, analyzeRedirects,
-  safe, annotations,
+  safe, annotations, SUMMARY_CAP, fitReport,
 } from './checks.mjs';
 import {
   analyzeAgentHome, analyzeWebmcp, analyzeMarkdownNegotiation, analyzeMarkdown404, analyzeContentSignal,
@@ -30,6 +30,8 @@ const CRITICAL_CHECKS = (env.CRITICAL_CHECKS || '').split(/[\s,]+/).map((s) => s
 const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';
 const ANNOTATE = env.GITHUB_ACTIONS === 'true';   // runner commands are for the runner, not a local run
 const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
+// What a cut step summary points to for every row.
+const runUrl = `${env.GITHUB_SERVER_URL || 'https://github.com'}/${env.GITHUB_REPOSITORY || ''}/actions/runs/${env.GITHUB_RUN_ID || ''}`;
 const lines = [];
 const note = (s = '') => lines.push(s);
 const ICON = { critical: '❌', warn: '⚠️', info: 'ℹ️', ok: '✅' };
@@ -127,11 +129,22 @@ async function expandSitemap(sm) {
 }
 
 // Report lines already echoed to the job log, so the crash path's re-flush echoes only the new ones.
-// The log goes first: when the summary write is what throws, the report is already readable.
+// The log goes first: when the summary write is what throws, the report is already readable. A report
+// over SUMMARY_CAP is cut for the summary alone (fitReport); a fault in that cut costs the run its
+// summary, never its exit code, and is one plain log line, not an annotation (GitHub keeps 10 per
+// level, the CRITICALs').
 let echoed = 0;
 function flush() {
   for (; echoed < lines.length; echoed++) say(lines[echoed]);
-  if (summaryFile) fs.appendFileSync(summaryFile, lines.join('\n') + '\n');
+  if (!summaryFile) return;
+  let text = lines.join('\n') + '\n';
+  if (Buffer.byteLength(text) > SUMMARY_CAP) {
+    try { text = fitReport(lines, runUrl); } catch (e) {
+      say(`seo-aeo: the report is over the step summary's limit and could not be cut, so the summary does not carry it; the job log above holds every row (${safe(String((e && e.message) || e), 160)})`);
+      return;
+    }
+  }
+  fs.appendFileSync(summaryFile, text);
 }
 // Every verdict leaves through here: the report, then one annotation per CRITICAL — `::error` when
 // this run blocks, `::warning` when it only reports. A verdict exits 1 exactly when it blocks.

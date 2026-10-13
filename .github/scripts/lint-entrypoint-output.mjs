@@ -46,6 +46,12 @@
 //   const say    = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
 //   const sayErr = (s = '') => { try { fs.writeSync(2, `${s}\n`); } catch { console.error(s); } };
 //
+// One fs.writeSync is not always every byte: once anything creates process.stdout
+// (playwright's import does), libuv has opened a pipe or socket stdout NON-blocking,
+// on Linux too, and a write past the fd's free space returns a short count.
+// verify-homepage's log stopped at 65,536 bytes that way until v1.29.6; its say
+// loops (writeAll). Not mechanized: this lint cannot see what an import does.
+//
 // SCOPE
 // Action scripts only: `<dir-with-an-action.yml>/scripts/*.{mjs,py,sh}`, minus
 // `selftest*`. Discovery is by `action.yml` presence rather than a hardcoded
@@ -61,12 +67,11 @@
 //
 // The eight `*/scripts/selftest.mjs` files legitimately end in `console.log(...)`
 // then `process.exit(...)`. They are exempt because they CANNOT hit the bug:
-// measured output is 4650–33565 bytes (2026-10-12, v1.29.5: agent-benchmark
-// 4650, contract-check 5907, form-protection 6842, test-suite 9074, seo-aeo
-// 14131, verify-homepage 21842, deps-currency 22822 since v1.29.5's
-// Lockfile-column legs, security-baseline 33565) — the largest just over half
-// the 65,536-byte pipe buffer. Do not "fix" them; the exemption is the finding,
-// not an oversight.
+// measured output is 4650–33565 bytes (2026-10-13, v1.29.6: agent-benchmark
+// 4650, contract-check 5907, form-protection 8585, test-suite 9074, seo-aeo
+// 15618, verify-homepage 23532, deps-currency 24169 since v1.29.6's step-summary
+// legs, security-baseline 33565) — the largest just over half the 65,536-byte
+// pipe buffer. Do not "fix" them; the exemption is the finding, not an oversight.
 //
 // ALLOWANCES (both deliberate, both narrow)
 //   1. The sync-write fallback itself: a `console.*` that is the `catch` arm of

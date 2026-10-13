@@ -24,7 +24,7 @@ import {
   SEV, normalizeFloor, bucketFor, atOrAboveFloor, parseOsv, filterByFloor,
   scanUnpinnedActions, normalizeOwners, resolveFirstPartyOwners, issueDecision, blockDecision,
   renderReport, safe, escapeData, escapeProperty, repoRelative, annotation, annotations,
-  osvOutcome, scrub, errorLine, faultAnnotation, capIssueBody,
+  osvOutcome, scrub, errorLine, faultAnnotation, capIssueBody, capSummary,
 } from './engine.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -563,10 +563,11 @@ console.log('\n# scan.mjs end to end — the job log carries the report; at/abov
     const summaryPath = path.join(tmp, 'summary.md');
     // The env is built from scratch so a CI runner's own GITHUB_ACTIONS / GITHUB_STEP_SUMMARY never
     // leak into a case.
-    const scan = (extra) => {
+    // `script`: a copy with a fault injected (I). The log of a summary-sized report is past spawnSync's 1 MiB default.
+    const scan = (extra, script = path.join(HERE, 'scan.mjs')) => {
       try { fs.rmSync(summaryPath, { force: true }); } catch { /* fresh file per run */ }
-      const r = spawnSync(process.execPath, [path.join(HERE, 'scan.mjs')], {
-        encoding: 'utf8', timeout: 60000,
+      const r = spawnSync(process.execPath, [script], {
+        encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024,
         env: {
           PATH: process.env.PATH, HOME: tmp, TMPDIR: tmp, WORKING_DIRECTORY: tmp, GITHUB_WORKSPACE: tmp,
           OSV_BIN: stub, GH_BIN: path.join(tmp, 'no-such-gh'), MANAGE_ISSUE: 'false',
@@ -827,14 +828,15 @@ exit 0
     const GREEK = '/home/runner/work/ηλεκτρολογικά/ηλεκτρολογικά/εφαρμογή/package-lock.json';
     const osvFile = path.join(tmp, 'osv-report.json');
     const bodyFile = path.join(tmp, 'gh-body');
-    // `plan`: [[severity, how many], …] in the order osv lists them, one package each.
-    const advisories = (plan, where = () => LOCK) => {
+    // `plan`: [[severity, how many], …] in the order osv lists them, one package each. `pad(i)` lengthens
+    // the i-th package's name: safe() keeps 60 characters, 46 past `@acme/pkg-0000`.
+    const advisories = (plan, where = () => LOCK, pad = () => '') => {
       const by = new Map();
       let i = 0;
       for (const [sev, n] of plan) for (let j = 0; j < n; j++, i++) {
         const id = String(i).padStart(4, '0');
         if (!by.has(where(i))) by.set(where(i), []);
-        by.get(where(i)).push({ package: { name: `@acme/pkg-${id}`, version: '4.17.21', ecosystem: 'npm' },
+        by.get(where(i)).push({ package: { name: `@acme/pkg-${id}${pad(i)}`, version: '4.17.21', ecosystem: 'npm' },
           groups: [{ ids: [`GHSA-${id}-q2w3-e4r5`, `CVE-2021-2${id}`], max_severity: { CRITICAL: '9.8', HIGH: '7.5', MODERATE: '5.3', LOW: '3.1' }[sev] }] });
       }
       fs.writeFileSync(osvFile, JSON.stringify({ results: [...by].map(([p, packages]) => ({ source: { path: p, type: 'lockfile' }, packages })) }));
@@ -930,6 +932,111 @@ exit 0
     check('…one byte more: cut to at most 60,000, whole rows from the top, the rest counted',
       over.before.length === 60001 && o.size && o.shape && o.head && o.whole && o.top && o.tail && o.count && o.fill, `${over.sent && over.sent.length} B`);
     check('…no table to cut: an over-cap body goes whole, with no note', capIssueBody('', `${'x'.repeat(60001)}\n`, runUrl(1)) === `${'x'.repeat(60001)}\n`);
+
+    // (I) The step summary stays under GitHub's limit (v1.29.6). GitHub drops a step summary over 1 MiB (the
+    // upload fails with an error annotation, so the run shows none), so the report's block is cut for the
+    // summary alone, as the issue body is: the head, whole rows from the top, the rest of the block — scanner
+    // notes and verdict included — and a note counting the rows left out, at most 900,000 bytes. The log
+    // keeps every row. No gh and no annotations here, so a run's log is its block whole.
+    const CAP = 900000;
+    const RUN_ID = '33911783576';
+    const sweep = (extra = {}, script = undefined) => scan({ OSV_STUB_FILE: osvFile, SEVERITY_FLOOR: 'LOW', GITHUB_RUN_ID: RUN_ID, GITHUB_STEP_SUMMARY: summaryPath, ...extra }, script);
+    // What a cut summary owes against its block (`log`), each property on its own.
+    const fitted = (summary, log, cap = CAP) => {
+      const m = summary.match(/^([\s\S]*)\n\n\(truncated — (\d+) more rows; the full report is in the run log: (\S+)\)\n$/);
+      const lines = m ? `${m[1]}\n`.split('\n') : [];
+      const rep = log.split('\n');
+      const first = rep.indexOf(RULE) + 1;
+      let end = first;
+      while (first && end < rep.length && rep[end].startsWith('| ')) end++;
+      let k = first;
+      while (k < lines.length && lines[k].startsWith('| ')) k++;
+      const rows = rep.slice(first, end);
+      const kept = lines.slice(first, k);
+      const left = rows.length - kept.length;
+      const size = Buffer.byteLength(summary);
+      const have = new Set(rep);
+      return { rows, kept, size,
+        under: size <= cap,
+        shape: !!m && m[3] === runUrl(RUN_ID),
+        head: first > 0 && lines.slice(0, first).join('\n') === rep.slice(0, first).join('\n'),
+        whole: lines.length > 0 && lines.every((l) => have.has(l)) && new Set(kept).size === kept.length,
+        top: kept.join('\n') === rows.slice(0, kept.length).join('\n'),
+        tail: k < lines.length && lines.slice(k).join('\n') === rep.slice(end).join('\n'),
+        count: !!m && Number(m[2]) === left,
+        // The first row left out would not fit, its note budgeted at the longest (every row left out).
+        fill: left > 0 && cap - size - (String(rows.length).length - String(left).length) < Buffer.byteLength(rows[kept.length]) + 1 };
+    };
+    const owed = (f) => f.under && f.shape && f.head && f.whole && f.top && f.tail && f.count && f.fill;
+    const PLAN = [['LOW', 2500], ['MODERATE', 2500], ['HIGH', 1500], ['CRITICAL', 500]];
+    advisories(PLAN, (i) => (i % 2 ? GREEK : LOCK));
+    const huge = sweep({ ECOSYSTEMS: 'npm cobol' });
+    const h = fitted(huge.summary, huge.stdout);
+    check('summary, 7,000 advisories handed over LOW first: listed CRITICAL first, the block past 1 MiB',
+      h.rows.length === 7000 && rankOf(h.rows[0]) === 0 && h.rows.every((row, i) => !i || rankOf(h.rows[i - 1]) <= rankOf(row)) && Buffer.byteLength(huge.stdout) > 1048576, `${Buffer.byteLength(huge.stdout)} B`);
+    check('…exit 0 (report mode), the block in the log once, every row', huge.status === 0 && huge.stdout.split(HEADER).length === 2 && h.rows.length === 7000, why(huge));
+    check('…the summary is at most 900,000 bytes', h.under, `${h.size} B`);
+    check('…the block cut, then the note with the run URL', h.shape);
+    check('…the head kept, the table\'s header rows included', h.head);
+    check('…whole rows only, each one of the log\'s', h.whole);
+    check('…the rows kept are the log\'s first ones', h.kept.length > 0 && h.top);
+    const sev = [0, 1, 2, 3].map((n) => h.kept.filter((row) => rankOf(row) === n).length);
+    check(`…every CRITICAL, HIGH and MODERATE row, the cut inside LOW (kept ${sev.join('/')})`, sev[0] === 500 && sev[1] === 1500 && sev[2] === 2500 && sev[3] > 0 && sev[3] < 2500);
+    check('…the rest of the block follows whole: the unpinned action, the scanner notes, the verdict',
+      h.tail && huge.summary.includes('oven-sh/setup-bun@v2.2.0') && huge.summary.includes("\n- unknown ecosystem 'cobol'") && huge.summary.includes('\nreport-only — 7000 advisory(ies)'));
+    check(`…the note counts the ${7000 - h.kept.length} rows left out`, h.count);
+    check('…and fills the room: the first row left out would not fit', h.fill, `${h.size} B`);
+
+    // The boundary, both sides: HIGH rows of one width, then the first names lengthened until the block is
+    // exactly 900,000 bytes — the summary must be the block, byte for byte — then one byte more.
+    advisories([['HIGH', 1000]]);
+    const at1k = sweep();
+    const rowWidth = Buffer.byteLength(fitted(at1k.summary, at1k.stdout).rows[0] || '') + 1;
+    const rowsAtCap = 1000 + Math.floor((CAP - Buffer.byteLength(at1k.stdout)) / rowWidth);
+    const padBytes = CAP - Buffer.byteLength(at1k.stdout) - (rowsAtCap - 1000) * rowWidth;
+    const spread = (bytes) => (i) => 'x'.repeat(Math.max(0, Math.min(46, bytes - 46 * i)));
+    advisories([['HIGH', rowsAtCap]], undefined, spread(padBytes));
+    const atCap = sweep();
+    check(`summary, ${rowsAtCap} rows built to a block of exactly 900,000 bytes: the summary is the block, byte for byte`,
+      Buffer.byteLength(atCap.stdout) === CAP && atCap.summary === atCap.stdout, `${Buffer.byteLength(atCap.stdout)} B`);
+    advisories([['HIGH', rowsAtCap]], undefined, spread(padBytes + 1));
+    const pastCap = sweep();
+    check('…one byte more: cut to at most 900,000, whole rows from the top, the rest counted',
+      Buffer.byteLength(pastCap.stdout) === CAP + 1 && owed(fitted(pastCap.summary, pastCap.stdout)), `${Buffer.byteLength(pastCap.summary)} B`);
+
+    // capSummary at every cap from its floor (head, tail and the longest note) to past the block: an
+    // off-by-one anywhere in the budget breaks one of these at some cap.
+    const sample = [renderReport(filterByFloor(Array.from({ length: 40 }, (_, i) => ({ name: `pkg-${i}`, version: '1.0.0', ids: [`GHSA-${i}`],
+      severity: ['LOW', 'MODERATE', 'HIGH', 'CRITICAL'][i % 4], score: 5, source: i % 3 ? LOCK : GREEK })), 'LOW'), [], { floor: 'LOW' }),
+    '', '**at/above floor: 40 · unpinned-action advisories: 0**', 'report-only — 40 advisory(ies) at/above floor would BLOCK.'].join('\n');
+    const block = `${sample}\n`;
+    const lo = Buffer.byteLength(capSummary(sample, runUrl(RUN_ID), 0));
+    const bad = [];
+    for (let cap = lo; cap <= Buffer.byteLength(block) + 1; cap++) {
+      const out = capSummary(sample, runUrl(RUN_ID), cap);
+      if (Buffer.byteLength(block) <= cap ? out !== block : !owed(fitted(out, block, cap))) bad.push(cap);
+    }
+    check(`capSummary at every cap from ${lo} to ${Buffer.byteLength(block) + 1} bytes: whole at or under the cap, else cut as owed`, lo < 2000 && bad.length === 0, `wrong at ${bad.slice(0, 5).join(', ')}`);
+    check('…no table to cut: an over-cap block goes whole, with no note', capSummary('x'.repeat(CAP), runUrl(1)) === `${'x'.repeat(CAP)}\n`);
+
+    // A fault in the cut costs the summary that block, never the run: the log keeps the block whole and names
+    // the fault in one plain line, and the exit is the run's own. A copy of the scripts whose capSummary throws.
+    const faulty = path.join(tmp, 'faulty');
+    fs.mkdirSync(faulty);
+    const engineSource = fs.readFileSync(path.join(HERE, 'engine.mjs'), 'utf8');
+    const CUT = 'export function capSummary(text, runUrl, cap = SUMMARY_CAP) {';
+    check('fault-injection anchor still present in engine.mjs', engineSource.includes(CUT));
+    fs.writeFileSync(path.join(faulty, 'engine.mjs'), engineSource.replace(CUT, `${CUT} throw new Error('injected cut fault');`));
+    fs.copyFileSync(path.join(HERE, 'scan.mjs'), path.join(faulty, 'scan.mjs'));
+    advisories(PLAN, (i) => (i % 2 ? GREEK : LOCK));
+    const FAULT = "deps-currency: the report is over the step summary's limit and could not be cut, so the summary does not carry it; the job log above holds every row (injected cut fault)";
+    const sunk = sweep({ ECOSYSTEMS: 'npm cobol' }, path.join(faulty, 'scan.mjs'));
+    check('a fault in the cut: the log is the block whole, then one plain line naming it; no summary; exit 0',
+      sunk.stdout === `${huge.stdout}${FAULT}\n` && sunk.summary === '' && sunk.status === 0, `${why(sunk)} ${JSON.stringify(sunk.stdout.slice(-200))}`);
+    const sunkEnforcing = sweep({ ECOSYSTEMS: 'npm cobol', FAIL_ON_VULN: 'true' }, path.join(faulty, 'scan.mjs'));
+    check('…under fail-on-vuln: the advisories still BLOCK (exit 1), the fault a line, not a crash',
+      sunkEnforcing.status === 1 && sunkEnforcing.stdout.endsWith(`\nBLOCKED — 7000 dependency advisory(ies) at/above floor **LOW** with \`fail-on-vuln: true\`. Bump/remove the package(s), or lower the floor / document the exposure.\n${FAULT}\n`)
+        && !sunkEnforcing.stdout.includes('crashed') && sunkEnforcing.summary === '', why(sunkEnforcing));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

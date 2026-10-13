@@ -105,7 +105,8 @@ Only the T1 IDs in the table above are promotable. The CRITICAL core (`http-200`
 
 Since **v1.18.0** the report is in three places, so "why did it block?" never needs a browser:
 
-- **Job log** — the whole report, the same lines as the step summary, byte for byte:
+- **Job log** — the whole report, the same lines as the step summary, byte for byte (past the
+  summary's cap, below, every row it leaves out too):
   `gh run view <run-id> --log-failed` (or `--log`). Before v1.18.0 the log said only
   `Process completed with exit code 1`.
 - **Annotations** — one per CRITICAL (a T0, or a T1 you promoted), at the end of the log:
@@ -117,7 +118,10 @@ Since **v1.18.0** the report is in three places, so "why did it block?" never ne
   step; past that, one log line counts the rest (the report lists every finding either way). A WARN or
   INFO finding is never annotated. A sitemap/URL list that resolves to nothing is the one CRITICAL
   without a check id; it annotates as `no-urls-resolved` (at the sitemap, when one was given).
-- **Step summary** — unchanged: the same report, rendered.
+- **Step summary** — the same report, rendered. GitHub drops a summary over 1 MiB, so since
+  v1.29.6 one over 900,000 bytes keeps the head, every heading, the totals and the verdict, and as
+  many whole rows as fit, worst first (❌, ⚠️, ℹ️, ✅), each with its page or origin line, then
+  `(truncated — N more rows; the full report is in the run log: <run URL>)`.
 
 Page text never reaches the start of a log line, where the runner would read it as a workflow
 command: every page-controlled string (a title, a canonical, a `<loc>`, a fetch error) goes through
@@ -214,6 +218,20 @@ an adopting site is all ✅ with the four promoted, a broken one blocks on exact
 catalog reported as could-not-look), a site that adopted nothing never blocks, and the verify token
 never leaves the checked host. 49 targeted mutants of that layer each turn it red. It runs in CI
 (`.github/workflows/seo-aeo-selftest.yml`).
+
+**Step-summary legs (v1.29.6).** `fitReport` is checked against the cut built by hand at every cap
+across a hand-labelled report: a mid cut, a crash note kept where no row fits, a report with no row
+going whole. End to end, 650 pages through a sitemap, each kind of finding in turn: the report runs
+past 1 MiB, and the summary is at most 900,000 bytes — the head, every heading, the totals and the
+verdict, whole rows of the log's own in its order (every ❌, the cut inside ⚠️), each with its page
+or origin line, and the note counting the rows left out with the run URL — and the first row left
+out would not have fit. Pages built to a report of exactly 900,000 bytes reach the summary whole,
+byte for byte, and one byte more is cut. A fault injected into the cut costs only the summary: the
+log carries the report, then one plain line naming the fault; exit 0 in report mode, still 1 under
+`fail-on-critical`. Each of the 19 checks but that leg's anchor turns red under at least one of 31
+targeted mutants; 29 turn the self-test red, and the other two are equivalent (the size check ahead
+of `fitReport`, which checks again; a row with no icon ranking first, where every seo-aeo row has
+one). With the cut switched off, as before v1.29.6, 11 of the 19 go red.
 
 ## Implementation
 

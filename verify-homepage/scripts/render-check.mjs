@@ -32,7 +32,7 @@
 import fs from 'node:fs';
 import { chromium } from 'playwright';
 import { runAffordance, AFFORDANCE_ORDER } from './affordance.mjs';
-import { groupFindings, formatGroup, annotationLines } from './ux-report.mjs';
+import { groupFindings, formatGroup, annotationLines, SUMMARY_CAP, fitReport } from './ux-report.mjs';
 import { FOCUS } from './focus.mjs';
 import { FORMS } from './forms.mjs';
 import { TARGET } from './target.mjs';
@@ -152,6 +152,8 @@ const MOBILE_UA =
 // opening /dev/stdout dups fd 1. Only a Linux socket stdout printed it once, as
 // that open fails (ENXIO) and the catch swallowed it. Same rule as v1.16.0/v1.18.0.
 const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';
+// What a cut step summary points to for every row.
+const runUrl = `${env.GITHUB_SERVER_URL || 'https://github.com'}/${env.GITHUB_REPOSITORY || ''}/actions/runs/${env.GITHUB_RUN_ID || ''}`;
 const out = [];
 const note = (s = '') => out.push(s);
 // Job-log output goes through fs.writeSync, never console.log/console.error:
@@ -161,8 +163,23 @@ const note = (s = '') => out.push(s);
 // there, but neither the report nor the no-URLs diagnostic may be the thing
 // that silently goes missing on a local mac run. (Same fix, same reason as
 // test-suite/scripts/run.mjs v1.7.0.)
-const say = (s) => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
-const sayErr = (s) => { try { fs.writeSync(2, `${s}\n`); } catch { console.error(s); } };
+// …and through writeAll, never ONE fs.writeSync: playwright's import creates
+// process.stdout, and libuv opens a pipe or socket stdout non-blocking
+// (uv_pipe_open, every Unix), so from then on a write takes only what the fd has
+// room for and returns the short count. A report past 64 KiB reached the log as
+// its first 65,536 bytes (measured on macOS, v1.29.6) — and that log is what a cut
+// step summary points to. So: loop until every byte is out, waiting out EAGAIN.
+const PAUSE = new Int32Array(new SharedArrayBuffer(4));
+const writeAll = (fd, s) => {
+  const b = Buffer.from(s);
+  for (let o = 0; o < b.length;) {
+    try { o += fs.writeSync(fd, b, o); } catch (e) { if (e.code !== 'EAGAIN') throw e; Atomics.wait(PAUSE, 0, 0, 5); }
+  }
+};
+// lint-allow-raw-output: the fallback arm of writeAll's fs.writeSync loop, run only when that threw
+const say = (s) => { try { writeAll(1, `${s}\n`); } catch { console.log(s); } };
+// lint-allow-raw-output: the fallback arm of writeAll's fs.writeSync loop, run only when that threw
+const sayErr = (s) => { try { writeAll(2, `${s}\n`); } catch { console.error(s); } };
 // Neutralize page-controlled strings before they reach the markdown summary —
 // a hostile nav label / class can't forge verdict lines, autolink, or inject a
 // beacon. (The authoritative verdict + exit code derive from rows[].fail, never
@@ -775,15 +792,26 @@ for (const f of FAMILIES) {
 }
 const annotations = annotationLines(annotationItems);
 
-if (summaryFile) {
+// A report over SUMMARY_CAP is cut for the step summary alone (fitReport, ./ux-report.mjs): GitHub drops
+// a summary over 1 MiB. A fault in that cut costs the run its summary, never its exit code, and is one
+// plain log line after the report, not an annotation (GitHub keeps 10 per level, the findings').
+let summary = out.join('\n') + '\n';
+let cutFault = '';
+if (summaryFile && Buffer.byteLength(summary) > SUMMARY_CAP) {
+  try { summary = fitReport(out, runUrl); } catch (e) {
+    cutFault = `verify-homepage: the report is over the step summary's limit and could not be cut, so the summary does not carry it; the job log above holds every row (${safe(String((e && e.message) || e), 160)})`;
+  }
+}
+if (summaryFile && !cutFault) {
   try {
-    fs.appendFileSync(summaryFile, out.join('\n') + '\n');
+    fs.appendFileSync(summaryFile, summary);
   } catch {
     // Summary sink unwritable — nothing to do here: the job-log mirror below is
     // unconditional, so the report still reaches stdout, once.
   }
 }
 say(out.join('\n'));
+if (cutFault) say(cutFault);
 for (const l of annotations) say(l);
 
 if ((STRUCTURE && failed.length && FAIL) || affBlocks || famBlocks) process.exit(1);

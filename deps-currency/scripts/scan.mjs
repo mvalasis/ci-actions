@@ -20,6 +20,7 @@ import { spawnSync } from 'node:child_process';
 import {
   parseOsv, osvOutcome, filterByFloor, scanUnpinnedActions, resolveFirstPartyOwners, issueDecision,
   blockDecision, renderReport, normalizeFloor, safe, repoRelative, annotations, faultAnnotation, capIssueBody,
+  SUMMARY_CAP, capSummary,
 } from './engine.mjs';
 
 const env = process.env;
@@ -43,12 +44,25 @@ const WORKSPACE = path.resolve(env.GITHUB_WORKSPACE || '.');   // the repository
 const summaryFile = env.GITHUB_STEP_SUMMARY && env.GITHUB_STEP_SUMMARY !== '/dev/stdout' ? env.GITHUB_STEP_SUMMARY : '';
 const ANNOTATE = env.GITHUB_ACTIONS === 'true';   // runner commands are for the runner, not a local run
 const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
+// What a cut summary and the tracking issue point to for every row.
+const runUrl = `${env.GITHUB_SERVER_URL || 'https://github.com'}/${env.GITHUB_REPOSITORY || ''}/actions/runs/${env.GITHUB_RUN_ID || ''}`;
 // One block of the report: the job log first, then the step summary — so when the summary write is
 // what throws, the block is already readable in the log. Every line of a block starts with our text;
-// tool-controlled strings (package names, advisory ids, paths) go through safe().
-function emit(text) {
+// tool-controlled strings (package names, advisory ids, paths) go through safe(). The report's own
+// block (`fit`) is cut for the summary alone when it is over SUMMARY_CAP (capSummary); a fault in
+// that cut costs the summary that block, never the run its exit code, and is one plain log line,
+// not an annotation (GitHub keeps 10 per level, the advisories').
+function emit(text, fit = false) {
   say(text);
-  if (summaryFile) fs.appendFileSync(summaryFile, `${text}\n`);
+  if (!summaryFile) return;
+  let block = `${text}\n`;
+  if (fit && Buffer.byteLength(block) > SUMMARY_CAP) {
+    try { block = capSummary(text, runUrl); } catch (e) {
+      say(`deps-currency: the report is over the step summary's limit and could not be cut, so the summary does not carry it; the job log above holds every row (${safe(String((e && e.message) || e), 160)})`);
+      return;
+    }
+  }
+  fs.appendFileSync(summaryFile, block);
 }
 const infra = [];
 
@@ -178,7 +192,6 @@ function manageIssue(decision, body, osvReason = '') {
   const untouched = { open: 'nothing opened or updated', close: 'nothing closed', hold: 'nothing commented' }[decision.action];
   if (found.error) { infra.push(`failed to look up the tracking issue: ${found.error} — ${untouched}`); return; }
   const num = found.num;
-  const runUrl = `${env.GITHUB_SERVER_URL || 'https://github.com'}/${repo}/actions/runs/${env.GITHUB_RUN_ID || ''}`;
   const stamp = new Date().toISOString().slice(0, 10);
   if (decision.action === 'hold') {   // osv-scanner could not look: no verdict, so neither open nor close
     if (!num) { infra.push('no tracking issue opened — osv-scanner could not look, so this sweep has no verdict'); return; }
@@ -266,7 +279,7 @@ process.on('uncaughtException', (e) => {
   else if (floorFindings.length > 0) lines.push(`report-only — ${floorFindings.length} advisory(ies) at/above floor would BLOCK under \`fail-on-vuln: true\`.`);
   else lines.push('PASS — no dependency advisories at or above the severity floor.');
 
-  emit(lines.join('\n'));
+  emit(lines.join('\n'), true);
 
   if (MANAGE_ISSUE) {
     const mark = infra.length;

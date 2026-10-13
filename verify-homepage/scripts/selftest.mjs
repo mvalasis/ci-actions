@@ -33,6 +33,10 @@
 //      looked), report-mode and enforcing exit codes, independence from `fail-on-structure`, annotations,
 //      opt-in, a fault in the check is a fault (never a PASS), and the shapes that fooled the first draft
 //      (a ring that fades in, a mobile emulation that flags every layout shift as input-caused)
+//   9. the step summary stays under GitHub's 1 MiB (v1.29.6): a report over 900,000 bytes is cut for the
+//      summary alone — pinned cap by cap against a cut built by hand, then through the real render-check
+//      past 1 MiB, at exactly 900,000 bytes (byte for byte) and one byte over; a fault in the cut costs
+//      the summary, never the exit code
 //
 // Run: node scripts/selftest.mjs (also runs in CI, before the live smoke).
 // Requires: npm ci && npx playwright install chromium.
@@ -58,11 +62,13 @@ const count = (text, s) => text.split(s).length - 1;
 
 // Run the real entrypoint with a captured step summary; assert against the
 // job-log mirror (stdout), which is the sink a human actually reads.
-function run(env) {
+// `script`: a copy with a fault injected (the step summary's cut); `maxBuffer`: a report past 1 MiB.
+function run(env, script = RUN) {
   const summaryPath = path.join(os.tmpdir(), `vh-summary-${process.pid}-${Object.keys(env).length}-${env.URLS.length}.md`);
   fs.writeFileSync(summaryPath, '');
-  const r = spawnSync(process.execPath, [RUN], {
+  const r = spawnSync(process.execPath, [script], {
     encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
     cwd: path.dirname(HERE),
     env: {
       ...process.env,
@@ -248,6 +254,204 @@ for (const [label, sink] of [['local run (no GITHUB_STEP_SUMMARY)', undefined], 
       `exit=${r.exit}, report ×${count(r.stdout, HEADER)}, stderr ${JSON.stringify(r.stderr.slice(0, 200))}`);
     check(`${label}, stdout a ${stdout}: it is the report the step summary gets`,
       enforcing.summary.length > 0 && r.stdout.includes(enforcing.summary), r.stdout.slice(0, 200));
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n# the step summary's cut (pure)");
+const { fitReport } = await import(pathToFileURL(path.join(HERE, 'ux-report.mjs')).href);
+const CAP = 900000;
+const RUN_URL = 'https://github.com/acme/site/actions/runs/33911783576';
+{
+  // A report in render-check's grammar, each line labelled by hand: F fixed, H a page's heading, B a blank
+  // line of that page, a number a row's rank (❌ lines 0, lines under a ❌ family 1, ⚠️ families 2, lines
+  // under them 3, the rest 4). The cut at a cap is built here the long way — the largest k for which the
+  // fixed lines, the first k rows (by rank, report order within one) with their page's heading and blank
+  // lines, a blank line and the longest note (every row left out) fit — and fitReport must give exactly
+  // that, at every cap.
+  const A = 'https://shop.example/', G = 'https://shop.example/γωνία/', C = 'https://shop.example/about/';
+  const SPEC = [
+    ['## verify-homepage · structure + cross-viewport render', 'F'], ['', 'F'],
+    ['Viewports: desktop 1200×800 · iphone 393×852', 'F'], ['Nav inventory: `.github/verify-nav.json`', 'F'], ['', 'F'],
+    [`### ${A}`, 'H'], ['', 'B'],
+    ['- **nav inventory** ❌ — count 4 ≠ expected 5 — got [Home, Shop, Blog, Contact]', 0],
+    ['- **desktop** (1200×800) ✅', 4],
+    ['- **iphone** (393×852) ❌ — horizontal overflow: scrollW 412 > 393 — div.hero@412', 0],
+    ['- **forms** ⚠️ — 2 finding group(s)', 2],
+    ['  - **label-not-visible** `input#q` “Search” — no visible label: only a placeholder ("Search") names it _(all viewports)_', 3],
+    ['  - **input-font-size** `input#q` “Search” — computed font-size 15.2px is under 16px _(iphone)_', 3],
+    ['- **focus** ❌ — 1 finding group(s)', 0],
+    ['  - **focus-obscured** `a#foot` — covered by div.banner when focused (all 5 sampled points) _(all viewports)_', 1],
+    ['  - ℹ️ the Tab walk stopped at its 3-stop cap', 1],
+    ['- **consent** ✅ (no finding across 2 viewport(s))', 4],
+    ['  - ℹ️ no first-visit consent banner found', 4],
+    ['', 'B'],
+    [`### ${G}`, 'H'], ['', 'B'],
+    ['- **desktop** (1200×800) ✅', 4], ['- **iphone** (393×852) ✅', 4],
+    ['- **forms** ⚠️ — 4 finding group(s)', 2],
+    ['  - **required-unmarked** `textarea#msg` “Μήνυμα” — required, but its label carries no asterisk _(all viewports)_', 3],
+    ['  - …and 3 more', 3],
+    ['- **focus** ✅ (no finding across 2 viewport(s))', 4],
+    ['', 'B'],
+    [`### ${C}`, 'H'], ['', 'B'],
+    ['- **desktop** (1200×800) ✅', 4], ['- **iphone** (393×852) ✅', 4],
+    ['', 'B'],
+    ['---', 'F'], ['', 'F'],
+    ['#### ⚠️ landmark selectors that did not resolve cleanly (advisory — no verdict effect)', 'F'], ['', 'F'],
+    ['- `footer` — 2 matches · resolved ‹footer class="drawer-foot"›  _(first seen: https://shop.example/ @ iphone)_', 'F'],
+    ['', 'F'], ['---', 'F'], ['', 'F'],
+    ['❌ **FAIL** — 2/7 checks broke.', 'F'],
+    ['⚠️ **forms WARN (report-only)** — 6 finding group(s) over 3 page(s); 2 form(s), 3 control(s) inspected, 0 honeypot(s) skipped.', 'F'],
+    ['❌ **focus FAIL** — 1 finding group(s) over 3 page(s); 14 Tab stop(s), skip link present, 0 partly covered.', 'F'],
+    ['✅ **consent PASS** — 3 page(s), 2 viewport(s); no banner found.', 'F'],
+  ];
+  const lines = SPEC.map(([l]) => l);
+  const whole = `${lines.join('\n')}\n`;
+  const pageOf = SPEC.map((_, i) => SPEC.slice(0, i + 1).map(([, t]) => t).lastIndexOf('H'));
+  const order = SPEC.map((_, i) => i).filter((i) => typeof SPEC[i][1] === 'number').sort((a, b) => SPEC[a][1] - SPEC[b][1] || a - b);
+  const built = (k, n) => {
+    const keep = new Set(SPEC.map((_, i) => i).filter((i) => SPEC[i][1] === 'F'));
+    for (const i of order.slice(0, k)) for (const j of SPEC.keys()) if (j === i || (pageOf[j] === pageOf[i] && /^[HB]$/.test(SPEC[j][1]))) keep.add(j);
+    return `${[...lines.filter((_, i) => keep.has(i)), '', `(truncated — ${n} more rows; the full report is in the run log: ${RUN_URL})`].join('\n')}\n`;
+  };
+  const expect = (cap) => {
+    if (Buffer.byteLength(whole) <= cap) return whole;
+    let k = 0;
+    while (k < order.length && Buffer.byteLength(built(k + 1, order.length)) <= cap) k++;
+    return built(k, order.length - k);
+  };
+  const lo = Buffer.byteLength(built(0, order.length));
+  const bad = [];
+  for (let cap = lo - 3; cap <= Buffer.byteLength(whole) + 1; cap++) if (fitReport(lines, RUN_URL, cap) !== expect(cap)) bad.push(cap);
+  check(`fitReport at every cap from ${lo - 3} to ${Buffer.byteLength(whole) + 1} bytes is the cut built by hand`, bad.length === 0, `wrong at ${bad.slice(0, 5).join(', ')}`);
+  const mid = fitReport(lines, RUN_URL, Buffer.byteLength(built(7, order.length)));
+  check('…a mid cut: ❌ lines, the lines under ❌ focus, both ⚠️ families with their pages, the note counting 12',
+    mid === built(7, order.length - 7) && mid.includes(`### ${G}`) && !mid.includes(`### ${C}`) && !/required-unmarked|label-not-visible|\*\* \(1200×800\) ✅/.test(mid) &&
+      mid.endsWith(`(truncated — 12 more rows; the full report is in the run log: ${RUN_URL})\n`), JSON.stringify(mid.slice(-300)));
+  const noRows = [lines[0], '', lines[2], '', '---', '', '✅ **PASS** — 0 checks', 'x'.repeat(200)];
+  check('…no row to cut: an over-cap report goes whole, with no note', fitReport(noRows, RUN_URL, 100) === `${noRows.join('\n')}\n`);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n# the step summary stays under GitHub's limit (render-check end to end)");
+//
+// GitHub drops a step summary over 1 MiB (the upload fails with an error annotation, so the run shows
+// none), so a report over 900,000 bytes is cut for the summary alone (fitReport, pinned cap by cap above).
+// The pages are written here: `bad` misses every landmark of a long verify-nav.json (one ❌ line, as long
+// as the list) and has 12 unlabelled fields (`forms` ⚠️: 30 lines and "…and 18 more"); `good` has every
+// landmark (✅) and two `.amb` elements, for the advisory after the first `---`.
+{
+  const GH = { GITHUB_SERVER_URL: 'https://github.com', GITHUB_REPOSITORY: 'acme/site', GITHUB_RUN_ID: '33911783576', FAIL_ON_STRUCTURE: 'false', VIEWPORTS: 'iphone:393x852' };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vh-cap-'));
+  const navPath = path.join(dir, 'nav.json');
+  const nav = (landmarks) => { fs.writeFileSync(navPath, JSON.stringify({ landmarks })); return navPath; };
+  const head = '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>t</title></head><body>';
+  const field = (i) => `<input id="your-name-${String(i).padStart(2, '0')}-${'x'.repeat(40)}" placeholder="Your name ${i}" required style="font-size:15px">`;
+  fs.writeFileSync(path.join(dir, 'bad.html'), `${head}<form action="/x">${Array.from({ length: 12 }, (_, i) => field(i)).join('')}<button>Send</button></form></body></html>`);
+  fs.writeFileSync(path.join(dir, 'good.html'), `${head}<div class="lm" style="position:absolute;top:0;left:0;width:20px;height:20px"></div><p class="amb">a</p><p class="amb">b</p></body></html>`);
+  // The report a run printed: its log, less the annotations after it.
+  const reportOf = (stdout) => { const ls = stdout.split('\n'); ls.pop(); while (ls.length && /^(::(warning|error) |verify-homepage: \d+ more finding group)/.test(ls.at(-1))) ls.pop(); return `${ls.join('\n')}\n`; };
+  // What a cut summary owes against its report, each property on its own. Rows are the lines between the
+  // first `### ` and the first `---` that start `- ` or `  - `; a row's rank is the first icon in its line
+  // (❌ 0, ⚠️ 2, else 4), and a line under a family takes its family's (❌ 1, ⚠️ 3, else 4).
+  const iconOf = (l) => ['❌', '⚠️', '✅'].map((c) => [c, l.indexOf(c)]).filter(([, k]) => k >= 0).sort((a, b) => a[1] - b[1])[0]?.[0];
+  const cutOf = (summary, log, cap = CAP) => {
+    const m = summary.match(/^([\s\S]*)\n\n\(truncated — (\d+) more rows; the full report is in the run log: (\S+)\)\n$/);
+    const rep = log.slice(0, -1).split('\n');
+    let j = 0;
+    const at = (m ? m[1].split('\n') : []).map((l) => { while (j < rep.length && rep[j] !== l) j++; return j++; });
+    const kept = new Set(at);
+    const first = rep.findIndex((l) => l.startsWith('### ')), tail = rep.indexOf('---');
+    const body = (i) => i >= first && i < tail;
+    const pageOf = [], famOf = [];
+    let pg = -1, fam = -1;
+    rep.forEach((l, i) => { if (!body(i)) return; if (l.startsWith('### ')) { pg = i; fam = -1; } else if (l.startsWith('- ')) fam = i; pageOf[i] = pg; famOf[i] = l.startsWith('  - ') ? fam : -1; });
+    const rows = rep.map((_, i) => i).filter((i) => body(i) && /^( {2})?- /.test(rep[i]));
+    const rank = (i) => (famOf[i] >= 0 ? { '❌': 1, '⚠️': 3 }[iconOf(rep[famOf[i]])] : { '❌': 0, '⚠️': 2 }[iconOf(rep[i])]) ?? 4;
+    const order = [...rows].sort((a, b) => rank(a) - rank(b) || a - b);
+    const k = order.findIndex((i) => !kept.has(i));
+    const keptRows = rows.filter((i) => kept.has(i));
+    const pageLines = (p) => rep.map((_, i) => i).filter((i) => pageOf[i] === p && (i === p || rep[i] === ''));
+    const size = Buffer.byteLength(summary);
+    const cost = (i) => [i, ...pageLines(pageOf[i]).filter((x) => !kept.has(x))].reduce((s, x) => s + Buffer.byteLength(rep[x]) + 1, 0);
+    return { size, rep, rows, keptRows, rank,
+      under: size <= cap,
+      shape: !!m && m[3] === RUN_URL,
+      inOrder: at.length > 0 && at.every((x) => x < rep.length),
+      fixed: rep.every((_, i) => body(i) || kept.has(i)),
+      prefix: k > 0 && order.slice(k).every((i) => !kept.has(i)),
+      parents: keptRows.every((i) => pageLines(pageOf[i]).every((x) => kept.has(x)) && (famOf[i] < 0 || kept.has(famOf[i])))
+        && at.every((i) => !body(i) || rows.includes(i) || keptRows.some((r) => pageOf[r] === pageOf[i])),
+      count: !!m && Number(m[2]) === rows.length - keptRows.length,
+      // The first row left out would not fit, the note budgeted at its longest (every row left out).
+      fill: k > 0 && cap - size - (String(rows.length).length - String(rows.length - k).length) < cost(order[k]) };
+  };
+  const owed = (c) => c.under && c.shape && c.inOrder && c.fixed && c.prefix && c.parents && c.count && c.fill;
+  try {
+    // Three `bad` pages and the `good` one, the ❌ lines sized to fill all but ~12 KB of the cap: the cut
+    // lands inside the lines under the ⚠️ families.
+    const lms = (n) => [...Array.from({ length: n }, (_, i) => `.lm:not(.x${String(i).padStart(5, '0')})`), '.amb'];
+    const rowBytes = (n) => Buffer.byteLength(`- **iphone** (393×852) ❌ — ${lms(n).map((s) => `missing landmark ${s}`).join(' · ')}`) + 1;
+    const L = Math.floor(((CAP - 12000) / 3 - rowBytes(0)) / (rowBytes(1) - rowBytes(0)));
+    const pages = [1, 2, 3].map((p) => `file://${dir}/bad.html?p=${p}`).concat(`file://${dir}/good.html`).join(' ');
+    const rich = run({ ...GH, URLS: pages, CHECKS: 'render,nav,forms', NAV_FILE: nav(lms(L)) });
+    const log = reportOf(rich.stdout);
+    const c = cutOf(rich.summary, log);
+    check('3 bad pages + 1 good: exit 0, the report in the log once, over the cap, all 93 forms lines in it',
+      rich.exit === 0 && count(rich.stdout, HEADER) === 1 && Buffer.byteLength(log) > CAP && count(log, '\n  - ') === 93, `exit=${rich.exit} ${Buffer.byteLength(log)} B ${rich.stderr.slice(0, 200)}`);
+    check('…the summary is at most 900,000 bytes', c.under, `${c.size} B`);
+    check('…the report cut, then the note with the run URL', c.shape, JSON.stringify(rich.summary.slice(-200)));
+    check("…every line is the log's, in the log's order", c.inOrder);
+    check('…the head, the advisory after the first `---` and the verdicts kept', c.fixed && /did not resolve cleanly/.test(rich.summary));
+    const by = [0, 2, 3, 4].map((n) => [c.rows, c.keptRows].map((set) => set.filter((i) => c.rank(i) === n).length));
+    check(`…every ❌ line and ⚠️ family kept, the cut inside the lines under them, no ✅ (${by.map(([all, kept]) => `${kept}/${all}`).join(', ')})`,
+      by[0][0] === 3 && by[0][1] === 3 && by[1][1] === by[1][0] && by[2][1] > 0 && by[2][1] < by[2][0] && by[3][0] > 0 && by[3][1] === 0);
+    check('…the rows kept are the first in rank order, report order within a rank', c.prefix);
+    check("…each with its page's heading and blank lines, and its family's line", c.parents);
+    check(`…the note counts the ${c.rows.length - c.keptRows.length} rows left out`, c.count);
+    check('…and fills the room: the first row left out would not fit', c.fill, `${c.size} B`);
+
+    // The boundary: two `bad` pages, render + nav only (no annotation, so the log is the report). Past 1 MiB
+    // first; then each landmark out (56 bytes: one item on each line) to just under 900,000 bytes, and the
+    // pages' URLs, each printed once, lengthened to exactly 900,000 — the summary must be the report, byte
+    // for byte — then one byte more.
+    const ks = (n) => Array.from({ length: n }, (_, i) => `.k${String(i).padStart(5, '0')}`);
+    const urlOf = (p, pad) => `file://${dir}/bad.html?${p}=${'x'.repeat(pad)}`;
+    const room = 120 - urlOf('a', 0).replace(/[`|<>[\]*_~#]/g, '').length;   // what each heading shows of a pad
+    const two = (n, pad, extra = {}, script = RUN) => run({ ...GH, URLS: `${urlOf('a', Math.min(pad, room))} ${urlOf('b', pad - Math.min(pad, room))}`, NAV_FILE: nav(ks(n)), ...extra }, script);
+    const big = two(20000, 0);
+    const b = cutOf(big.summary, big.stdout);
+    check('two pages past 1 MiB: exit 0, the report in the log once; the summary cut to at most 900,000, page b left out and counted',
+      big.exit === 0 && count(big.stdout, HEADER) === 1 && Buffer.byteLength(big.stdout) > 1048576 && owed(b) && b.keptRows.length === 1, `exit=${big.exit} ${Buffer.byteLength(big.stdout)} → ${b.size} B`);
+    const n = 20000 - Math.ceil((Buffer.byteLength(big.stdout) - CAP) / 56);
+    const pad = CAP - (Buffer.byteLength(big.stdout) - (20000 - n) * 56);
+    const atCap = two(n, pad);
+    check(`${n} landmarks and ${pad} URL bytes, a report of exactly 900,000 bytes: the summary is the report, byte for byte`,
+      pad <= 2 * room && Buffer.byteLength(atCap.stdout) === CAP && atCap.summary === atCap.stdout, `${Buffer.byteLength(atCap.stdout)} B, room ${room}`);
+    const pastCap = two(n, pad + 1);
+    check('…one byte more: cut to at most 900,000, whole rows worst first, the rest counted',
+      Buffer.byteLength(pastCap.stdout) === CAP + 1 && owed(cutOf(pastCap.summary, pastCap.stdout)), `${Buffer.byteLength(pastCap.summary)} B`);
+
+    // A fault in the cut costs the run its summary, never its exit code: the log keeps the report whole and
+    // names the fault in one plain line. A copy of the scripts whose fitReport throws.
+    const faulty = path.join(dir, 'faulty');
+    fs.mkdirSync(path.join(faulty, 'scripts'), { recursive: true });
+    const source = fs.readFileSync(path.join(HERE, 'ux-report.mjs'), 'utf8');
+    const CUT = 'export function fitReport(lines, runUrl, cap = SUMMARY_CAP) {';
+    check('fault-injection anchor still present in ux-report.mjs', source.includes(CUT));
+    for (const f of [...MODULES, 'render-check.mjs']) fs.copyFileSync(path.join(HERE, f), path.join(faulty, 'scripts', f));
+    fs.writeFileSync(path.join(faulty, 'scripts', 'ux-report.mjs'), source.replace(CUT, `${CUT} throw new Error('injected cut fault');`));
+    fs.symlinkSync(path.join(path.dirname(HERE), 'node_modules'), path.join(faulty, 'node_modules'));
+    const FAULT = "verify-homepage: the report is over the step summary's limit and could not be cut, so the summary does not carry it; the job log above holds every row (injected cut fault)";
+    const sunk = two(20000, 0, {}, path.join(faulty, 'scripts', 'render-check.mjs'));
+    check('a fault in the cut: the log is the report whole, then one plain line naming it; no summary; exit 0',
+      sunk.stdout === `${big.stdout}${FAULT}\n` && sunk.summary === '' && sunk.exit === 0, `exit=${sunk.exit} ${JSON.stringify(sunk.stdout.slice(-200))}`);
+    const sunkEnforcing = two(20000, 0, { FAIL_ON_STRUCTURE: 'true' }, path.join(faulty, 'scripts', 'render-check.mjs'));
+    check('…under fail-on-structure: the structure FAIL still blocks (exit 1), the fault a line, not a crash',
+      sunkEnforcing.exit === 1 && sunkEnforcing.stdout.endsWith(`\n❌ **FAIL** — 2/2 checks broke.\n${FAULT}\n`) && !/crashed/.test(sunkEnforcing.stdout + sunkEnforcing.stderr) && sunkEnforcing.summary === '',
+      `exit=${sunkEnforcing.exit} ${JSON.stringify(sunkEnforcing.stdout.slice(-200))}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 

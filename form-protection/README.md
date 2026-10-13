@@ -75,7 +75,8 @@ Mirrors `seo-aeo`: `urls` / `sitemap-url`, `fail-on-critical` (default
 
 Since **v1.18.0** the report is in three places, so "why did it block?" never needs a browser:
 
-- **Job log** — the whole report, the same lines as the step summary, byte for byte:
+- **Job log** — the whole report, the same lines as the step summary, byte for byte (past the
+  summary's cap, below, every row it leaves out too):
   `gh run view <run-id> --log-failed` (or `--log`). Before v1.18.0 the log said only
   `Process completed with exit code 1`.
 - **Annotations** — one per CRITICAL, at the end of the log: `::error
@@ -87,7 +88,10 @@ Since **v1.18.0** the report is in three places, so "why did it block?" never ne
   (`fail-on-critical: false`) annotates at `::warning` instead. GitHub keeps 10 per step; past that,
   one log line counts the rest (the report lists every finding either way). A WARN or INFO finding
   is never annotated. A sitemap/URL list that resolves to nothing annotates as `no-urls-resolved`.
-- **Step summary** — unchanged: the same report, rendered.
+- **Step summary** — the same report, rendered. GitHub drops a summary over 1 MiB, so since
+  v1.29.6 one over 900,000 bytes keeps the head, every heading, the totals and the verdict, and as
+  many whole rows as fit, worst first (❌, ⚠️, ℹ️, ✅; a row with no icon ranks with ✅), each with
+  its page or endpoint line, then `(truncated — N more rows; the full report is in the run log: <run URL>)`.
 
 Page text never reaches the start of a log line, where the runner would read it as a workflow
 command: every page-controlled string (a sitekey, a form attribute, a response body) goes through
@@ -133,3 +137,20 @@ The several-entries fixtures (v1.23.0) include an e2e whose second entry reaches
 with the form's hidden routing field. The v1.22.0 engine turns 13 of their assertions red, and so
 does each of 12 targeted mutants (first entry only, later entries probed twice, a sitekey graded per
 entry, map order, a lost hidden field or token default, the counts).
+
+**Step-summary legs (v1.29.6).** `fitReport` is checked against the cut built by hand at every cap
+across two hand-labelled reports (one whose probe section is the icon-less `no probe-able endpoints`
+line): a mid cut, a row with no icon ranking with ✅, a crash note kept where no row fits, a report
+with no row going whole. End to end, 350 pages of gated forms, all posting to one endpoint so the
+probe runs once: the report runs past 1 MiB, and the summary is at most 900,000 bytes — the head
+(its unparseable `form-endpoints` warnings too), every heading, the totals and the verdict, whole
+rows of the log's own in its order (every ❌, the cut inside ⚠️), each with its page or endpoint
+line, and the note counting the rows left out with the run URL — and the first row left out would
+not have fit. Pages built to a report of exactly 900,000 bytes reach the summary whole, byte for
+byte, and one byte more is cut. A fault injected into the cut costs only the summary: the log
+carries the report, then one plain line naming the fault; exit 0 in report mode, still 1 under
+`fail-on-critical`. Each of the 21 checks but that leg's anchor turns red under at least one of 31
+targeted mutants; 28 turn the self-test red, and the other three are equivalent (the size check
+ahead of `fitReport`, which checks again; the italic legend no longer fixed, where form-protection
+writes none; a fixed line not closing the page or endpoint above it, where every indented row
+follows its own). With the cut switched off, as before v1.29.6, 11 of the 21 go red.

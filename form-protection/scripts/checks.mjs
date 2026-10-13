@@ -374,3 +374,56 @@ export function annotations(graded, level = 'error', cap = 10) {
   if (crits.length > cap) out.push(`form-protection: ${crits.length - cap} more critical finding(s) not annotated (GitHub keeps ${cap} per step) — the report above lists them all.`);
   return out;
 }
+
+// ---------- the step summary's cut (pure; check.mjs flush() calls it, selftest.mjs covers it) ----------
+
+// GitHub drops a step summary over 1 MiB: the upload fails with an error annotation and the run shows
+// none, so until v1.29.6 the report went missing on the biggest sites (`max-urls` raised to a thousand
+// pages or so). A report over SUMMARY_CAP BYTES keeps its fixed lines — the head, each section's
+// heading, the totals and the verdict — and as many WHOLE rows as fit, the worst first (❌, ⚠️, ℹ️, ✅;
+// report order within each), each with the page, origin or endpoint line it sits under. The lines keep
+// the report's order, and a note after the verdict counts the rows left out and gives the run URL; the
+// job log carries every line. Bytes are never fewer than characters, so the cap holds however GitHub
+// counts. Under the cap the report is `${lines.join('\n')}\n`, byte for byte, and so is one with no row
+// to cut. Restated byte for byte in seo-aeo's and form-protection's checks.mjs: one report grammar.
+export const SUMMARY_CAP = 900000;
+const RANKS = [['❌', 0], ['⚠️', 1], ['ℹ️', 2], ['✅', 3]];
+const rankOf = (line) => { const s = line.replace(/^\s*(- )?/, ''); return (RANKS.find(([icon]) => s.startsWith(icon)) || [null, 3])[1]; };
+// Each line to the cut: fixed (always kept), a row (its icon's rank; the line it sits under, if any) or
+// a parent (kept with its first kept row). Fixed: everything before the first `### ` heading and from
+// the last `**critical: ` totals line on; in between, blank lines, headings, the italic legend and a
+// crash note. A line at the margin is a parent when indented rows follow it, a row otherwise; an
+// indented row sits under the margin line above it unless a fixed line comes between (seo-aeo's
+// cross-page rows sit right under their heading).
+function classifyReport(lines) {
+  let tail = lines.length;
+  for (let i = lines.length - 1; i >= 0; i--) if (lines[i].startsWith('**critical: ')) { tail = i; break; }
+  let body = false, parent = -1;
+  return lines.map((line, i) => {
+    body = body || line.startsWith('### ');
+    if (!body || i >= tail || !line.trim() || /^(### |_)/.test(line) || /^- ❌ [a-z-]+ crashed: /.test(line)) { parent = -1; return { fixed: true }; }
+    if (line.startsWith(' ')) return { rank: rankOf(line), parents: parent < 0 ? [] : [parent] };
+    if ((lines[i + 1] || '').startsWith(' ')) { parent = i; return { parent: true }; }
+    parent = -1;
+    return { rank: rankOf(line), parents: [] };
+  });
+}
+export function fitReport(lines, runUrl, cap = SUMMARY_CAP) {
+  const whole = `${lines.join('\n')}\n`;
+  const cls = classifyReport(lines);
+  const rows = lines.map((_, i) => i).filter((i) => cls[i].rank !== undefined).sort((a, b) => cls[a].rank - cls[b].rank || a - b);
+  if (!rows.length || Buffer.byteLength(whole) <= cap) return whole;
+  const keep = cls.map((c) => !!c.fixed);
+  const size = (i) => Buffer.byteLength(lines[i]) + 1;
+  const note = (n) => `(truncated — ${n} more rows; the full report is in the run log: ${runUrl})`;
+  // What the rows may take once the fixed lines, the blank line and the longest note (every row left out) are paid for.
+  let room = cap - keep.reduce((s, k, i) => s + (k ? size(i) : 0), 0) - 1 - Buffer.byteLength(note(rows.length)) - 1;
+  for (const i of rows) {
+    const add = [...cls[i].parents.filter((p) => !keep[p]), i];
+    const cost = add.reduce((s, j) => s + size(j), 0);
+    if (cost > room) break;
+    room -= cost;
+    for (const j of add) keep[j] = true;
+  }
+  return `${[...lines.filter((_, i) => keep[i]), '', note(rows.filter((i) => !keep[i]).length)].join('\n')}\n`;
+}

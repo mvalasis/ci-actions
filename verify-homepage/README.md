@@ -420,6 +420,19 @@ it printed twice there: the old fallback appended the report to `/dev/stdout`,
 which is the log again. A crash note goes to the step summary and to stderr; on a
 local run, stderr is the only copy.
 
+GitHub drops a step summary over 1 MiB, so since v1.29.6 a report over 900,000
+bytes is cut for the summary alone: the head, and from the first `---` on the
+advisory and the verdicts, stay; then as many whole rows as fit, worst first —
+❌ lines, the lines under a ❌ family, ⚠️ families, the lines under them, then
+the rest — each with its page's heading; then
+`(truncated — N more rows; the full report is in the run log: <run URL>)`. A
+fault in that cut costs only the summary: one plain line in the log, the exit
+code kept. The job log carries every line. Until v1.29.6 it did not past
+64 KiB: playwright's import creates `process.stdout`, which leaves a pipe or
+socket stdout non-blocking, and one `fs.writeSync` then wrote only what the fd
+had room for (65,536 bytes to a pipe), the verdicts lost with the rest; it now
+loops until every byte is out.
+
 ### No annotations (decision, 2026-09-25)
 
 `verify-homepage` does not emit `::error` / `::warning` annotations for its FAIL
@@ -469,6 +482,26 @@ once. Each of those cases runs with stdout as a socket (what `spawnSync` hands a
 child) and as an `O_APPEND` file. The file is the load-bearing one: on Linux,
 opening `/dev/stdout` fails (ENXIO) when stdout is a socket, so a socket-only leg
 would pass against the pre-v1.19.1 double print on the CI runner.
+
+**Step-summary legs (v1.29.6).** `fitReport` is checked against the cut built by
+hand at every cap across a hand-labelled report (a mid cut; a report with no
+row going whole). End to end, three bad pages and a good one under
+`render,nav,forms`, landmarks sized to pass the cap: the summary is at most
+900,000 bytes — the head, the advisory after the first `---` and the verdicts,
+every ❌ line and ⚠️ family, the cut inside the lines under them, each row with
+its page's heading and blank lines, and the note counting the rows left out with
+the run URL — and the first row left out would not have fit; the job log carries
+the report whole, which the `say` before v1.29.6 did not (this leg found the
+64 KiB log). Two pages past 1 MiB leave page b out, counted. Landmarks and URL bytes
+built to a report of exactly 900,000 bytes reach the summary whole, byte for
+byte, and one byte more is cut. A fault injected into the cut costs only the
+summary: exit 0 in report mode, still 1 under `fail-on-structure`. Each of the
+19 checks but that leg's anchor turns red under at least one of 35 targeted
+mutants; 33 turn the self-test red, and the other two are equivalent (the size
+check ahead of `fitReport`, which checks again; a family's icon carried into the
+next page, where a family line at the margin always sets it before a line under
+it is read). With the cut switched off, as before v1.29.6, 12 of the 19 go red;
+with the one-write `say` back, 11.
 
 The `affordance` fixtures are `affordance-bad.html` (every rule must fire: the EPN pre-fix shape, a
 contradicting `aria-label`, an overlay on the label, a swallowed click, unlabelled radios, one wrong-cursor

@@ -47,8 +47,11 @@ or comment body over 65,536 characters is refused. A report with one row per pag
 gets a byte cap: whole rows, worst first, the verdict line kept, then how many rows were left out
 and the run URL; under the cap it stays byte-identical. Pin the cap with an executed selftest at
 exactly the cap and one byte over. Current implementations: `linkcheck/scripts/fit-report.py`
-(issue body at 60,000 bytes since v1.29.2, step summary at 900,000 since v1.29.3) and
-`deps-currency/scripts/engine.mjs` `capIssueBody()` (issue body at 60,000 bytes since v1.29.4).
+(issue body at 60,000 bytes since v1.29.2, step summary at 900,000 since v1.29.3),
+`deps-currency/scripts/engine.mjs` `capIssueBody()` (issue body at 60,000 bytes since v1.29.4)
+and `capSummary()` (step summary at 900,000 since v1.29.6), and `fitReport()` in
+`seo-aeo/scripts/checks.mjs`, `form-protection/scripts/checks.mjs` and
+`verify-homepage/scripts/ux-report.mjs` (step summary at 900,000 since v1.29.6).
 
 **A path the report names is relative to the workspace, as an annotation's `file=` is** — never
 the scanner's own spelling. osv-scanner v2 prints each lockfile by its absolute runner path, and a

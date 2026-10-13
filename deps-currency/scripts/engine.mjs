@@ -382,6 +382,22 @@ export function capIssueBody(lead, report, runUrl, cap = ISSUE_BODY_CAP) {
   return body(k);
 }
 
+// The report's block in the step summary (scan.mjs emit()). GitHub drops a step summary over 1 MiB:
+// the upload fails with an error annotation and the run shows no summary, so until v1.29.6 it went
+// missing when the tree carried the most advisories (past ~5,500 rows at a typical 160 bytes). A
+// block over SUMMARY_CAP BYTES gets the issue body's cut (capIssueBody) with a byte kept for its own
+// trailing newline: the head, as many whole rows as fit, most severe first, the rest of the block,
+// scanner notes and verdict included, then how many rows it left out and the run URL. The job log
+// carries every row. Under the cap the block is `${text}\n`, byte for byte, and so is one with no
+// table to cut (capIssueBody's known limit).
+export const SUMMARY_CAP = 900000;
+export function capSummary(text, runUrl, cap = SUMMARY_CAP) {
+  const block = `${text}\n`;
+  if (Buffer.byteLength(block) <= cap) return block;
+  const cut = capIssueBody('', block, runUrl, cap - 1);
+  return cut === block ? block : `${cut}\n`;
+}
+
 // ---------------------------------------------------------------------------
 // Job-log annotations. Workflow-command encoding — @actions/core's escaping, restated (as in
 // security-baseline's tiers.mjs) so the action stays dependency-free. Data may not carry a line

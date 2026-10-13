@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   SEV, T0_CHECKS, T1_CHECKS, analyzePage, analyzeRobots, analyzeLlms, analyzeSitemap, analyzeRedirects,
-  collectLdNodes, typesOf, safe, escapeData, escapeProperty, annotation, annotations,
+  collectLdNodes, typesOf, safe, escapeData, escapeProperty, annotation, annotations, fitReport,
 } from './checks.mjs';
 import {
   parseLinkHeader, analyzeAgentHome, analyzeWebmcp, analyzeMarkdownNegotiation, analyzeMarkdown404, analyzeContentSignal,
@@ -386,6 +386,69 @@ console.log('\n# report + annotation encoding (pure)');
   check('annotations: a WARN finding is never annotated', !out.some((l) => l.includes('noindex')) && annotations([warnOnly]).length === 0);
 }
 
+console.log("\n# the step summary's cut (pure)");
+{
+  // A report in check.mjs's grammar, each line labelled by hand: F fixed, P a parent, [rank, parent] a row.
+  // The cut at a cap is then built here the long way — the largest k for which the fixed lines, the first
+  // k rows (❌ first, report order within a rank) with their parents, a blank line and the longest note
+  // (every row left out) fit — and fitReport must give exactly that, at every cap.
+  const A = 'https://shop.example/a/', G = 'https://shop.example/γωνία/';
+  const SPEC = [
+    ['## 🔎 seo-aeo — SEO + AEO/GEO gate (JS-disabled crawler view)', 'F'], ['', 'F'],
+    ['- mode: report-only (never blocks)', 'F'], ['- pages checked: 3', 'F'],
+    ['- ⚠️ ignored `critical-checks` (not promotable T1 checks): `nope`', 'F'], ['', 'F'],
+    ['### Pages', 'F'],
+    [`- ❌ [${A}](${A})  \`HTTP 200\``, 'P'],
+    ['  - ❌ `h1-present` — no h1 on the page', [0, 7]],
+    ['  - ⚠️ `meta-description` — no meta description — Google will auto-generate the snippet', [1, 7]],
+    ['  - ℹ️ `jsonld-present` — structured data uses Microdata/RDFa, not JSON-LD', [2, 7]],
+    ['- ⚠️ https://shop.example/b/ — fetch failed (ECONNRESET) — infra issue, not a content defect', [1, -1]],
+    [`- ✅ [${G}](${G})  \`HTTP 200\` · ↪ ${G}`, 'P'],
+    ['  - ✅ title (24) · 1 h1 · canonical · indexable', [3, 12]],
+    ['', 'F'], ['### Site files & hygiene', 'F'],
+    ['**https://shop.example**', 'P'],
+    ['  - ⚠️ `llms-txt` — no /llms.txt (AEO artifact: a markdown index that helps LLMs navigate the site)', [1, 16]],
+    ['  - ❌ `robots-txt` — robots.txt not served as plain text (status 500)', [0, 16]],
+    ['', 'F'], ['### Agent readiness', 'F'],
+    ['_absent = ℹ️ (a roadmap item, never a defect) · present but broken = ⚠️_', 'F'],
+    ['**https://shop.example**', 'P'],
+    ['  - ℹ️ `agent-markdown` — homepage with Accept: text/markdown returned HTTP 404', [2, 22]],
+    ['  - ✅ in place: `agent-link-headers`', [3, 22]],
+    ['', 'F'], ['### Cross-page & canonical resolution', 'F'],
+    ['  - ⚠️ `duplicate-title` — 2 pages share the same title: "Σπίτι"', [1, -1]],
+    ['', 'F'], ['**critical: 2 · warnings: 3 · info: 2**', 'F'],
+    ['report-only — 2 critical check(s) would BLOCK under `fail-on-critical: true`.', 'F'],
+  ];
+  const RUN = 'https://github.com/acme/site/actions/runs/33911783576';
+  const lines = SPEC.map(([l]) => l);
+  const whole = `${lines.join('\n')}\n`;
+  const order = SPEC.map((_, i) => i).filter((i) => Array.isArray(SPEC[i][1])).sort((a, b) => SPEC[a][1][0] - SPEC[b][1][0] || a - b);
+  const built = (k, n) => {
+    const keep = new Set(SPEC.map((_, i) => i).filter((i) => SPEC[i][1] === 'F'));
+    for (const i of order.slice(0, k)) { keep.add(i); if (SPEC[i][1][1] >= 0) keep.add(SPEC[i][1][1]); }
+    return `${[...lines.filter((_, i) => keep.has(i)), '', `(truncated — ${n} more rows; the full report is in the run log: ${RUN})`].join('\n')}\n`;
+  };
+  const expect = (cap) => {
+    if (Buffer.byteLength(whole) <= cap) return whole;
+    let k = 0;
+    while (k < order.length && Buffer.byteLength(built(k + 1, order.length)) <= cap) k++;
+    return built(k, order.length - k);
+  };
+  const lo = Buffer.byteLength(built(0, order.length));
+  const bad = [];
+  for (let cap = lo - 3; cap <= Buffer.byteLength(whole) + 1; cap++) if (fitReport(lines, RUN, cap) !== expect(cap)) bad.push(cap);
+  check(`fitReport at every cap from ${lo - 3} to ${Buffer.byteLength(whole) + 1} bytes is the cut built by hand`, bad.length === 0, `wrong at ${bad.slice(0, 5).join(', ')}`);
+  const mid = fitReport(lines, RUN, Buffer.byteLength(built(4, order.length)));
+  check('…a mid cut: the two ❌ rows with their page and origin, the first two ⚠️, the note counting the other 6',
+    mid === built(4, order.length - 4) && mid.includes('`robots-txt`') && mid.includes('/b/ — fetch failed') && !mid.includes('`llms-txt`') && mid.endsWith(`(truncated — 6 more rows; the full report is in the run log: ${RUN})\n`), JSON.stringify(mid.slice(-300)));
+  // A crash mid-report: no totals, the crash note last — kept where no row fits, so never a row.
+  const crashed = [...lines.slice(0, 14), '- ❌ seo-aeo crashed: TypeError: x is not a function'];
+  const one = `${[...lines.slice(0, 7), crashed[14], '', `(truncated — 5 more rows; the full report is in the run log: ${RUN})`].join('\n')}\n`;
+  check('…a report cut short by a crash: the crash note is kept where no row fits', fitReport(crashed, RUN, Buffer.byteLength(one)) === one, JSON.stringify(fitReport(crashed, RUN, Buffer.byteLength(one))));
+  const noRows = [lines[0], '', '- ❌ **no URLs resolved** — nothing to check', '', '**critical: 1 · warnings: 0**', 'x'.repeat(200)];
+  check('…no row to cut: an over-cap report goes whole, with no note', fitReport(noRows, RUN, 100) === `${noRows.join('\n')}\n`);
+}
+
 console.log('\n# check.mjs end to end — the job log carries the report; CRITICALs annotate');
 {
   // check.mjs runs a top-level IIFE, so it is exercised as a PROCESS against a local server. The
@@ -412,9 +475,10 @@ console.log('\n# check.mjs end to end — the job log carries the report; CRITIC
   const summaryPath = path.join(tmp, 'summary.md');
   // MUST be async (spawn, not spawnSync): the fixture server lives in THIS process. The env is built
   // from scratch so a CI runner's own GITHUB_ACTIONS / GITHUB_STEP_SUMMARY never leak into a case.
-  const run = (extra) => new Promise((resolve) => {
+  // `script`: a copy with a fault injected (H).
+  const run = (extra, script = fileURLToPath(new URL('./check.mjs', import.meta.url))) => new Promise((resolve) => {
     try { fs.rmSync(summaryPath, { force: true }); } catch { /* fresh file per run */ }
-    const child = spawn(process.execPath, [fileURLToPath(new URL('./check.mjs', import.meta.url))], {
+    const child = spawn(process.execPath, [script], {
       env: { PATH: process.env.PATH, HOME: tmp, TMPDIR: tmp, ...extra }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '', stderr = '';
@@ -552,6 +616,122 @@ console.log('\n# check.mjs end to end — the job log carries the report; CRITIC
       check('agent e2e, a site that adopted nothing: the four promoted ids never block (exit 0)', gn.status === 0 && commands(gn.stdout).length === 0 && /ℹ️ `agent-markdown`/.test(gn.stdout), why(gn));
     } finally {
       for (const sv of [external, goodSite, brokenSite]) sv.close();
+    }
+
+    // (H) The step summary stays under GitHub's limit (v1.29.6). GitHub drops a step summary over 1 MiB (the
+    // upload fails with an error annotation, so the run shows none), so a report over 900,000 bytes is cut for
+    // the summary alone (fitReport, pinned cap by cap above): the fixed lines, as many whole rows as fit, worst
+    // first, each with its page or origin line, then a note counting the rows left out. The log keeps every
+    // line. No GITHUB_ACTIONS here, so a run's log is its report whole.
+    const CAP = 900000;
+    const RUN_URL = 'https://github.com/acme/site/actions/runs/33911783576';
+    const BIG = { GITHUB_STEP_SUMMARY: summaryPath, GITHUB_REPOSITORY: 'acme/site', GITHUB_RUN_ID: '33911783576' };
+    // Pages of four kinds, five in turn: ❌ and ⚠️ rows (no title, no h1, 30 broken JSON-LD blocks, a ⚠️ row
+    // each); ⚠️ rows only; one ℹ️ row (Microdata); a clean page, ✅, twice.
+    const LD = '<script type="application/ld+json">{ broken</script>'.repeat(30);
+    const big = createServer((req, res) => {
+      const base = `http://${req.headers.host}`, n = Number((req.url.match(/^\/sitemap-(\d+)\.xml$/) || [])[1]);
+      const m = req.url.match(/^\/p\/(\d{5})\/$/);
+      if (n) { res.writeHead(200, { 'content-type': 'application/xml' }); return res.end(`<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${Array.from({ length: n }, (_, i) => `<url><loc>${base}/p/${String(i).padStart(5, '0')}/</loc></url>`).join('')}</urlset>`); }
+      if (!m) { res.writeHead(404, { 'content-type': 'text/html' }); return res.end('<html><head><title>404</title></head><body><h1>Not found</h1></body></html>'); }
+      const self = `${base}${req.url}`, i = Number(m[1]);
+      const meta = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="description" content="A perfectly reasonable meta description, long enough for a snippet and short enough to fit."><link rel="canonical" href="${self}"><meta property="og:title" content="Page"><meta property="og:url" content="${self}"><meta property="og:image" content="${base}/i.png">`;
+      const ld = JSON.stringify({ '@context': 'https://schema.org', '@graph': [{ '@type': 'WebPage', name: 'Page' }, { '@type': 'BreadcrumbList', itemListElement: [{ '@type': 'ListItem', position: 1, name: 'Home', item: `${base}/` }, { '@type': 'ListItem', position: 2, name: 'Page', item: self }] }] });
+      res.writeHead(200, { 'content-type': 'text/html' });
+      return res.end([
+        `<!doctype html><html><head>${LD}</head><body><div><p>page ${i}</p></div></body></html>`,
+        `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Page ${i}</title>${LD}</head><body><main><h1>Page ${i}</h1></main></body></html>`,
+        `<!doctype html><html lang="en"><head>${meta}<title>Page ${i}</title></head><body><main itemscope itemtype="https://schema.org/Thing"><h1>Page ${i}</h1></main></body></html>`,
+        `<!doctype html><html lang="en"><head>${meta}<title>Page ${i}</title><script type="application/ld+json">${ld}</script></head><body><main><h1>Page ${i}</h1></main></body></html>`,
+      ][Math.min(i % 5, 3)]);
+    });
+    await new Promise((r) => big.listen(0, '127.0.0.1', r));
+    const SITE = `http://127.0.0.1:${big.address().port}`;
+    const pages = (n, extra = {}) => ({ ...BIG, SITEMAP_URL: `${SITE}/sitemap-${n}.xml`, MAX_URLS: String(n), ...extra });
+    // What a cut summary owes against its report (`log`), each property on its own. A row is an indented line
+    // (this site prints no other); its parent is the margin line above it, unless a heading comes between.
+    const ICONS = ['❌', '⚠️', 'ℹ️', '✅'];
+    const rankOf = (l) => { const k = ICONS.findIndex((c) => l.trimStart().slice(2).startsWith(c)); return k < 0 ? 3 : k; };
+    const cutOf = (summary, log, cap = CAP) => {
+      const m = summary.match(/^([\s\S]*)\n\n\(truncated — (\d+) more rows; the full report is in the run log: (\S+)\)\n$/);
+      const rep = log.slice(0, -1).split('\n');
+      let j = 0;
+      const at = (m ? m[1].split('\n') : []).map((l) => { while (j < rep.length && rep[j] !== l) j++; return j++; });
+      const kept = new Set(at);
+      const first = rep.findIndex((l) => l.startsWith('### ')), tail = rep.findLastIndex((l) => l.startsWith('**critical: '));
+      const body = (i) => i > first && i < tail && rep[i] !== '' && !/^(### |_)/.test(rep[i]);
+      const parentOf = [];
+      let p = -1;
+      rep.forEach((l, i) => { if (l.startsWith(' ')) parentOf[i] = p; else p = body(i) ? i : -1; });
+      const rows = rep.map((_, i) => i).filter((i) => body(i) && rep[i].startsWith(' '));
+      const order = [...rows].sort((a, b) => rankOf(rep[a]) - rankOf(rep[b]) || a - b);
+      const k = order.findIndex((i) => !kept.has(i));
+      const keptRows = rows.filter((i) => kept.has(i));
+      const under = new Set(keptRows.map((i) => parentOf[i]));
+      const size = Buffer.byteLength(summary);
+      const cost = (i) => Buffer.byteLength(rep[i]) + 1 + (parentOf[i] >= 0 && !kept.has(parentOf[i]) ? Buffer.byteLength(rep[parentOf[i]]) + 1 : 0);
+      return { size, rep, rows, keptRows,
+        under: size <= cap,
+        shape: !!m && m[3] === RUN_URL,
+        inOrder: at.length > 0 && at.every((x) => x < rep.length),
+        fixed: rep.every((_, i) => body(i) || kept.has(i)),
+        prefix: k > 0 && order.slice(k).every((i) => !kept.has(i)),
+        parents: keptRows.every((i) => parentOf[i] < 0 || kept.has(parentOf[i])) && at.every((i) => !body(i) || rep[i].startsWith(' ') || under.has(i)),
+        count: !!m && Number(m[2]) === rows.length - keptRows.length,
+        // The first row left out would not fit, the note budgeted at its longest (every row left out).
+        fill: k > 0 && cap - size - (String(rows.length).length - String(rows.length - k).length) < cost(order[k]) };
+    };
+    const owed = (c) => c.under && c.shape && c.inOrder && c.fixed && c.prefix && c.parents && c.count && c.fill;
+    try {
+      const huge = await run(pages(650));
+      const h = cutOf(huge.summary, huge.stdout);
+      check('summary, 650 pages: exit 0, the report in the log once, past 1 MiB', huge.status === 0 && once(huge) && Buffer.byteLength(huge.stdout) > 1048576, `${why(huge)} ${Buffer.byteLength(huge.stdout)} B`);
+      check('…the summary is at most 900,000 bytes', h.under, `${h.size} B`);
+      check('…the report cut, then the note with the run URL', h.shape, JSON.stringify(huge.summary.slice(-200)));
+      check("…every line is the log's, in the log's order", h.inOrder);
+      check('…the head, every heading, the totals and the verdict kept', h.fixed);
+      const by = [0, 1, 2, 3].map((n) => [h.rows, h.keptRows].map((set) => set.filter((i) => rankOf(h.rep[i]) === n).length));
+      check(`…every ❌ row kept, the cut inside ⚠️ (kept ${by.map(([all, kept]) => `${kept}/${all}`).join(', ')})`,
+        by[0][0] > 0 && by[0][1] === by[0][0] && by[1][1] > 0 && by[1][1] < by[1][0] && by[2][1] === 0 && by[3][1] === 0);
+      check('…the rows kept are the first in rank order, report order within a rank', h.prefix);
+      check('…each with its page or origin line, and no such line without one', h.parents);
+      check(`…the note counts the ${h.rows.length - h.keptRows.length} rows left out`, h.count);
+      check('…and fills the room: the first row left out would not fit', h.fill, `${h.size} B`);
+
+      // The boundary, both sides: pages to a little under 900,000 bytes, then an ignored `critical-checks`
+      // token, printed once in the head, lengthened to exactly 900,000 — the summary must be the report, byte
+      // for byte — then one byte more.
+      const n = Math.floor((650 * (CAP - 15000)) / Buffer.byteLength(huge.stdout));
+      const short = await run(pages(n, { CRITICAL_CHECKS: 'x' }));
+      const pad = CAP - Buffer.byteLength(short.stdout);
+      const atCap = await run(pages(n, { CRITICAL_CHECKS: 'x'.repeat(1 + pad) }));
+      check(`summary, ${n} pages built to a report of exactly 900,000 bytes: the summary is the report, byte for byte`,
+        pad >= 0 && Buffer.byteLength(atCap.stdout) === CAP && atCap.summary === atCap.stdout, `${Buffer.byteLength(atCap.stdout)} B`);
+      const pastCap = await run(pages(n, { CRITICAL_CHECKS: 'x'.repeat(2 + pad) }));
+      check('…one byte more: cut to at most 900,000, whole rows worst first, the rest counted',
+        Buffer.byteLength(pastCap.stdout) === CAP + 1 && owed(cutOf(pastCap.summary, pastCap.stdout)), `${Buffer.byteLength(pastCap.summary)} B`);
+
+      // A fault in the cut costs the run its summary, never its exit code: the log keeps the report whole and
+      // names the fault in one plain line. A copy of the scripts whose fitReport throws.
+      const HERE = path.dirname(fileURLToPath(import.meta.url));
+      const faulty = path.join(tmp, 'faulty');
+      fs.mkdirSync(faulty);
+      const source = fs.readFileSync(path.join(HERE, 'checks.mjs'), 'utf8');
+      const CUT = 'export function fitReport(lines, runUrl, cap = SUMMARY_CAP) {';
+      check('fault-injection anchor still present in checks.mjs', source.includes(CUT));
+      fs.writeFileSync(path.join(faulty, 'checks.mjs'), source.replace(CUT, `${CUT} throw new Error('injected cut fault');`));
+      for (const f of ['check.mjs', 'agent.mjs']) fs.copyFileSync(path.join(HERE, f), path.join(faulty, f));
+      fs.symlinkSync(path.join(HERE, '..', 'node_modules'), path.join(faulty, 'node_modules'));
+      const FAULT = "seo-aeo: the report is over the step summary's limit and could not be cut, so the summary does not carry it; the job log above holds every row (injected cut fault)";
+      const sunk = await run(pages(650), path.join(faulty, 'check.mjs'));
+      check('a fault in the cut: the log is the report whole, then one plain line naming it; no summary; exit 0',
+        sunk.stdout === `${huge.stdout}${FAULT}\n` && sunk.summary === '' && sunk.status === 0, `${why(sunk)} ${JSON.stringify(sunk.stdout.slice(-200))}`);
+      const sunkEnforcing = await run(pages(650, { FAIL_ON_CRITICAL: 'true' }), path.join(faulty, 'check.mjs'));
+      check('…under fail-on-critical: the criticals still BLOCK (exit 1), the fault a line, not a crash',
+        sunkEnforcing.status === 1 && /\nBLOCKED — \d+ critical check\(s\) failed\. Fix the ❌ items above\.\n$/.test(sunkEnforcing.stdout.slice(0, -FAULT.length - 1))
+          && sunkEnforcing.stdout.endsWith(`\n${FAULT}\n`) && !sunkEnforcing.stdout.includes('crashed') && sunkEnforcing.summary === '', why(sunkEnforcing));
+    } finally {
+      big.close();
     }
   } finally {
     server.close();
