@@ -88,6 +88,20 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.29.5** *(tag not yet cut)* — `deps-currency` fix, no new input. The report's Lockfile column named each lockfile by the
+absolute runner path osv-scanner prints, cut at 60 characters like every cell, so a typical row ended
+`| /home/runner/work/lampakia-astro/lampakia-astro/apps/web/pac |`: the lockfile's name cut off, in the job log, the step
+summary and the tracking issue. It now names the lockfile relative to the workspace (the repository root), as the annotation's
+`file=` has since v1.18.0 — `apps/web/package-lock.json` — and a lockfile outside the workspace keeps osv-scanner's path, cut
+at 60 as before. A typical row is shorter by 60 characters less the relative path's length (43 bytes for a root
+`package-lock.json`), so more rows fit under the issue body's 60,000 bytes (v1.29.4) before the cut: in the self-test's
+900-advisory tree, 505 where 351 did. Touches `renderReport()` in `deps-currency/scripts/engine.mjs`, `main` in `scan.mjs`
+(each at/above-floor advisory is located once, for the report and the annotations), and `selftest.mjs` (7 new checks — three
+unit; three end to end, two of them with `working-directory` below the repository root; one on the issue-body legs' tree with
+its lockfiles in the workspace; v1.29.4's `engine.mjs` and `scan.mjs` fail 5 of the 7, and 8 mutants are each caught).
+**Caller-visible:** the advisory table reads `apps/web/package-lock.json` where it read
+`/home/runner/work/<repo>/<repo>/apps/web/pac`; a lockfile outside the workspace reads as before.
+
 **v1.29.4** *(anchor `dc9ed5f`; `v1` moved onto it 2026-10-12)* — `deps-currency` fix, no new input. The advisories issue went missing when the tree carried
 the most: GitHub refuses an issue or comment body over 65,536 characters (and past 128 KiB Linux will not start `gh` with it),
 a failed `gh` call is one note in the `ℹ️ issue lifecycle` block of a green run, and every advisory at or above the floor is

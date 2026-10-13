@@ -4,9 +4,9 @@
 // block decision (fail-on-vuln), unpinned-action detection, the first-party OWNER-SET derivation
 // (caller ∪ action ∪ declared extras — the 2026-08 ownership split), and the
 // report-spoofing/disclosure guard; then runs the real scan.mjs against a stub osv-scanner and a
-// stub gh to assert what reaches the job log (the report, one annotation per at/above-floor
-// advisory, and what happened to the tracking issue) and what reaches the issue (its body, cut
-// under GitHub's limit since v1.29.4).
+// stub gh to assert what reaches the job log (the report, its lockfiles named relative to the
+// workspace since v1.29.5, one annotation per at/above-floor advisory, and what happened to the
+// tracking issue) and what reaches the issue (its body, cut under GitHub's limit since v1.29.4).
 // Run: node scripts/selftest.mjs (also runs in CI). Exits non-zero on any regression — the
 // action's own regression guard, mirroring security-baseline/selftest.mjs.
 //
@@ -427,6 +427,17 @@ console.log('\n# report rendering is deterministic + spoof-safe');
   check('safe() strips markdown-structural chars', safe('`|<x>[a](b)') === 'xab');
   check('safe() defangs URLs', safe('see http://evil.tld') === 'see http[:]//evil.tld');
   check('safe() caps length', safe('x'.repeat(500), 50).length === 50);
+  // The Lockfile column: the workspace-relative `file` scan.mjs locates, else osv's own path cut at 60.
+  // Until v1.29.5 it was always osv's path, absolute on a runner, so the lockfile's name was cut off.
+  const ABS = '/home/runner/work/lampakia-astro/lampakia-astro/apps/web/package-lock.json';
+  const lodash = parsed.find((f) => f.name === 'lodash');
+  const column = (f) => (renderReport([f], [], { floor: 'HIGH' }).match(/^\| 🔴 CRITICAL \|.* \| ([^|]*) \|$/m) || [])[1];
+  const rel = column({ ...lodash, source: ABS, file: 'apps/web/package-lock.json' });
+  check('Lockfile column: the workspace-relative file, not the absolute path osv printed', rel === 'apps/web/package-lock.json', JSON.stringify(rel));
+  const out = column({ ...lodash, source: ABS, file: '' });
+  check("Lockfile column: no file (outside the workspace) → osv's path, cut at 60 as before", out === '/home/runner/work/lampakia-astro/lampakia-astro/apps/web/pac', JSON.stringify(out));
+  const hostile = column({ ...lodash, source: ABS, file: `apps/\`we|b\`/[x](y)/${'n'.repeat(50)}/package-lock.json` });
+  check('Lockfile column: the file goes through safe() too — stripped, and cut at 60', hostile === `apps/web/xy/${'n'.repeat(48)}`, JSON.stringify(hostile));
 }
 
 // ---------------------------------------------------------------------------
@@ -523,8 +534,9 @@ console.log('\n# annotation encoding + lockfile location (pure)');
 console.log('\n# scan.mjs end to end — the job log carries the report; at/above-floor advisories annotate');
 {
   // A workspace with a lockfile and a workflow; a stub osv-scanner answering as osv-scanner v2 does,
-  // with ABSOLUTE runner paths. One advisory is planted with a workflow command in its package name,
-  // one lives outside the workspace, one sits below the floor. Offline: no gh (manage-issue off).
+  // with ABSOLUTE runner paths, which the report's table and the annotations name relative to the
+  // workspace. One advisory is planted with a workflow command in its package name, one lives outside
+  // the workspace, one sits below the floor. Offline: no gh (manage-issue off).
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'deps-currency-e2e-'));
   try {
     fs.writeFileSync(path.join(tmp, 'package-lock.json'), '{}\n');
@@ -566,6 +578,8 @@ console.log('\n# scan.mjs end to end — the job log carries the report; at/abov
     };
     // A line the runner would read as a command: `::` after leading whitespace, or `##[` anywhere.
     const commands = (text) => text.split('\n').filter((l) => /^\s*::/.test(l) || l.includes('##['));
+    // The Lockfile column of a report's advisory rows: each row's last cell.
+    const lockfileColumn = (text) => text.split('\n').filter((l) => /^\| \S+ [A-Z]+ \| /.test(l)).map((l) => (l.match(/ \| ([^|]*) \|$/) || [])[1]);
     const why = (r) => `exit ${r.status}, ${r.stdout.length} B stdout, stderr ${JSON.stringify(r.stderr.split('\n').find((l) => l.trim()) || '')}`;
     const HEADER = '## 📦 deps-currency';
     const once = (r) => r.stdout.split(HEADER).length === 2 && !r.stdout.includes('crashed');
@@ -586,6 +600,25 @@ console.log('\n# scan.mjs end to end — the job log carries the report; at/abov
     check('one ::error per at/above-floor advisory — none for the LOW or the unpinned action, nothing else command-shaped',
       JSON.stringify(commands(a.stdout)) === JSON.stringify(expected('error')), JSON.stringify(commands(a.stdout)));
     check('annotations stay out of the step summary', commands(a.summary).length === 0);
+    // The table names each lockfile as its annotation does: relative to the workspace, and the one outside it
+    // by osv's own path. Until v1.29.5 every row named osv's absolute path, cut at 60.
+    check('the report names each lockfile workspace-relative, the one outside the workspace by its own path',
+      JSON.stringify(lockfileColumn(a.summary)) === JSON.stringify(['package-lock.json', 'package-lock.json', '/opt/outside-the-workspace/composer.lock']), JSON.stringify(lockfileColumn(a.summary)));
+
+    // (A2) A working-directory below the repository root, the shape the defect was measured on: osv names
+    // <workspace>/apps/web/package-lock.json, and the table and `file=` both read apps/web/package-lock.json,
+    // relative to the repository root, not to the working directory.
+    const web = path.join(tmp, 'apps', 'web');
+    fs.mkdirSync(web, { recursive: true });
+    fs.writeFileSync(path.join(web, 'package-lock.json'), '{}\n');
+    const webReport = path.join(tmp, 'osv-apps-web.json');
+    fs.writeFileSync(webReport, JSON.stringify({ results: [{ source: { path: path.join(web, 'package-lock.json'), type: 'lockfile' }, packages: osv.results[0].packages.slice(0, 1) }] }));
+    const w = scan({ GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', WORKING_DIRECTORY: web, OSV_STUB_FILE: webReport });
+    fs.rmSync(path.join(tmp, 'apps'), { recursive: true, force: true });   // the cases below walk tmp for lockfiles
+    check('working-directory apps/web: the table names apps/web/package-lock.json, relative to the repository root',
+      JSON.stringify(lockfileColumn(w.summary)) === '["apps/web/package-lock.json"]', `${why(w)} ${JSON.stringify(lockfileColumn(w.summary))}`);
+    check('…and so does the annotation', JSON.stringify(commands(w.stdout)) === JSON.stringify(
+      ['::warning file=apps/web/package-lock.json,title=deps-currency CRITICAL::CRITICAL lodash@4.17.4 GHSA-jf85-cpcp-j695, CVE-2019-10744 at apps/web/package-lock.json']), JSON.stringify(commands(w.stdout)));
 
     // (B) Off Actions: stdout is the only output — the report prints once, with no commands.
     // spawnSync hands the child a SOCKET as stdout: the case that crashes an
@@ -864,6 +897,16 @@ exit 0
     const again = post({ GH_STUB_OPEN: '7' });
     check('…#7 open: the comment carries the same cut body',
       again.verbs === 'list comment' && count(again.stdout, '\n- updated tracking issue #7\n') === 1 && !!big.sent && String(again.sent) === again.lead + String(big.sent).slice(big.lead.length), why(again));
+    // LOCK and GREEK sit outside this workspace, so every row in these legs names osv's path cut at 60, as
+    // every row did until v1.29.5: their rows and counts are v1.29.3's, which keeps "v1.29.3's body" literal.
+    // In the workspace, as a real run's lockfiles are, a row names its lockfile workspace-relative: 43 bytes
+    // shorter than LOCK's, 60 than GREEK's, so more rows fit under the same cap.
+    advisories([['LOW', 400], ['MODERATE', 300], ['HIGH', 150], ['CRITICAL', 50]], (i) => path.join(tmp, i % 2 ? 'εφαρμογή' : '', 'package-lock.json'));
+    const near = grade(post());
+    const named = [...new Set(lockfileColumn(near.kept.join('\n')))].sort().join(' ');
+    check(`…the same 900 in the workspace: rows name their lockfiles workspace-relative, so ${near.kept.length} fit where ${g.kept.length} did — cut to at most 60,000, whole rows from the top, the rest counted`,
+      named === 'package-lock.json εφαρμογή/package-lock.json' && near.kept.length > g.kept.length
+        && near.size && near.shape && near.head && near.whole && near.top && near.tail && near.count && near.fill, named);
 
     // A report under the cap goes as v1.29.3 posted it, byte for byte, on both paths.
     advisories([['MODERATE', 1], ['CRITICAL', 1], ['LOW', 1]], (i) => (i === 1 ? GREEK : LOCK));

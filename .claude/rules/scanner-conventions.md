@@ -50,6 +50,13 @@ exactly the cap and one byte over. Current implementations: `linkcheck/scripts/f
 (issue body at 60,000 bytes since v1.29.2, step summary at 900,000 since v1.29.3) and
 `deps-currency/scripts/engine.mjs` `capIssueBody()` (issue body at 60,000 bytes since v1.29.4).
 
+**A path the report names is relative to the workspace, as an annotation's `file=` is** — never
+the scanner's own spelling. osv-scanner v2 prints each lockfile by its absolute runner path, and a
+60-character report cell cut `/home/runner/work/<r>/<r>/apps/web/package-lock.json` to
+`…/apps/web/pac` until v1.29.5. Locate each finding once with `repoRelative()`
+(`deps-currency/scripts/engine.mjs`) and hand that one path to both the table and the annotation;
+a path outside the workspace keeps the tool's own spelling.
+
 **Known limit, not papered over:** for bash the crash-guard check matches any `trap … EXIT`, so a
 pure cleanup trap reads as a guard. A behavioural self-test that actually crashes the real
 entrypoint — not a static check — is what proves the guard fires. Mutation-test every new

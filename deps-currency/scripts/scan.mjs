@@ -32,7 +32,7 @@ const OSV_BIN = env.OSV_BIN || 'osv-scanner';
 const GH_BIN = env.GH_BIN || 'gh';
 const ISSUE_TITLE = env.ISSUE_TITLE || 'deps-currency: dependency advisories';
 
-const WORKSPACE = path.resolve(env.GITHUB_WORKSPACE || '.');   // the repository root, for `file=`
+const WORKSPACE = path.resolve(env.GITHUB_WORKSPACE || '.');   // the repository root, for `file=` and the Lockfile column
 
 // The report goes to the job LOG always, and to the step summary when there is one. The summary
 // alone needs a signed-in browser: `gh run view --log-failed` showed only "exit code 1" and the
@@ -223,7 +223,9 @@ process.on('uncaughtException', (e) => {
   const osv = runOsv(lockfiles);
   const { findings, looked } = osv;
   if (!looked) infra.push(`osv-scanner could not look — ${osv.reason}`);
-  const floorFindings = filterByFloor(findings, FLOOR);
+  // Each at/above-floor advisory carries its lockfile relative to the workspace (`file`; '' outside
+  // it), so the report's Lockfile column and the annotation's `file=` name the same path.
+  const floorFindings = filterByFloor(findings, FLOOR).map((f) => ({ ...f, file: repoRelative(f.source, { workdir: WORKDIR, workspace: WORKSPACE }) }));
   // FIRST-PARTY owner set for the unpinned-action scan — NOT just the caller's owner. This read
   // `GITHUB_REPOSITORY.split('/')[0]` until the 2026-08 ownership split (callers moved to the org
   // `creme-ypsilon`, `mvalasis/ci-actions` stayed put), after which every one of our OWN
@@ -281,9 +283,8 @@ process.on('uncaughtException', (e) => {
   // GitHub keeps 10 per level per step, the fault's included.
   const level = blocked || faulted ? 'error' : 'warning';
   if (ANNOTATE) {
-    const located = floorFindings.map((f) => ({ ...f, file: repoRelative(f.source, { workdir: WORKDIR, workspace: WORKSPACE }) }));
     const lost = looked ? [] : [faultAnnotation(osv.reason, level)];
-    for (const a of [...lost, ...annotations(located, level, 10 - lost.length)]) say(a);
+    for (const a of [...lost, ...annotations(floorFindings, level, 10 - lost.length)]) say(a);
   }
   process.exit(blocked || faulted ? 1 : 0);
 })();

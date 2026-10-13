@@ -226,6 +226,15 @@ Since **v1.18.0** the report is in three places, so a scheduled run's findings n
   row whatever the size, and a body under the cap is posted byte for byte as before, as an issue
   or a comment. Known limit: a head over the cap on its own — hundreds of lockfiles under
   `lockfiles scanned` — is still refused, and the block says so.
+- **The report names each lockfile as its annotation does (v1.29.5).** The advisory table's Lockfile
+  column is relative to the workspace, the repository root — `apps/web/package-lock.json` — and a
+  lockfile outside the workspace keeps osv-scanner's own path, cut at 60 characters. (The
+  `lockfiles scanned` line stays relative to `working-directory`.) Until v1.29.5 the column carried
+  osv-scanner's absolute runner path, cut at 60 like every cell, so a typical row ended
+  `| /home/runner/work/<repo>/<repo>/apps/web/pac |`, the lockfile's name cut off. A typical row is
+  now shorter by 60 characters less the relative path's length — 43 bytes for a root
+  `package-lock.json`, 34 for `apps/web/package-lock.json` — so more rows fit under the issue body's
+  60,000 bytes before the cut above.
 - **A scan that could not look.** When osv-scanner could not look (see
   [What it does](#what-it-does)), the scanner notes name why, with osv-scanner's own exit and error
   line — `osv-scanner could not look — exit 129: <its last stderr line>` — the report reads
@@ -370,7 +379,21 @@ all 900, and with #7 open the comment carries the same cut body. Three advisorie
 body byte for byte, as an issue and as a comment; rows built to a v1.29.3 body of exactly 60,000
 bytes post it whole, and one byte more is cut; a report with no table goes whole. v1.29.3's
 `manageIssue` fails 11 of the 18 checks, and each of the 18 turns red under at least one of 25
-targeted mutants, all of which turn the self-test red.
+targeted mutants, all of which turn the self-test red. These legs' lockfiles sit outside the
+workspace, so since v1.29.5 every row still names osv-scanner's path cut at 60, as v1.29.3's did:
+their rows and counts are v1.29.3's own.
+
+**Lockfile-column legs (v1.29.5).** Unit legs render one advisory: with a workspace-relative `file`
+the Lockfile column names it, not osv-scanner's absolute path; with none (a lockfile outside the
+workspace) it names that path cut at 60, `/home/runner/work/lampakia-astro/lampakia-astro/apps/web/pac`,
+as before; a hostile `file` goes through `safe()`, stripped and cut at 60. End to end, against the
+stub's absolute paths: the table names the workspace's lockfile `package-lock.json` and the one
+outside it by its own path; with `working-directory` at `apps/web`, the table and the annotation's
+`file=` both read `apps/web/package-lock.json`, relative to the repository root; and the issue-body
+legs' 900 advisories, their lockfiles moved into the workspace, are named workspace-relative and
+keep 505 rows where 351 fit, cut by the same rules. v1.29.4's `engine.mjs` and `scan.mjs` fail 5 of
+the 7 checks — the other two pin what must not change, the fallback and the annotation — and each of
+the 7 turns red under at least one of 8 targeted mutants, all of which turn the self-test red.
 
 > The owner-set fixtures deliberately use **different** literals for the caller's owner and the
 > action's owner (`creme-ypsilon` vs `mvalasis`). The original fixture used the same literal for

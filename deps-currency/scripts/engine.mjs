@@ -297,6 +297,10 @@ const TABLE_RULE = '|---|---|---|---|---|---|';
 
 // Render the full markdown report (used for BOTH the job summary and the issue body — one source
 // of truth). `meta` carries scan context (floor, lockfiles found, ecosystems, totals).
+// The Lockfile column names `f.file`, the workspace-relative path scan.mjs locates with
+// repoRelative() — the annotation's `file=` — and, for a lockfile outside the workspace (no
+// `file`), the path osv-scanner printed. Until v1.29.5 it was always that path: absolute on a
+// runner, so at safe()'s 60 a typical row ended `| /home/runner/work/<r>/<r>/apps/web/pac |`.
 export function renderReport(floorFindings, unpinned, meta = {}) {
   const L = [];
   const p = (s = '') => L.push(s);
@@ -327,7 +331,7 @@ export function renderReport(floorFindings, unpinned, meta = {}) {
     for (const f of floorFindings) {
       const icon = SEV_ICON[f.severity] || '';
       const ab = f.abandoned ? ' _(unmaintained/malicious)_' : '';
-      p(`| ${icon} ${f.severity} | ${safe(f.name, 60)}${ab} | ${safe(f.version, 30)} | ${safe(f.ids.join(', '), 60)} | ${f.score ? f.score : 'n/a'} | ${safe(f.source, 60)} |`);
+      p(`| ${icon} ${f.severity} | ${safe(f.name, 60)}${ab} | ${safe(f.version, 30)} | ${safe(f.ids.join(', '), 60)} | ${f.score ? f.score : 'n/a'} | ${safe(f.file || f.source, 60)} |`);
     }
     p('');
     p('_Present-in-tree, reachability unknown — osv-scanner is syntactic (no dataflow). Bump or remove the package; if a fix is unavailable, document the exposure._');
@@ -387,8 +391,9 @@ export const escapeData = (s) => String(s == null ? '' : s).replace(/%/g, '%25')
 export const escapeProperty = (s) => escapeData(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
 
 // osv-scanner names a lockfile by its absolute runner path (`/home/runner/work/<r>/<r>/bun.lock`).
-// An annotation names it relative to the workspace — the repository root, which is what `file=`
-// means to the runner. A lockfile outside the workspace names no file of this repo: '' (no `file=`).
+// An annotation and the report's Lockfile column name it relative to the workspace — the repository
+// root, which is what `file=` means to the runner. A lockfile outside the workspace names no file of
+// this repo: '' (no `file=`, and the report names osv's own path).
 export function repoRelative(source, { workdir = '.', workspace = '.' } = {}) {
   if (!source) return '';
   const rel = relative(resolve(workspace), resolve(workdir, String(source)));
