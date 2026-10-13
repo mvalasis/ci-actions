@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { SEV, evaluate, parsePromote, groupByCheck, sevRank, CHECKS, safe, redact, annotations, canBeCritical, faultAnnotation, shortSha } from './tiers.mjs';
+import { SEV, evaluate, parsePromote, groupByCheck, sevRank, CHECKS, safe, redact, annotations, canBeCritical, faultAnnotation, shortSha, repoRelative } from './tiers.mjs';
 import { firstPartyOwners, filterFirstPartyGha } from './firstparty.mjs';
 import { argvTargets, findArgvSecrets, argvFinding } from './argv-secret.mjs';
 import { HOOK_GREP, restGateCandidate, findRestGateCase, restGateFinding } from './rest-gate-case.mjs';
@@ -639,17 +639,25 @@ function collectOsv() {
     ? ls.stdout.split('\0').filter((f) => LOCKFILE_NAMES.has(path.basename(f)) && !/(^|\/)node_modules\//.test(f))
     : [];
   const root = process.cwd();   // getcwd() resolves symlinks, as the paths osv-scanner prints do
+  // The repository root in that same real-path space, for `file=`: GITHUB_WORKSPACE need not be real,
+  // and left unresolved it would hold none of the paths osv prints. Unset (a local run), the cwd.
+  const ws = env.GITHUB_WORKSPACE || root;
+  let workspace;
+  try { workspace = fs.realpathSync(ws); } catch { workspace = path.resolve(ws); }
   const o = osvOutcome(run(BIN.osv, ['scan', 'source', '--recursive', '--format', 'json', '.'], { timeout: 300000 }), { lockfiles, root });
   if (!o.looked) couldNotLook(LEGS.osv, `osv-scanner ${o.reason}`);
   for (const res of o.results) {
     const src = (res.source && res.source.path) || '';
+    // Located once, for the report row and the annotation alike: `file` is relative to the workspace,
+    // '' outside it, where `source` (osv's own path) is named instead (v1.29.7).
+    const file = repoRelative(src, { workdir: root, workspace });
     for (const pkg of (res.packages || [])) {
       const name = (pkg.package && pkg.package.name) || '?';
       const ver = (pkg.package && pkg.package.version) || '?';
       for (const g of (pkg.groups || [])) {
         const score = parseFloat(g.max_severity || '0') || 0;
         const ids = (g.ids || []).slice(0, 3).join(', ');
-        out.push({ checkId: scaCheckId(score), tool: 'osv-scanner', rule: ids, file: src, line: 0, msg: `${name}@${ver} — ${ids}${score ? ` (CVSS ${score})` : ' (no CVSS)'} — present-in-tree, reachability unknown`, cwe: 'CWE-1395' });
+        out.push({ checkId: scaCheckId(score), tool: 'osv-scanner', rule: ids, file, source: src, line: 0, msg: `${name}@${ver} — ${ids}${score ? ` (CVSS ${score})` : ' (no CVSS)'} — present-in-tree, reachability unknown`, cwe: 'CWE-1395' });
       }
     }
   }
@@ -833,7 +841,7 @@ function flush() {
       const sev = fs_[0].sev;
       const tier = (CHECKS[checkId] || { tier: 'T1' }).tier;
       note(`### ${ICON[sev] || ICON.warn} \`${safe(checkId, 60)}\` · ${tier} · ${fs_.length} finding(s)`);
-      for (const f of fs_.slice(0, 15)) note(`- ${ICON[f.sev] || ICON.warn} ${safe(f.file)}${Number.isFinite(+f.line) && +f.line > 0 ? ':' + (+f.line) : ''} — ${safe(f.msg, 220)}${f.cwe ? ` _(${safe(f.cwe, 40)})_` : ''}`);
+      for (const f of fs_.slice(0, 15)) note(`- ${ICON[f.sev] || ICON.warn} ${safe(f.file || f.source)}${Number.isFinite(+f.line) && +f.line > 0 ? ':' + (+f.line) : ''} — ${safe(f.msg, 220)}${f.cwe ? ` _(${safe(f.cwe, 40)})_` : ''}`);
       if (fs_.length > 15) note(`- …and ${fs_.length - 15} more`);
       note('');
     }

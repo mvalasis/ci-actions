@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import {
   SEV, CHECKS, T0_CHECKS, T1_CHECKS, T2_CHECKS, RESERVED_CHECKS, evaluate, parsePromote,
   isPromotable, baseSev, safe, redact, escapeData, escapeProperty, annotation, annotations,
-  canBeCritical, faultAnnotation, shortSha,
+  canBeCritical, faultAnnotation, shortSha, repoRelative,
 } from './tiers.mjs';
 import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, gitLogOutcome, scrub, errorLine } from './outcome.mjs';
 import { firstPartyOwners, ownerOf, parseOwners, refFromText, readLineFromDisk, filterFirstPartyGha } from './firstparty.mjs';
@@ -313,6 +313,8 @@ console.log('\n# workflow-command encoding + annotations (pure)');
   const hist = annotation({ ...f, checkId: 'secrets-history', file: '(history)', line: 0 });
   check("'(history)' is not a path: no file=/line=, no location", hist === '::error title=security-baseline secrets-history::secrets-history generic-api-key', hist);
   check('line 0 drops line= but keeps file=', annotation({ ...f, line: 0 }) === '::error file=app/config.php,title=security-baseline secret-pattern::secret-pattern generic-api-key at app/config.php');
+  check("no workspace-relative file (an SCA lockfile outside the workspace): no file=, osv's own path (source) named in the message",
+    annotation({ checkId: 'sca-critical', rule: 'GHSA-x', file: '', source: '/opt/elsewhere/package-lock.json', line: 0 }) === '::error title=security-baseline sca-critical::sca-critical GHSA-x at /opt/elsewhere/package-lock.json');
   // A HOSTILE path must stay one command with exactly the three properties we set. Unescaped, the `,`
   // would add `line=1` and the newline would start a second command that stops command processing.
   const evil = annotation({ ...f, file: 'x.php,line=1::forged\n::stop-commands::tok' });
@@ -325,6 +327,25 @@ console.log('\n# workflow-command encoding + annotations (pure)');
   const out = annotations([...many, warnOnly]);
   check('annotations: 10 CRITICALs (GitHub\'s per-step cap) + one overflow line', out.length === 11 && out.slice(0, 10).every((l) => l.startsWith('::error ')) && /^security-baseline: 2 more critical/.test(out[10]), `got ${out.length}`);
   check('annotations: a WARN finding is never annotated', !out.some((l) => l.includes('sca-high')) && annotations([warnOnly]).length === 0);
+}
+
+console.log('\n# lockfile location — repoRelative (pure)');
+{
+  const ws = '/home/runner/work/r/r';
+  const at = { workdir: ws, workspace: ws };
+  const cases = [
+    [`${ws}/apps/web/package-lock.json`, at], ['pnpm-lock.yaml', { workdir: `${ws}/apps/web`, workspace: ws }],
+    ['/opt/elsewhere/composer.lock', at], [`${ws}-fork/package-lock.json`, at], [ws, at], ['', at],
+  ];
+  check('repoRelative: an absolute osv path under the workspace → repository-relative', repoRelative(cases[0][0], at) === 'apps/web/package-lock.json');
+  check('repoRelative: a path relative to a sub-directory workdir → repository-relative', repoRelative(...cases[1]) === 'apps/web/pnpm-lock.yaml');
+  check('repoRelative: outside the workspace (a sibling sharing its prefix included), the workspace itself, or none → "" (no file=)',
+    cases.slice(2).every(([s, o]) => repoRelative(s, o) === ''), JSON.stringify(cases.slice(2).map(([s, o]) => repoRelative(s, o))));
+  // One rule, two standalone copies: each action ships dependency-free, so deps-currency's original is
+  // compared here, never imported by scan.mjs.
+  let theirs;
+  try { ({ repoRelative: theirs } = await import('../../deps-currency/scripts/engine.mjs')); } catch (e) { theirs = e; }
+  check("repoRelative answers as deps-currency's engine.mjs does, case for case", typeof theirs === 'function' && cases.every(([s, o]) => repoRelative(s, o) === theirs(s, o)), String(theirs));
 }
 
 console.log('\n# outcome.mjs — a scanner that could not look never reads as one that found nothing');
@@ -1021,6 +1042,34 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     const l2 = broken({ OSV_BIN: stub('osv-vuln', `echo '${vuln}'\nexit 1`) });
     check('(L) osv-scanner exit 1 with a vulnerability: a finding (sca-high WARN), not a fault', l2.status === 0
       && l2.stdout.includes('### ⚠️ `sca-high` · T1 · 1 finding(s)') && !l2.stdout.includes('could not look'), verdict(l2));
+    // (L) osv-scanner v2 names each lockfile by its absolute real path, `/home/runner/work/<r>/<r>/apps/
+    // web/package-lock.json`, never relative as l2's stub has it. The report row and a CRITICAL's `file=`
+    // name it relative to the workspace, which is what `file=` means to the runner; until v1.29.7 both
+    // carried the runner path. A lockfile outside the workspace keeps osv's path, in the row and the
+    // message, with no `file=`. The workspace arrives through a symlink: osv prints real paths, so a
+    // workspace not resolved the same way has nothing under it, on Linux as on macOS.
+    const realRepo = fs.realpathSync(repo);
+    const viaLink = path.join(tmp, 'repo-via-symlink');
+    fs.symlinkSync(repo, viaLink);
+    const outside = path.join(fs.realpathSync(tmp), 'elsewhere');
+    const located = JSON.stringify({ results: [
+      { source: { path: `${realRepo}/apps/web/package-lock.json` }, packages: [{ package: { name: 'lodash', version: '4.17.20' }, groups: [{ ids: ['GHSA-35jh-r3h4-6jhm'], max_severity: '9.8' }] }] },
+      { source: { path: `${outside}/package-lock.json` }, packages: [{ package: { name: 'minimist', version: '1.2.5' }, groups: [{ ids: ['GHSA-xvch-5gv4-984h'], max_severity: '9.8' }] }] },
+    ] });
+    const lAbs = broken({ OSV_BIN: stub('osv-vuln-absolute', `echo '${located}'\nexit 1`) }, { GITHUB_ACTIONS: 'true', CRITICAL_CHECKS: 'sca-critical', GITHUB_WORKSPACE: viaLink }, viaLink);
+    const scaRows = lAbs.stdout.split('\n').filter((l) => l.includes('GHSA-')).join(' | ');
+    const scaCmds = commands(lAbs.stdout).filter((l) => l.includes('sca-critical'));
+    check('(L) an absolute osv path under the workspace (handed over through a symlink): the report row names it workspace-relative',
+      lAbs.status === 1 && lAbs.stdout.includes('\n- ❌ apps/web/package-lock.json — lodash@4.17.20 — GHSA-35jh-r3h4-6jhm CVSS 9.8 — '), `exit ${lAbs.status}: ${scaRows}`);
+    check("(L) …and its CRITICAL annotation's file= names the same path",
+      scaCmds.includes('::error file=apps/web/package-lock.json,title=security-baseline sca-critical::sca-critical GHSA-35jh-r3h4-6jhm at apps/web/package-lock.json'), JSON.stringify(scaCmds));
+    check("(L) a lockfile outside the workspace keeps osv's own path in the report row",
+      lAbs.stdout.includes(`\n- ❌ ${outside}/package-lock.json — minimist@1.2.5 — GHSA-xvch-5gv4-984h CVSS 9.8 — `), scaRows);
+    check("(L) …and its annotation has no file=, naming osv's path in the message",
+      scaCmds.includes(`::error title=security-baseline sca-critical::sca-critical GHSA-xvch-5gv4-984h at ${outside}/package-lock.json`), JSON.stringify(scaCmds));
+    const lLocal = broken({ OSV_BIN: path.join(bin, 'osv-vuln-absolute') }, { CRITICAL_CHECKS: 'sca-critical' }, viaLink);
+    check('(L) …with no GITHUB_WORKSPACE (a local run) the scanned root is the workspace: the same row',
+      lLocal.stdout.includes('\n- ❌ apps/web/package-lock.json — lodash@4.17.20 — GHSA-35jh-r3h4-6jhm CVSS 9.8 — '), lLocal.stdout.split('\n').filter((l) => l.includes('GHSA-')).join(' | '));
     const osvDead = stub('osv-dead', `echo 'failed to query osv.dev: 503' >&2\nexit 127`);
     const l3 = broken({ OSV_BIN: osvDead });
     check('(L) osv-scanner exit 127: reported ⚠️, PASS stands (its checks only warn)', l3.status === 0

@@ -536,8 +536,9 @@ console.log('\n# scan.mjs end to end — the job log carries the report; at/abov
   // A workspace with a lockfile and a workflow; a stub osv-scanner answering as osv-scanner v2 does,
   // with ABSOLUTE runner paths, which the report's table and the annotations name relative to the
   // workspace. One advisory is planted with a workflow command in its package name, one lives outside
-  // the workspace, one sits below the floor. Offline: no gh (manage-issue off).
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'deps-currency-e2e-'));
+  // the workspace, one sits below the floor. Offline: no gh (manage-issue off). The workspace is a real
+  // path, as every path osv-scanner prints is: macOS's tmpdir is a symlink (/var → /private/var).
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'deps-currency-e2e-')));
   try {
     fs.writeFileSync(path.join(tmp, 'package-lock.json'), '{}\n');
     fs.mkdirSync(path.join(tmp, '.github', 'workflows'), { recursive: true });
@@ -620,6 +621,27 @@ console.log('\n# scan.mjs end to end — the job log carries the report; at/abov
       JSON.stringify(lockfileColumn(w.summary)) === '["apps/web/package-lock.json"]', `${why(w)} ${JSON.stringify(lockfileColumn(w.summary))}`);
     check('…and so does the annotation', JSON.stringify(commands(w.stdout)) === JSON.stringify(
       ['::warning file=apps/web/package-lock.json,title=deps-currency CRITICAL::CRITICAL lodash@4.17.4 GHSA-jf85-cpcp-j695, CVE-2019-10744 at apps/web/package-lock.json']), JSON.stringify(commands(w.stdout)));
+
+    // (A3) The workspace reached through a symlink. osv-scanner prints real paths, so a workspace left
+    // unresolved holds none of them: until v1.29.7 every row fell back to osv's path, cut at 60, with no
+    // `file=`. A source named relative to the working directory resolves in the same real-path space.
+    const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deps-currency-link-'));
+    const viaLink = path.join(linkDir, 'repo');
+    fs.symlinkSync(tmp, viaLink);
+    const linkReport = path.join(tmp, 'osv-via-symlink.json');
+    fs.writeFileSync(linkReport, JSON.stringify({ results: [
+      { source: { path: path.join(tmp, 'package-lock.json'), type: 'lockfile' }, packages: osv.results[0].packages.slice(0, 1) },
+      { source: { path: 'sub/composer.lock', type: 'lockfile' }, packages: osv.results[1].packages },
+    ] }));
+    const l = scan({ GITHUB_STEP_SUMMARY: summaryPath, GITHUB_ACTIONS: 'true', GITHUB_WORKSPACE: viaLink, WORKING_DIRECTORY: viaLink, OSV_STUB_FILE: linkReport });
+    fs.unlinkSync(viaLink);
+    fs.rmdirSync(linkDir);
+    check('a workspace reached through a symlink: the table names each lockfile workspace-relative',
+      JSON.stringify(lockfileColumn(l.summary)) === '["package-lock.json","sub/composer.lock"]', `${why(l)} ${JSON.stringify(lockfileColumn(l.summary))}`);
+    check('…and so do the annotations, the source named relative to the working directory included', JSON.stringify(commands(l.stdout)) === JSON.stringify([
+      '::warning file=package-lock.json,title=deps-currency CRITICAL::CRITICAL lodash@4.17.4 GHSA-jf85-cpcp-j695, CVE-2019-10744 at package-lock.json',
+      '::warning file=sub/composer.lock,title=deps-currency HIGH::HIGH guzzlehttp/guzzle@6.5.0 GHSA-w248-ffj2-4v5q at sub/composer.lock',
+    ]), JSON.stringify(commands(l.stdout)));
 
     // (B) Off Actions: stdout is the only output — the report prints once, with no commands.
     // spawnSync hands the child a SOCKET as stdout: the case that crashes an

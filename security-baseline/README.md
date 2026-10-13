@@ -183,6 +183,13 @@ A secret finding names the commit it was found in: `generic-api-key **** in comm
 ` in commit 2bc10a3` on its annotation. gitleaks reads commit patches, so its `file:line` is the line
 in that commit, which under `scan-scope: full` is often not the tip's.
 
+An SCA finding names its lockfile relative to the workspace, the repository root, which is what
+`file=` means to the runner: `apps/web/package-lock.json`, in the report row and on a promoted
+`sca-critical` or `sca-high` annotation alike (v1.29.7). osv-scanner prints each lockfile by its
+absolute real path, and until v1.29.7 both carried it as printed,
+`/home/runner/work/<repo>/<repo>/apps/web/package-lock.json`. A lockfile outside the workspace keeps
+osv-scanner's path in the row and the message, and its annotation has no `file=`.
+
 No secret value reaches any of them. The log carries the summary's own lines: gitleaks runs with
 `--redact` (a finding reads `generic-api-key ****`; if gitleaks ever returned the value anyway,
 `redact()` would keep first4…last4), and trufflehog's raw credential is never read — a verified
@@ -827,6 +834,17 @@ fleet shipped it twice: a CF7 proxy gate, then a second plugin's namespace gate.
   implies `-p`, so a gitleaks log without `-p` reads the same, and a pass walk checked a second time
   costs only time. v1.20.0's `scan.mjs` fails 6 of them, and on the checkout that lacks a range
   object, with the verified probe off, it says PASS.
+  Its **lockfile-location** leg (v1.29.7) unit-tests `repoRelative()`: an absolute osv path under
+  the workspace and a path relative to a sub-directory read repository-relative; a path outside it
+  (a sibling sharing its prefix included), the workspace itself and none read `''`. It holds the
+  function to `deps-currency`'s copy case for case, and an annotation with no `file` to naming
+  `source` in its message. End to end, a stub osv-scanner prints two CVSS 9.8 advisories by absolute
+  real path, one lockfile in the workspace and one outside it, with `sca-critical` promoted and
+  `GITHUB_WORKSPACE` handed over through a symlink: the row and `file=` read
+  `apps/web/package-lock.json`; the outside lockfile keeps osv's path in the row and the message,
+  with no `file=`; a local run (no `GITHUB_WORKSPACE`) reads the same row. v1.29.5's `scan.mjs` fails
+  4 of the 5 end-to-end checks (the fifth pins the outside row, unchanged); 9 targeted mutants each turn it red, and
+  each new check goes red under at least one.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
 - `bash scripts/selftest-pr-shape.sh` — the shapes this repo's own pushes never produce, scanned

@@ -239,6 +239,9 @@ Since **v1.18.0** the report is in three places, so a scheduled run's findings n
   now shorter by 60 characters less the relative path's length — 43 bytes for a root
   `package-lock.json`, 34 for `apps/web/package-lock.json` — so more rows fit under the issue body's
   60,000 bytes before the cut above.
+  Since v1.29.7 the workspace and the working directory are resolved through their symlinks first,
+  as osv-scanner resolves the paths it prints: a workspace reached through a symlink held none of
+  them, and every row fell back to osv-scanner's path, with no `file=`.
 - **A scan that could not look.** When osv-scanner could not look (see
   [What it does](#what-it-does)), the scanner notes name why, with osv-scanner's own exit and error
   line — `osv-scanner could not look — exit 129: <its last stderr line>` — the report reads
@@ -398,6 +401,13 @@ legs' 900 advisories, their lockfiles moved into the workspace, are named worksp
 keep 505 rows where 351 fit, cut by the same rules. v1.29.4's `engine.mjs` and `scan.mjs` fail 5 of
 the 7 checks — the other two pin what must not change, the fallback and the annotation — and each of
 the 7 turns red under at least one of 8 targeted mutants, all of which turn the self-test red.
+
+**Symlinked-workspace leg (v1.29.7).** The end-to-end fixture's workspace is a real path, as every
+path osv-scanner prints is (macOS's tmpdir is a symlink). With `GITHUB_WORKSPACE` and
+`working-directory` handed over through a symlink, the table and the annotations name the
+workspace's lockfile `package-lock.json`, and a source named relative to the working directory
+`sub/composer.lock`. v1.29.6's `scan.mjs` fails both checks, and each turns red under at least one of
+3 targeted mutants (the workspace left unresolved, the working directory left unresolved, neither).
 
 **Step-summary legs (v1.29.6).** 7,000 advisories under `severity-floor: LOW`, handed over LOW
 first, half of them in a Greek-named directory: the block runs past 1 MiB, and the summary is at

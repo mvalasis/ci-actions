@@ -58,7 +58,12 @@ the scanner's own spelling. osv-scanner v2 prints each lockfile by its absolute 
 60-character report cell cut `/home/runner/work/<r>/<r>/apps/web/package-lock.json` to
 `…/apps/web/pac` until v1.29.5. Locate each finding once with `repoRelative()`
 (`deps-currency/scripts/engine.mjs`) and hand that one path to both the table and the annotation;
-a path outside the workspace keeps the tool's own spelling.
+a path outside the workspace keeps the tool's own spelling. Resolve the workspace's symlinks before
+comparing: osv prints real paths, and an unresolved workspace holds none of them. Current
+implementations: `security-baseline/scripts/scan.mjs` `collectOsv()` (since v1.29.7, with
+`repoRelative()` restated in `tiers.mjs` so the action stays dependency-free; its selftest holds the
+two copies to the same answers) and `deps-currency/scripts/scan.mjs` (since v1.29.5; its workspace
+and working directory resolved since v1.29.7).
 
 **Known limit, not papered over:** for bash the crash-guard check matches any `trap … EXIT`, so a
 pure cleanup trap reads as a guard. A behavioural self-test that actually crashes the real

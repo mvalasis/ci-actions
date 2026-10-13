@@ -67,11 +67,12 @@
 //
 // The eight `*/scripts/selftest.mjs` files legitimately end in `console.log(...)`
 // then `process.exit(...)`. They are exempt because they CANNOT hit the bug:
-// measured output is 4650–33565 bytes (2026-10-13, v1.29.6: agent-benchmark
+// measured output is 4650–34576 bytes (2026-10-13, v1.29.7: agent-benchmark
 // 4650, contract-check 5907, form-protection 8585, test-suite 9074, seo-aeo
-// 15618, verify-homepage 23532, deps-currency 24169 since v1.29.6's step-summary
-// legs, security-baseline 33565) — the largest just over half the 65,536-byte
-// pipe buffer. Do not "fix" them; the exemption is the finding, not an oversight.
+// 15618, verify-homepage 23532, deps-currency 24359 since v1.29.7's
+// lockfile-location legs, security-baseline 34576 since v1.29.7's
+// lockfile-location legs) — the largest just over half the 65,536-byte pipe
+// buffer. Do not "fix" them; the exemption is the finding, not an oversight.
 //
 // ALLOWANCES (both deliberate, both narrow)
 //   1. The sync-write fallback itself: a `console.*` that is the `catch` arm of

@@ -17,7 +17,8 @@ name: security-baseline self-test
 on:
   push:
     branches: [main]
-    paths: ['security-baseline/**', '.github/workflows/security-baseline-selftest.yml']
+    # deps-currency's engine.mjs: the self-test holds tiers.mjs's restated repoRelative() to it (v1.29.7).
+    paths: ['security-baseline/**', 'deps-currency/scripts/engine.mjs', '.github/workflows/security-baseline-selftest.yml']
   workflow_dispatch: {}
 
 permissions:

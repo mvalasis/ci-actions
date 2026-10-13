@@ -88,6 +88,27 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.29.7** *(tag not yet cut)* — `security-baseline` and `deps-currency` fix, no new input. osv-scanner v2 names each lockfile
+by its absolute real path, and `security-baseline`'s SCA report row carried it as printed —
+`/home/runner/work/<repo>/<repo>/apps/web/package-lock.json` — as did a promoted `sca-critical` or `sca-high` annotation, in its
+`file=` and its message. Both now name the lockfile relative to the workspace, the repository root, as `deps-currency` has since
+v1.29.5: `apps/web/package-lock.json`. The workspace is resolved through its symlinks first, as osv-scanner resolves the paths it
+prints; a lockfile outside the workspace keeps osv-scanner's path in the row and the message, and its annotation has no `file=`.
+`deps-currency` compared those real paths with a workspace it left unresolved, so under a symlinked workspace every row fell back
+to osv-scanner's path, cut at 60, with no `file=`; it now resolves the workspace and the working directory. Touches
+`repoRelative()` and `annotation()` in `security-baseline/scripts/tiers.mjs` (`repoRelative()` restated from
+`deps-currency/scripts/engine.mjs`, so the action stays dependency-free), `collectOsv()` and the report in `scan.mjs` (each
+lockfile is located once, for the row and the annotation), and `selftest.mjs` (10 new checks — five unit, one of them holding the
+two `repoRelative()` copies to the same answers; five end to end, the workspace handed over through a symlink; v1.29.5's
+`scan.mjs` fails 4 of the 5, and 9 targeted mutants each turn it red, every new check under at least one); and
+`deps-currency/scripts/scan.mjs` and `selftest.mjs` (its end-to-end fixture now prints real paths, as osv-scanner does, and one
+new leg of 2 checks hands the workspace over through a symlink; v1.29.6's `scan.mjs` fails both, and 3 targeted mutants are each
+caught). `security-baseline-selftest.yml` now also runs on a change to `deps-currency/scripts/engine.mjs`, so the two copies
+cannot drift apart unseen. **Caller-visible:** `security-baseline`'s report row and a promoted SCA annotation read
+`apps/web/package-lock.json` where they read `/home/runner/work/<repo>/<repo>/apps/web/package-lock.json`; a lockfile outside the
+workspace reads as before, less its `file=`; `deps-currency` changes only where the workspace path runs through a symlink;
+verdicts are unchanged.
+
 **v1.29.6** *(anchor `6da8c6b`; `v1` moved onto it 2026-10-13)* — `deps-currency`, `seo-aeo`, `form-protection` and `verify-homepage` fix, no new input. Their
 step summaries went missing on the biggest runs, as `linkcheck`'s did until v1.29.3: GitHub drops a step summary over 1 MiB (the
 upload fails with an error annotation and the run shows none), and each of these reports gives every page, finding or advisory a row

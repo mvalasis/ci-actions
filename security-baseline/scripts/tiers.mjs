@@ -9,6 +9,7 @@
 //     ONE added signal, a verified-live secret (a provider just authenticated it → ~zero FP).
 //   T1 promotable-WARN — reports; a caller ELEVATES any id to CRITICAL via `critical-checks`.
 //   T2 advisory — reports (WARN/INFO); never promotable (too FP-heavy or purely informational).
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 export const SEV = { CRIT: 'critical', WARN: 'warn', INFO: 'info', OK: 'ok' };
 
@@ -148,13 +149,27 @@ export const redact = (s) => { const v = String(s == null ? '' : s); return v.le
 export const escapeData = (s) => String(s == null ? '' : s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
 export const escapeProperty = (s) => escapeData(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
 
+// osv-scanner names a lockfile by its absolute real path (`/home/runner/work/<r>/<r>/apps/web/
+// package-lock.json`). The report row and the annotation name it relative to the workspace — the
+// repository root, which is what `file=` means to the runner. A lockfile outside the workspace names no
+// file of this repository: '' (no `file=`; the row and the message name osv's path, kept as `source`).
+// Restated from deps-currency's engine.mjs, so the action stays dependency-free; the selftest holds
+// the two to the same answers. Pure: scan.mjs resolves the workspace's symlinks, as osv does its paths.
+export function repoRelative(source, { workdir = '.', workspace = '.' } = {}) {
+  if (!source) return '';
+  const rel = relative(resolve(workspace), resolve(workdir, String(source)));
+  if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return '';
+  return rel.split(sep).join('/');
+}
+
 // One annotation per CRITICAL finding, so the check-run API and `gh run view` name the file, line and
 // rule without the step summary (which the API does not serve). The message is `<checkId> <rule> at
 // <file>:<line>` and NEVER `msg` — for a secret, msg carries the redacted value, and an annotation
 // identifies a secret by rule id alone. The location is repeated in the message because the job log
 // shows an annotation as its message only; `file=`/`line=` reach the annotation, not the log line.
 // A secret found in git history also names its commit (shortSha): its line is that commit's line,
-// which under scan-scope: full is often not the tip's.
+// which under scan-scope: full is often not the tip's. An SCA lockfile outside the workspace has no
+// `file`: its message names osv-scanner's own path (`source`), and it gets no `file=`.
 export function annotation(f, level = 'error') {
   const file = String(f.file || '');
   const line = Number.isInteger(+f.line) && +f.line > 0 ? +f.line : 0;
@@ -163,7 +178,8 @@ export function annotation(f, level = 'error') {
   if (isPath) props.push(`file=${escapeProperty(file)}`);
   if (isPath && line) props.push(`line=${line}`);
   props.push(`title=${escapeProperty(`security-baseline ${f.checkId}`)}`);
-  const where = (isPath ? ` at ${file}${line ? `:${line}` : ''}` : '') + (shortSha(f.commit) ? ` in commit ${shortSha(f.commit)}` : '');
+  const at = isPath ? ` at ${file}${line ? `:${line}` : ''}` : f.source ? ` at ${f.source}` : '';
+  const where = at + (shortSha(f.commit) ? ` in commit ${shortSha(f.commit)}` : '');
   return `::${level} ${props.join(',')}::${escapeData(safe(`${f.checkId} ${f.rule || ''}`.trim() + where, 300))}`;
 }
 // A full commit sha, shortened; '' for anything else (a non-git scan, or the all-zero sha).
