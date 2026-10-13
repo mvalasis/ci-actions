@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.29.5** *(tag not yet cut)* — `deps-currency` fix, no new input. The report's Lockfile column named each lockfile by the
+**v1.29.5** *(anchor `5e321ba`; `v1` moved onto it 2026-10-13)* — `deps-currency` fix, no new input. The report's Lockfile column named each lockfile by the
 absolute runner path osv-scanner prints, cut at 60 characters like every cell, so a typical row ended
 `| /home/runner/work/lampakia-astro/lampakia-astro/apps/web/pac |`: the lockfile's name cut off, in the job log, the step
 summary and the tracking issue. It now names the lockfile relative to the workspace (the repository root), as the annotation's
