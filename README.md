@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.29.7** *(tag not yet cut)* — `security-baseline` and `deps-currency` fix, no new input. osv-scanner v2 names each lockfile
+**v1.29.7** *(anchor `5bb602f`; `v1` moved onto it 2026-10-13)* — `security-baseline` and `deps-currency` fix, no new input. osv-scanner v2 names each lockfile
 by its absolute real path, and `security-baseline`'s SCA report row carried it as printed —
 `/home/runner/work/<repo>/<repo>/apps/web/package-lock.json` — as did a promoted `sca-critical` or `sca-high` annotation, in its
 `file=` and its message. Both now name the lockfile relative to the workspace, the repository root, as `deps-currency` has since
