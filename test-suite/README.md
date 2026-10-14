@@ -167,6 +167,12 @@ test-suite: ❌ status=fail — BLOCKED — the suite is green (…) but 2 of 22
 - **A fault blocks when a check you made blocking could not run.** A missing working-directory, a
   missing runner or a crash exits 1 under `fail-on-isolation` as well as under `fail-on-fail`; the
   never-block floors (no stack, no tests configured) still exit 0.
+- **The summary stays under GitHub's 1 MiB.** The table has a row per file that fails alone, and
+  GitHub drops a step summary over 1 MiB, so a report over 900,000 bytes (some 6,000 such files at
+  a typical row, 920 at the longest `safe()` allows) keeps every other line and as many whole rows
+  as fit, in the listing's order, then `(truncated — N more rows; the full report is in the run
+  log: <run URL>)`. The job log names every file either way, and a fault in that cut costs only the
+  summary: one plain log line, the exit code kept (since v1.29.9).
 - **Cost:** one PHPUnit start per test file, plus one listing, on top of the suite.
 
 ## Where to read the result — job log *and* step summary
@@ -255,6 +261,16 @@ and fault rules. The offline legs set the env directly, so CI adds `isolate-file
 calls the action through `action.yml` on that fixture three times. With the inputs on it must fail;
 with them unset it must pass; and with them on again after the fixture's file is fixed it must pass,
 so the failure is the check and not a crash.
+
+The summary's cut (v1.29.9) is pinned the same way. `fitReport()` is held to a cut built by hand at
+every cap from 923 to 1,213 bytes, and `run.mjs` runs end to end over `phpunit-many-stub.sh` (`sh`,
+since a thousand node starts take most of a minute), whose files all fail alone with names and
+defect lines at `safe()`'s caps in 3-byte characters. 1,200 files take the report past 1 MiB: the
+summary is at most 900,000 bytes, its rows the first in the listing, the note counting the rest,
+and the log names every file. 975 files and a pad make exactly 900,000 bytes, written whole, and one
+byte more is cut; a fault injected into the cut leaves the log as uncut plus one line, no summary
+and exit 0. With the cut switched off, 8 of these 15 checks go red, and each of the 15 turns red
+under at least one of 14 targeted mutants.
 
 ```bash
 node test-suite/scripts/selftest.mjs    # exits non-zero on any regression

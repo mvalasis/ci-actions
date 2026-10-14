@@ -4,7 +4,10 @@
 // against committed node fixtures whose `test` script is a self-contained Node stub emitting real
 // vitest-shaped output — so we prove the action detects RED and reports GREEN with no network —
 // and where its output goes: a local run prints the job log once, with no step summary, and an
-// unwritable summary exits under fail-on-fail.
+// unwritable summary exits under fail-on-fail. (3) The step summary stays under GitHub's 1 MiB
+// (v1.29.9): a report over 900,000 bytes is cut for the summary alone — pinned cap by cap against a
+// cut built by hand, then through the real run.mjs past 1 MiB, at exactly 900,000 bytes and one byte
+// over; a fault in the cut costs the summary, never the exit code.
 // Run: node scripts/selftest.mjs (also runs in CI). Exits non-zero on any regression. Mirrors
 // seo-aeo/selftest.mjs + security-baseline/selftest.mjs.
 import fs from 'node:fs';
@@ -15,7 +18,7 @@ import { spawnSync } from 'node:child_process';
 import {
   STATUS, safe, detectStack, detectNodePM, hasRealTestScript,
   resolveNodeCommand, resolvePhpCommand, resolveCommand, parseCounts, verdict,
-  shellQuote, parseTestFileList, isolationPlan, defectLine,
+  shellQuote, parseTestFileList, isolationPlan, defectLine, fitReport,
 } from './detect.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -27,12 +30,13 @@ function check(name, cond, detail = '') { if (cond) console.log(`  ✅ ${name}`)
 
 // Run run.mjs end-to-end with a captured step-summary; returns { exit, summary, stdout }.
 // stdout is the JOB-LOG mirror (separate from the step summary, which CI writes to a file) — the
-// selftest asserts against both, since a green run used to leave the job log empty.
-function runCli(env) {
+// selftest asserts against both, since a green run used to leave the job log empty. `script` is
+// another copy of run.mjs (the fault-injection leg's).
+function runCli(env, script = RUN) {
   const summaryPath = path.join(os.tmpdir(), `ts-summary-${Math.random().toString(36).slice(2)}.md`);
   fs.writeFileSync(summaryPath, '');
-  const r = spawnSync(process.execPath, [RUN], {
-    encoding: 'utf8',
+  const r = spawnSync(process.execPath, [script], {
+    encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
     env: { ...process.env, GITHUB_STEP_SUMMARY: summaryPath, FORCE_COLOR: '0', ...env },
   });
   const summary = fs.readFileSync(summaryPath, 'utf8');
@@ -428,6 +432,159 @@ console.log('\n# E2E — isolate-files runs each PHPUnit test file alone');
   const hostile = runCli({ ...ISO, ISOLATE_FILES: 'true', STUB_WHY: '::error::forged annotation' });
   check('a hostile defect line cannot reach line-start in the job log (it is shown, behind the gutter)',
     forgedCommandLines(hostile.stdout).length === 0 && /^│ tests\/BorrowedHarnessTest\.php — exit 2 — ::error::forged annotation$/m.test(hostile.stdout), hostile.stdout);
+}
+
+console.log("\n# the step summary's cut (pure)");
+const CAP = 900000;
+const RUN_URL = 'https://github.com/acme/site/actions/runs/33911783576';
+{
+  // A report in run.mjs's grammar, each line labelled by hand: F fixed, R a row of the isolate-files
+  // table. The counts table is fixed too, though its rows start `| ` like the isolate table's. The cut at
+  // a cap is built here the long way — the largest k for which the fixed lines, the first k rows, a blank
+  // line and the longest note (every row left out) fit — and fitReport must give exactly that, at every
+  // cap.
+  const SPEC = [
+    ['## 🧪 test-suite — per-stack test run', 'F'], ['', 'F'],
+    ['- mode: **BLOCK on test failure**', 'F'], ['- isolate-files: report-only (never blocks)', 'F'],
+    ['- working dir: `wp-content/plugins/shop`', 'F'], ['- stack: **php** · command: `composer test`', 'F'], ['', 'F'],
+    ['| stack | command | passed | failed | skipped | total | exit |', 'F'],
+    ['| --- | --- | ---: | ---: | ---: | ---: | ---: |', 'F'],
+    ['| php | `composer test` | 41 | 0 | — | 41 | 0 |', 'F'], ['', 'F'],
+    ['**Each test file alone** (`isolate-files`)', 'F'], ['', 'F'],
+    ['- ❌ 4 of 9 test file(s) fail alone. Each passed in the full suite, so it depends on something another test file loads or leaves behind.', 'F'], ['', 'F'],
+    ['| file | exit | why |', 'F'], ['| --- | ---: | --- |', 'F'],
+    ['| `tests/Unit/CartTest.php` | 2 | Error: Call to undefined function wc_get_cart_url |', 'R'],
+    ['| `tests/Unit/Γλώσσα/ΜετάφρασηTest.php` | 2 | Error: Class "WP_UnitTestCase" not found |', 'R'],
+    ['| `tests/Unit/OrderTotalsTest.php` | 1 | Failed asserting that 12.5 matches expected 10.0. |', 'R'],
+    ['| `tests/Integration/RestTest.php` | 255 | PHP Fatal error:  Uncaught Error: Call to undefined function rest_get_server |', 'R'],
+    ['', 'F'],
+    ['**status: fail**', 'F'],
+    ['report-only — the suite is green (41 passed, 0 failed, 41 total) but 4 of 9 test file(s) fail when run alone: tests/Unit/CartTest.php, …. This would BLOCK under `fail-on-isolation: true`.', 'F'],
+  ];
+  const lines = SPEC.map(([l]) => l);
+  const whole = `${lines.join('\n')}\n`;
+  const rows = SPEC.map((_, i) => i).filter((i) => SPEC[i][1] === 'R');
+  const built = (k, n) => `${[...lines.filter((_, i) => SPEC[i][1] === 'F' || rows.slice(0, k).includes(i)), '', `(truncated — ${n} more rows; the full report is in the run log: ${RUN_URL})`].join('\n')}\n`;
+  const expect = (cap) => {
+    if (Buffer.byteLength(whole) <= cap) return whole;
+    let k = 0;
+    while (k < rows.length && Buffer.byteLength(built(k + 1, rows.length)) <= cap) k++;
+    return built(k, rows.length - k);
+  };
+  const lo = Buffer.byteLength(built(0, rows.length));
+  const bad = [];
+  for (let cap = lo - 3; cap <= Buffer.byteLength(whole) + 1; cap++) if (fitReport(lines, RUN_URL, cap) !== expect(cap)) bad.push(cap);
+  check(`fitReport at every cap from ${lo - 3} to ${Buffer.byteLength(whole) + 1} bytes is the cut built by hand`, bad.length === 0, `wrong at ${bad.slice(0, 5).join(', ')}`);
+  const mid = fitReport(lines, RUN_URL, Buffer.byteLength(built(2, rows.length)));
+  check('…a mid cut: the first two rows, the counts table and the verdict whole, the note counting 2',
+    mid.includes('| php | `composer test` | 41 |') && /CartTest[\s\S]*ΜετάφρασηTest/.test(mid) && !/OrderTotalsTest|RestTest\.php` \|/.test(mid)
+      && mid.endsWith(`This would BLOCK under \`fail-on-isolation: true\`.\n\n(truncated — 2 more rows; the full report is in the run log: ${RUN_URL})\n`), JSON.stringify(mid.slice(-300)));
+  const noTable = [...lines.slice(0, 11), '**status: pass**', 'x'.repeat(300)];
+  check('…no isolate-files table (the counts table is not one): an over-cap report goes whole, with no note', fitReport(noTable, RUN_URL, 100) === `${noTable.join('\n')}\n`);
+}
+
+console.log("\n# isolate-files — the step summary stays under GitHub's limit (run.mjs end to end)");
+{
+  // GitHub drops a step summary over 1 MiB (the upload fails with an error annotation, so the run shows
+  // none), and the isolate-files table has a row per test file that fails alone: a report over 900,000
+  // bytes is cut for the summary alone (fitReport, pinned cap by cap above). The suite is
+  // phpunit-many-stub.sh over files.txt, every file failing alone with its name and defect line at
+  // safe()'s caps in 3-byte characters (917 bytes a row), so 1,200 files take the report past 1 MiB.
+  const WD = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ts-many-')));
+  fs.copyFileSync(path.join(FIX, 'php-isolation', 'phpunit-many-stub.sh'), path.join(WD, 'phpunit-many-stub.sh'));
+  const WHY = `Error: ${'中'.repeat(193)}`;   // 200 characters, the why column's cap
+  // File i: `tests/`, its number, 3-byte characters, `extra` ASCII bytes and `Test.php` — 118 characters
+  // with no extra, and the file column's cap is 120. A file's extra is the 1-byte knob of the boundary
+  // legs; the first ten files never take one, so the verdict, which names them, does not move.
+  const fileOf = (i, extra = 0) => `tests/${String(i).padStart(4, '0')}${'中'.repeat(100)}${'x'.repeat(extra)}Test.php`;
+  // n files, `pad` bytes spread over files 11..n, one each.
+  const suite = (n, pad = 0) => Array.from({ length: n }, (_, j) => fileOf(j + 1, j >= 10 && j - 10 < pad ? 1 : 0));
+  const rowOf = (f) => `| \`${f}\` | 2 | ${WHY} |`;
+  const GH = { GITHUB_SERVER_URL: 'https://github.com', GITHUB_REPOSITORY: 'acme/site', GITHUB_RUN_ID: '33911783576' };
+  const ISO = { ...GH, WORKING_DIRECTORY: WD, STACK: 'php', TEST_COMMAND: 'sh phpunit-many-stub.sh', FAIL_ON_FAIL: 'true', ISOLATE_FILES: 'true', STUB_WHY: WHY };
+  const runSuite = (files, extra = {}, script = RUN) => {
+    fs.writeFileSync(path.join(WD, 'files.txt'), files.map((f) => `${WD}/${f}\n`).join(''));
+    return runCli({ ...ISO, ...extra }, script);
+  };
+  const isRow = (l) => l.startsWith('| `tests/');
+  const nonRows = (text) => text.split('\n').filter((l) => !isRow(l));
+  // What a cut summary owes against the rows of the report it was cut from (`all`, the listing's order),
+  // each property on its own.
+  const cutOf = (summary, all) => {
+    const m = summary.match(/^([\s\S]*)\n\n\(truncated — (\d+) more rows; the full report is in the run log: (\S+)\)\n$/);
+    const kept = (m ? m[1] : summary).split('\n').filter(isRow);
+    const k = kept.length;
+    const size = Buffer.byteLength(summary);
+    const b = (l) => Buffer.byteLength(l) + 1;
+    return { size, k, m,
+      // The report's size: the summary's lines, the rows left out put back, less the blank line and note.
+      uncut: m ? Buffer.byteLength(m[1]) + 1 + all.slice(k).reduce((sum, l) => sum + b(l), 0) : size,
+      under: size <= CAP,
+      shape: !!m && m[3] === RUN_URL,
+      prefix: k > 0 && k < all.length && kept.every((l, i) => l === all[i]),
+      count: !!m && Number(m[2]) === all.length - k,
+      // The first row left out would not fit, the note budgeted at its longest (every row left out).
+      fill: k < all.length && CAP - size - (String(all.length).length - String(all.length - k).length) < b(all[k]),
+      verdict: !!m && /\n\n\*\*status: fail\*\*\nreport-only — the suite is green \(2 passed, 0 failed, 2 total\) but \d+ of \d+ test file\(s\) fail when run alone: .*\. This would BLOCK under `fail-on-isolation: true`\.$/.test(m[1]) };
+  };
+  const owed = (c) => c.under && c.shape && c.prefix && c.count && c.fill && c.verdict;
+  const logged = (stdout) => stdout.split('\n').filter((l) => l.startsWith('│ tests/'));
+  try {
+    const N = 1200;
+    const files = suite(N);
+    const big = runSuite(files);
+    const c = cutOf(big.summary, files.map(rowOf));
+    check(`${N} files that fail alone, a report past 1 MiB: exit 0 and the report-only verdict, as uncut`,
+      c.uncut > 1048576 && big.exit === 0 && /^test-suite: ❌ status=fail — report-only — the suite is green .* but 1200 of 1200 test file\(s\) fail when run alone: .* — would BLOCK under fail-on-isolation:true$/m.test(big.stdout),
+      `${c.uncut} B, exit=${big.exit} ${big.stderr.slice(0, 200)}`);
+    check('…the summary is at most 900,000 bytes', c.under, `${c.size} B`);
+    check('…the report cut, then the note with the run URL', c.shape, JSON.stringify(big.summary.slice(-200)));
+    check('…the rows kept are the first in the listing, in its order', c.prefix, `kept ${c.k}`);
+    check(`…the note counts the ${N - c.k} rows left out`, c.count);
+    check('…and fills the room: the first row left out would not fit', c.fill, `${c.size} B`);
+    check('…the head, the counts table, the table header and the verdict kept',
+      big.summary.startsWith('## 🧪 test-suite — per-stack test run\n') && big.summary.includes('\n| php | `sh phpunit-many-stub.sh` | 2 | 0 | — | 2 | 0 |\n')
+        && big.summary.includes('\n- ❌ 1200 of 1200 test file(s) fail alone.') && big.summary.includes(`\n| file | exit | why |\n| --- | ---: | --- |\n${rowOf(files[0])}\n`) && c.verdict);
+    check('…the job log names every file, in the listing\'s order, with its exit and why',
+      logged(big.stdout).join('\n') === files.map((f) => `│ ${f} — exit 2 — ${WHY}`).join('\n'), `${logged(big.stdout).length} logged`);
+
+    // The boundary, both sides: 110 files measure the fixed lines; enough files to come within a row of
+    // 900,000 bytes (their counts as many digits long as 110's, so the fixed lines do not move); the rest
+    // in single bytes over the files' names, to exactly 900,000 — the summary must be the report, nothing
+    // cut — then one byte more.
+    const small = runSuite(suite(110));
+    const n = 110 + Math.floor((CAP - Buffer.byteLength(small.summary)) / (Buffer.byteLength(rowOf(fileOf(1))) + 1));
+    const pad = CAP - Buffer.byteLength(small.summary) - (n - 110) * (Buffer.byteLength(rowOf(fileOf(1))) + 1);
+    const atCap = runSuite(suite(n, pad));
+    check(`${n} files and ${pad} bytes over their names, a report of exactly 900,000 bytes: the summary is the report, every row in it`,
+      !cutOf(small.summary, []).m && pad + 1 <= n - 10 && Buffer.byteLength(atCap.summary) === CAP && !atCap.summary.includes('(truncated')
+        && atCap.summary.split('\n').filter(isRow).join('\n') === suite(n, pad).map(rowOf).join('\n'), `${Buffer.byteLength(atCap.summary)} B, pad ${pad}`);
+    const past = suite(n, pad + 1);
+    const pastCap = runSuite(past);
+    const p = cutOf(pastCap.summary, past.map(rowOf));
+    check('…one byte more: cut to at most 900,000, the first rows kept, the rest counted, every other line as at the cap',
+      p.uncut === CAP + 1 && owed(p) && nonRows(`${p.m[1]}\n`).join('\n') === nonRows(atCap.summary).join('\n'), `${p.uncut} → ${p.size} B, kept ${p.k}`);
+
+    // A fault in the cut costs the run its summary, never its exit code: the job log is as it was, then
+    // one plain line naming the fault. A copy of the scripts whose fitReport throws; under fail-on-fail a
+    // crash would exit 1.
+    const faulty = fs.mkdtempSync(path.join(os.tmpdir(), 'ts-faulty-'));
+    try {
+      const source = fs.readFileSync(path.join(HERE, 'detect.mjs'), 'utf8');
+      const CUT = 'export function fitReport(lines, runUrl, cap = SUMMARY_CAP) {';
+      check('fault-injection anchor still present in detect.mjs', source.includes(CUT));
+      fs.writeFileSync(path.join(faulty, 'detect.mjs'), source.replace(CUT, `${CUT} throw new Error('injected cut fault');`));
+      fs.copyFileSync(RUN, path.join(faulty, 'run.mjs'));
+      const FAULT = "test-suite: the report is over the step summary's limit and could not be cut, so the summary does not carry it; the job log above holds every row (injected cut fault)";
+      const sunk = runSuite(files, {}, path.join(faulty, 'run.mjs'));
+      check('a fault in the cut: the job log as uncut, then one plain line naming it; no summary; exit 0, not a crash',
+        sunk.stdout === `${big.stdout}${FAULT}\n` && sunk.summary === '' && sunk.exit === 0, `exit=${sunk.exit} ${JSON.stringify(sunk.stdout.slice(-300))}`);
+    } finally {
+      fs.rmSync(faulty, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(WD, { recursive: true, force: true });
+  }
 }
 
 console.log(failed === 0 ? '\n✅ all test-suite self-tests passed\n' : `\n❌ ${failed} self-test(s) failed\n`);

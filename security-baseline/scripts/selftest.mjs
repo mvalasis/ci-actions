@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import {
   SEV, CHECKS, T0_CHECKS, T1_CHECKS, T2_CHECKS, RESERVED_CHECKS, evaluate, parsePromote,
   isPromotable, baseSev, safe, redact, escapeData, escapeProperty, annotation, annotations,
-  canBeCritical, faultAnnotation, shortSha, repoRelative,
+  canBeCritical, faultAnnotation, shortSha, repoRelative, reportBody, GROUP_ROWS,
 } from './tiers.mjs';
 import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, gitLogOutcome, scrub, errorLine } from './outcome.mjs';
 import { firstPartyOwners, ownerOf, parseOwners, refFromText, readLineFromDisk, filterFirstPartyGha } from './firstparty.mjs';
@@ -346,6 +346,36 @@ console.log('\n# lockfile location — repoRelative (pure)');
   let theirs;
   try { ({ repoRelative: theirs } = await import('../../deps-currency/scripts/engine.mjs')); } catch (e) { theirs = e; }
   check("repoRelative answers as deps-currency's engine.mjs does, case for case", typeof theirs === 'function' && cases.every(([s, o]) => repoRelative(s, o) === theirs(s, o)), String(theirs));
+}
+
+console.log("\n# the report's worst case stays under GitHub's step-summary limit (reportBody, pure)");
+{
+  // GitHub drops a step summary over 1 MiB: the upload fails with an error annotation and the run shows
+  // none. This report is bounded by construction — GROUP_ROWS rows a check id, every field at a safe()
+  // cap, each scanner leg once — but each id a new rule emits adds a group, ~21.4 KB at worst, so the
+  // worst case is held here under the 900,000 bytes the capped actions keep to. Every emittable id
+  // gets one finding more than a group shows, its file, message and CWE at their caps in 3-byte
+  // characters (the most bytes one UTF-16 code unit can take) and its line the longest a number
+  // prints; every scanner leg could not look, at the longest reason and not blind (the longer row);
+  // 32 scanner notes at their cap, where scan.mjs pushes at most 12. AROUND pays for what scan.mjs
+  // writes outside the body (about 4 KB at its caps) and the counts' digits; the caller's own
+  // `critical-checks` and `first-party-owners` lists, which it types itself, are not counted.
+  const W = '中'.repeat(1000);
+  const LINE = 1.2345678901234567e-6;   // prints as 0.0000012345678901234567, 24 characters
+  const AROUND = 10000;
+  const ids = Object.keys(CHECKS).filter((k) => !RESERVED_CHECKS.has(k));
+  const { graded, crit, warn, info } = evaluate(ids.flatMap((checkId) => Array.from({ length: GROUP_ROWS + 1 }, () => ({ checkId, file: W, line: LINE, msg: W, cwe: W, tool: 't' }))));
+  const faults = Object.values(LEGS).map((leg) => ({ leg, reason: W }));
+  const body = reportBody({ graded, crit, warn, info, faults, blind: [], infra: Array.from({ length: 32 }, () => W) });
+  const count = (re) => body.filter((l) => re.test(l)).length;
+  check(`the worst case is the worst: ${ids.length} groups of ${GROUP_ROWS} rows, each at the longest line, then "…and 1 more"; all ${Object.keys(LEGS).length} legs; 32 notes`,
+    String(LINE).length === 24 && count(/^### .* · T\d · \d+ finding\(s\)$/) === ids.length && count(/^- …and 1 more$/) === ids.length
+      && count(new RegExp(`^- \\S+ 中+:${String(LINE).replace('.', '\\.')} — 中+ _\\(中+\\)_$`)) === ids.length * GROUP_ROWS
+      && count(/^- ⚠️ .* — 中+ \(its checks only warn for this caller: reported, not a fault\)$/) === Object.keys(LEGS).length && count(/^- 中+$/) === 32,
+    JSON.stringify(body.slice(0, 3)));
+  const bytes = Buffer.byteLength(`${body.join('\n')}\n`) + AROUND;
+  check(`…and with ${AROUND} bytes for the rest of the summary, it is at most 900,000 bytes (${bytes})`, bytes <= 900000,
+    `— over: show fewer rows a group (GROUP_ROWS), tighten the safe() caps, or cut the report as seo-aeo's fitReport() does (.claude/rules/scanner-conventions.md)`);
 }
 
 console.log('\n# outcome.mjs — a scanner that could not look never reads as one that found nothing');

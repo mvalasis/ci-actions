@@ -202,6 +202,45 @@ export function faultAnnotation(name, reason, level = 'error') {
   return `::${level} title=${escapeProperty('security-baseline could not look')}::${escapeData(safe(`${name} could not look — ${reason}`, 300))}`;
 }
 
+// The report's body, as scan.mjs writes it between the head and the verdict: the findings grouped by
+// check, criticals first, GROUP_ROWS rows a group and then how many more; the scanner legs that could
+// not look; the scanner notes; the totals line. `faults` are { leg, reason }, `blind` the ones of them
+// that could have produced a CRITICAL here. Pure, so the selftest can render the worst case it allows
+// and hold it under GitHub's 1 MiB step-summary limit.
+export const ICON = { critical: '❌', warn: '⚠️', info: 'ℹ️', ok: '✅' };
+export const GROUP_ROWS = 15;
+export function reportBody({ graded, crit, warn, info, faults = [], blind = [], infra = [] }) {
+  const lines = [];
+  const note = (s = '') => lines.push(s);
+  const groups = [...groupByCheck(graded)].sort((a, b) => sevRank(baseOf(a[1])) - sevRank(baseOf(b[1])));
+  if (graded.length === 0) {
+    note(faults.length ? '- no findings from the scanners that looked — the legs that could not are listed below.' : '- ✅ no findings across SAST, secrets, SCA, and CI supply-chain.');
+    note('');
+  } else {
+    for (const [checkId, fs_] of groups) {
+      const sev = fs_[0].sev;
+      const tier = (CHECKS[checkId] || { tier: 'T1' }).tier;
+      note(`### ${ICON[sev] || ICON.warn} \`${safe(checkId, 60)}\` · ${tier} · ${fs_.length} finding(s)`);
+      for (const f of fs_.slice(0, GROUP_ROWS)) note(`- ${ICON[f.sev] || ICON.warn} ${safe(f.file || f.source)}${Number.isFinite(+f.line) && +f.line > 0 ? ':' + (+f.line) : ''} — ${safe(f.msg, 220)}${f.cwe ? ` _(${safe(f.cwe, 40)})_` : ''}`);
+      if (fs_.length > GROUP_ROWS) note(`- …and ${fs_.length - GROUP_ROWS} more`);
+      note('');
+    }
+  }
+  // ❌ a leg that could have produced a CRITICAL for this caller; ⚠️ one whose checks only warn here.
+  if (faults.length) {
+    note(`### ${blind.length ? ICON.critical : ICON.warn} could not look · ${faults.length} scanner leg(s) — a tool fault, not a finding`);
+    for (const f of faults) {
+      const can = blind.includes(f);
+      note(`- ${can ? ICON.critical : ICON.warn} ${safe(f.leg.name, 80)} — ${safe(f.reason, 240)}${can ? '' : ' (its checks only warn for this caller: reported, not a fault)'}`);
+    }
+    note('');
+  }
+  if (infra.length) { note('### ℹ️ scanner notes'); infra.forEach((m) => note(`- ${safe(m, 240)}`)); note(''); }
+  note(`**critical: ${crit} · warnings: ${warn} · info: ${info}${faults.length ? ` · could not look: ${faults.length}` : ''}**`);
+  return lines;
+}
+function baseOf(arr) { return arr[0] ? arr[0].sev : SEV.WARN; }
+
 // RESERVED — declared in CHECKS so a FUTURE scanner can emit them with no engine change, but NO
 // adapter emits them today (see README §Honest limits). secret-worktree is a *local* pre-push
 // concern (a fresh CI checkout has no untracked/gitignored files to scan); license-denied /

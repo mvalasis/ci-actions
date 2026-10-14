@@ -227,3 +227,32 @@ export function defectLine(output) {
   const rest = lines.filter((l) => l.trim());
   return rest.length ? rest[rest.length - 1].trim() : '';
 }
+
+// ---------- the step summary's cut (pure; run.mjs flush() calls it, selftest.mjs covers it) ----------
+
+// GitHub drops a step summary over 1 MiB: the upload fails with an error annotation and the run shows
+// none. The isolate-files table has a row per test file that fails alone, so until v1.29.9 the report
+// went missing on the suites with the most such files: past ~7,000 at a typical 150 bytes a row, ~1,100
+// at the 975 that safe()'s caps allow. A report over SUMMARY_CAP BYTES keeps every other line — the
+// head, the counts table, the verdict — and as many WHOLE rows of that table as fit, in the listing's
+// order; a note after the verdict counts the rows left out and gives the run URL, and the job log names
+// every file. Bytes are never fewer than characters, so the cap holds however GitHub counts. Under the
+// cap the report is `${lines.join('\n')}\n`, byte for byte, and so is one with no row to cut.
+export const SUMMARY_CAP = 900000;
+const ISOLATE_RULE = '| --- | ---: | --- |';
+export function fitReport(lines, runUrl, cap = SUMMARY_CAP) {
+  const whole = `${lines.join('\n')}\n`;
+  const first = lines.indexOf(ISOLATE_RULE) + 1;
+  let end = first;
+  while (first && end < lines.length && lines[end].startsWith('| ')) end++;
+  if (end === first || Buffer.byteLength(whole) <= cap) return whole;
+  const size = (l) => Buffer.byteLength(l) + 1;
+  const note = (n) => `(truncated — ${n} more rows; the full report is in the run log: ${runUrl})`;
+  const rows = lines.slice(first, end);
+  const fixed = [...lines.slice(0, first), ...lines.slice(end)];
+  // What the rows may take once the fixed lines, the blank line and the longest note (every row left out) are paid for.
+  let room = cap - fixed.reduce((s, l) => s + size(l), 0) - 1 - Buffer.byteLength(note(rows.length)) - 1;
+  let k = 0;
+  while (k < rows.length && (room -= size(rows[k])) >= 0) k++;
+  return `${[...lines.slice(0, first), ...rows.slice(0, k), ...lines.slice(end), '', note(rows.length - k)].join('\n')}\n`;
+}

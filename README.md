@@ -88,6 +88,27 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.29.9** *(tag not yet cut)* — `test-suite` fix and a `security-baseline` guard, no new input. `test-suite`'s step summary
+went missing on the suites with the most test files that fail alone, as five other actions' did until v1.29.6: under
+`isolate-files` the report gives each such file a row (about 150 bytes, 975 at `safe()`'s caps) with no limit, and GitHub drops a
+step summary over 1 MiB. A report over 900,000 bytes now keeps every other line (the head, the counts table, the verdict) and as
+many whole rows as fit, in the listing's order, then `(truncated — N more rows; the full report is in the run log: <run URL>)`.
+A report under the cap is written byte-identical, the job log names every file either way, and a fault in the cut costs only the
+summary: one plain line in the log, the exit code kept. `security-baseline`'s report is bounded by construction, 15 rows a check
+id, but each id a new rule emits raises its worst case by about 21.4 KB, so that worst case is now held under 900,000 bytes by a
+test: 793,621 bytes today, a fifth new id fails it. Touches `SUMMARY_CAP` and `fitReport()` in `test-suite/scripts/detect.mjs`,
+`flush()` in `run.mjs`, and `selftest.mjs` with the new `selftest/php-isolation/phpunit-many-stub.sh` (15 new checks: the fitter
+against a cut built by hand at every cap from 923 to 1,213 bytes; the real `run.mjs` past 1 MiB, at exactly 900,000 bytes
+(byte-identical) and one over (cut), and with a fault injected into the cut; with the cut switched off 8 of them go red, and each
+turns red under at least one of 14 targeted mutants); and `security-baseline/scripts/tiers.mjs`, whose new pure `reportBody()`
+(with `ICON` and `GROUP_ROWS`) is the report body moved out of `scan.mjs` byte for byte, and `selftest.mjs` (2 new checks: the
+worst case `reportBody()` renders, every emittable id with 16 findings at `safe()`'s caps in 3-byte characters, all 12 scanner
+legs that could not look and 32 scanner notes, plus 10,000 bytes for the head and the verdict, at most 900,000; 20 rows a group,
+five more ids or a 300-character message cap each turn it red, four more ids do not, and 6 mutants of its premise are each
+caught). The old and the new `scan.mjs` give byte-identical output, summary, log and exit, over 10 scenarios that reach every
+branch of the report. **Caller-visible:** an oversized `test-suite` report now gets a summary, cut as above, where it got none;
+every other report reads as before; verdicts and exit codes are unchanged.
+
 **v1.29.8** *(anchor `6aaa6b5`; `v1` moved onto it 2026-10-14)* — `latin-urls` fix, no new input. Each audit cut its matches to the first 20 before counting them,
 so a site with 300 non-ASCII page paths read `dist/ has non-ASCII page paths … (20)`, the findings total counted 20, and nothing
 said any were left out. The title and the total now count every match; the job log and the step summary still list the first 20

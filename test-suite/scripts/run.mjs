@@ -9,6 +9,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   STATUS, safe, resolveCommand, parseCounts, verdict, parseTestFileList, isolationPlan, defectLine,
+  SUMMARY_CAP, fitReport,
 } from './detect.mjs';
 
 const env = process.env;
@@ -32,7 +33,7 @@ const note = (s = '') => lines.push(s);
 // "a repo without tests is never blocked" floor stands), but nothing was verified — rendering
 // them as a green tick is the false-green this mirror exists to expose.
 const ICON = { pass: '✅', fail: '❌', 'no-tests': '⚠️', 'no-stack': '⚠️', error: '❌' };
-const flush = () => { if (summaryFile) fs.appendFileSync(summaryFile, lines.join('\n') + '\n'); };
+const runUrl = `${env.GITHUB_SERVER_URL || 'https://github.com'}/${env.GITHUB_REPOSITORY || ''}/actions/runs/${env.GITHUB_RUN_ID || ''}`;
 
 const MODE = FAIL_ON_FAIL ? 'block-on-fail' : 'report-only';
 const ISO_MODE = ISOLATE ? ` · isolate-files=${FAIL_ON_ISOLATION ? 'block' : 'report-only'}` : '';
@@ -67,6 +68,21 @@ function echoTail(tail) {
   say(`::group::test output — last ${tail.length} line(s)`);
   for (const l of tail) say(GUTTER + safe(l, 300));
   say('::endgroup::');
+}
+
+// A report over SUMMARY_CAP is cut for the summary alone (fitReport, ./detect.mjs): GitHub drops a
+// summary over 1 MiB, and the isolate-files table has a row per test file that fails alone. A fault in
+// that cut costs the run its summary, never its exit code, and is one plain log line after the verdict.
+function flush() {
+  if (!summaryFile) return;
+  let text = lines.join('\n') + '\n';
+  if (Buffer.byteLength(text) > SUMMARY_CAP) {
+    try { text = fitReport(lines, runUrl); } catch (e) {
+      say(`test-suite: the report is over the step summary's limit and could not be cut, so the summary does not carry it; the job log above holds every row (${safe(String((e && e.message) || e), 160)})`);
+      return;
+    }
+  }
+  fs.appendFileSync(summaryFile, text);
 }
 
 // Single exit funnel: guarantees the job log carries a verdict line on EVERY path, including the

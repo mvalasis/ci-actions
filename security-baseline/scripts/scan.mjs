@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { SEV, evaluate, parsePromote, groupByCheck, sevRank, CHECKS, safe, redact, annotations, canBeCritical, faultAnnotation, shortSha, repoRelative } from './tiers.mjs';
+import { evaluate, parsePromote, safe, redact, annotations, canBeCritical, faultAnnotation, shortSha, repoRelative, reportBody } from './tiers.mjs';
 import { firstPartyOwners, filterFirstPartyGha } from './firstparty.mjs';
 import { argvTargets, findArgvSecrets, argvFinding } from './argv-secret.mjs';
 import { HOOK_GREP, restGateCandidate, findRestGateCase, restGateFinding } from './rest-gate-case.mjs';
@@ -71,7 +71,6 @@ const ANNOTATE = env.GITHUB_ACTIONS === 'true';   // runner commands are for the
 const say = (s = '') => { try { fs.writeSync(1, `${s}\n`); } catch { console.log(s); } };
 const lines = [];
 const note = (s = '') => lines.push(s);
-const ICON = { critical: '❌', warn: '⚠️', info: 'ℹ️', ok: '✅' };
 const infra = [];   // informational scanner notes (not findings, not faults)
 // Scanner legs that could not look: { leg, reason }. Never a finding, and never read as "nothing
 // found" — one whose checks can be CRITICAL for this caller takes the verdict away (see main).
@@ -831,33 +830,8 @@ function flush() {
   const blind = faults.filter((f) => canBeCritical(f.leg.checks, promote));
   const faulted = blind.length > 0 && FAIL_ON_CRITICAL && !REPORT_MODE;
 
-  // ---- report, grouped by check, criticals first ----
-  const groups = [...groupByCheck(graded)].sort((a, b) => sevRank(baseOf(a[1])) - sevRank(baseOf(b[1])));
-  if (graded.length === 0) {
-    note(faults.length ? '- no findings from the scanners that looked — the legs that could not are listed below.' : '- ✅ no findings across SAST, secrets, SCA, and CI supply-chain.');
-    note('');
-  } else {
-    for (const [checkId, fs_] of groups) {
-      const sev = fs_[0].sev;
-      const tier = (CHECKS[checkId] || { tier: 'T1' }).tier;
-      note(`### ${ICON[sev] || ICON.warn} \`${safe(checkId, 60)}\` · ${tier} · ${fs_.length} finding(s)`);
-      for (const f of fs_.slice(0, 15)) note(`- ${ICON[f.sev] || ICON.warn} ${safe(f.file || f.source)}${Number.isFinite(+f.line) && +f.line > 0 ? ':' + (+f.line) : ''} — ${safe(f.msg, 220)}${f.cwe ? ` _(${safe(f.cwe, 40)})_` : ''}`);
-      if (fs_.length > 15) note(`- …and ${fs_.length - 15} more`);
-      note('');
-    }
-  }
-  // ❌ a leg that could have produced a CRITICAL for this caller; ⚠️ one whose checks only warn here.
-  if (faults.length) {
-    note(`### ${blind.length ? ICON.critical : ICON.warn} could not look · ${faults.length} scanner leg(s) — a tool fault, not a finding`);
-    for (const f of faults) {
-      const can = blind.includes(f);
-      note(`- ${can ? ICON.critical : ICON.warn} ${safe(f.leg.name, 80)} — ${safe(f.reason, 240)}${can ? '' : ' (its checks only warn for this caller: reported, not a fault)'}`);
-    }
-    note('');
-  }
-  if (infra.length) { note('### ℹ️ scanner notes'); infra.forEach((m) => note(`- ${safe(m, 240)}`)); note(''); }
-
-  note(`**critical: ${crit} · warnings: ${warn} · info: ${info}${faults.length ? ` · could not look: ${faults.length}` : ''}**`);
+  // ---- report, grouped by check, criticals first (reportBody, ./tiers.mjs) ----
+  for (const l of reportBody({ graded, crit, warn, info, faults, blind, infra })) note(l);
   // Every verdict leaves through here: the report, then one annotation per leg that could not look
   // and could have blocked, then one per CRITICAL — `::error` when this run exits non-zero,
   // `::warning` when it only reports (report-mode, fail-on-critical: false).
@@ -893,5 +867,3 @@ function flush() {
   try { flush(); } catch { /* summary sink unwritable; the job log already has the report */ }
   process.exit(FAIL_ON_CRITICAL && !REPORT_MODE ? 1 : 0);
 });
-
-function baseOf(arr) { return arr[0] ? arr[0].sev : SEV.WARN; }
