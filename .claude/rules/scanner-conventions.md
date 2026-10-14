@@ -51,7 +51,15 @@ exactly the cap and one byte over. Current implementations: `linkcheck/scripts/f
 `deps-currency/scripts/engine.mjs` `capIssueBody()` (issue body at 60,000 bytes since v1.29.4)
 and `capSummary()` (step summary at 900,000 since v1.29.6), and `fitReport()` in
 `seo-aeo/scripts/checks.mjs`, `form-protection/scripts/checks.mjs` and
-`verify-homepage/scripts/ux-report.mjs` (step summary at 900,000 since v1.29.6).
+`verify-homepage/scripts/ux-report.mjs` (step summary at 900,000 since v1.29.6). The other seven
+are bounded by construction and stay uncapped (the latest run on each of the 13 callers,
+2026-10-12): `a11y-audit` a fixed ~6 lines (pa11y-ci's per-URL output goes to the log only),
+`pull-tier` one line, `latin-urls` at most 20 rows and a `…and N more` row × 3 audits,
+`security-baseline` at most 15 rows per check id × 39 ids (≤3 KB on every caller),
+`contract-check` rows bounded by the caller's manifest, a response checked on its first item only,
+× `max-endpoints` 25 (≤2.7 KB), `agent-benchmark` one URL and a table of at most 80 rows
+(14.8 KB), `test-suite` an output tail of at most 20 lines and, under `isolate-files`, one row per
+test file that fails alone (≤99 files on any caller, ~34 KB).
 
 **A path the report names is relative to the workspace, as an annotation's `file=` is** — never
 the scanner's own spelling. osv-scanner v2 prints each lockfile by its absolute runner path, and a
