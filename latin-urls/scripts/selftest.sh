@@ -122,6 +122,40 @@ else
   check "mutation control could not be applied (NON_ASCII line renamed?)" 1
 fi
 
+# greek_paths <tree> <pages> <dist> <products> → that many bad paths for each audit
+greek_paths() {
+  local t="$1" i
+  mkdir -p "$t/src/content/products"
+  for ((i = 1; i <= $2; i++)); do mkdir -p "$t/src/pages/σελίδα-$i"; done
+  for ((i = 1; i <= $3; i++)); do mkdir -p "$t/dist/σελίδα-$i"; : > "$t/dist/σελίδα-$i/index.html"; done
+  for ((i = 1; i <= $4; i++)); do : > "$t/src/content/products/λάμπα-$i.json"; done
+}
+rows_per_audit() {  # the summary's path rows under each ### title, space-separated
+  # shellcheck disable=SC2016  # the backtick is Markdown, not a command substitution
+  awk '/^### /{if (s) printf "%d ", c; s = 1; c = 0; next} /^- `/{c++} END{if (s) printf "%d", c}' "$SUMMARY"
+}
+
+echo
+echo "# (K) every bad path is counted, 20 are listed: 21 / 22 / 23 (until v1.29.8 each read (20))"
+T=$(mktree many); greek_paths "$T" 21 22 23
+run_audit "$AUDIT" "$T"
+check "21 + 22 + 23 bad paths exit 1" "$([ "$RC" -eq 1 ] && echo 0 || echo 1)"
+check "…each log title counts every path: (21), (22), (23)" "$(in_stderr 'non-ASCII directories.*(21)$' && in_stderr 'non-ASCII page paths.*(22)$' && in_stderr 'slugs.*(23)$' && echo 0 || echo 1)"
+check "…and so does each summary title" "$(in_summary '^### .*non-ASCII directories.*(21)$' && in_summary '^### .*non-ASCII page paths.*(22)$' && in_summary '^### .*slugs.*(23)$' && echo 0 || echo 1)"
+check "…the findings total is 66" "$(in_summary '\*\*66 finding(s)' && echo 0 || echo 1)"
+check "…the summary lists 20 paths under each title" "$([ "$(rows_per_audit)" = "20 20 20" ] && echo 0 || echo 1)"
+check "…then says how many more: 1, 2, 3" "$(in_summary '^- …and 1 more$' && in_summary '^- …and 2 more$' && in_summary '^- …and 3 more$' && echo 0 || echo 1)"
+check "…and so does the log" "$(in_stderr '^  …and 1 more$' && in_stderr '^  …and 2 more$' && in_stderr '^  …and 3 more$' && echo 0 || echo 1)"
+check "…which lists 20 paths under each title too" "$([ "$(grep -c '^  .*σελίδα-' "$STDERR")" -eq 40 ] && [ "$(grep -c '^  λάμπα-' "$STDERR")" -eq 20 ] && echo 0 || echo 1)"
+
+echo
+echo "# (L) exactly 20 per audit: every path listed, no 'more' row"
+T=$(mktree twenty); greek_paths "$T" 20 20 20
+run_audit "$AUDIT" "$T"
+check "each title says (20), the total 60" "$(in_stderr 'non-ASCII directories.*(20)$' && in_stderr 'non-ASCII page paths.*(20)$' && in_stderr 'slugs.*(20)$' && in_summary '\*\*60 finding(s)' && echo 0 || echo 1)"
+check "…the summary lists all 20 under each title" "$([ "$(rows_per_audit)" = "20 20 20" ] && echo 0 || echo 1)"
+check "…and neither the summary nor the log has a 'more' row" "$( { in_summary 'and [0-9]* more' || in_stderr 'and [0-9]* more'; } && echo 1 || echo 0)"
+
 echo
 if [ "$fails" -eq 0 ]; then echo "latin-urls selftest: all green"; exit 0; fi
 echo "latin-urls selftest: $fails regression(s)"; exit 1

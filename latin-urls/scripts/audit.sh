@@ -59,17 +59,26 @@ note() { printf '%s\n' "$*" >> "$summary" 2>/dev/null || true; }
 # routes are literal `[slug]` / `[...path]` directories. selftest.sh pins both.
 NON_ASCII='[^]a-zA-Z0-9._/[-]'
 
+# Each audit hands report() EVERY match: the title and the findings total count them
+# all, the log and the summary list the first MAX_ROWS, and a last row says how many
+# more there are. Until v1.29.8 the call sites cut the matches to 20 before counting,
+# so 300 bad paths read "(20)" with nothing to say any were left out.
+MAX_ROWS=20
 findings=0
 report() {  # report <title> <lines>
-  local title="$1" lines="$2" n
+  local title="$1" lines="$2" n shown more
   n=$(printf '%s\n' "$lines" | grep -c . || true)
   findings=$((findings + n))
+  shown=$(printf '%s\n' "$lines" | sed -n "1,${MAX_ROWS}p")
+  more=$((n - MAX_ROWS))
   echo "::error title=latin-urls::$title ($n)" >&2
-  printf '%s\n' "$lines" | sed 's/^/  /' >&2
+  printf '%s\n' "$shown" | sed 's/^/  /' >&2
+  [ "$more" -gt 0 ] && echo "  …and $more more" >&2
   note "### ✗ $title ($n)"
   note ""
   # shellcheck disable=SC2016  # the backticks are Markdown, not a command substitution
-  printf '%s\n' "$lines" | sed 's/^/- `/; s/$/`/' >> "$summary" 2>/dev/null || true
+  printf '%s\n' "$shown" | sed 's/^/- `/; s/$/`/' >> "$summary" 2>/dev/null || true
+  [ "$more" -gt 0 ] && note "- …and $more more"
   note ""
 }
 
@@ -80,7 +89,7 @@ if [ "$GREEK_URLS_OK" = "true" ]; then
   note "- src/pages + dist/ audits: **exempt** (greek-urls-ok=true — intentional Greek slugs)"
 else
   if [ -d "$PAGES_DIR" ]; then
-    bad=$(find "$PAGES_DIR" -type d | LC_ALL=C grep -E "$NON_ASCII" | head -20 || true)
+    bad=$(find "$PAGES_DIR" -type d | LC_ALL=C grep -E "$NON_ASCII" || true)
     if [ -n "$bad" ]; then
       report "$PAGES_DIR has non-ASCII directories — page URLs must be Latin-only" "$bad"
     else
@@ -95,7 +104,7 @@ else
     note "- \`$DIST\`: **missing** — run this action after the build step (exit 2, no verdict)"
     finish 2
   fi
-  bad=$(find "$DIST" -type f | grep -v -F -- "$UPLOADS_EXCLUDE" | LC_ALL=C grep -E "$NON_ASCII" | head -20 || true)
+  bad=$(find "$DIST" -type f | grep -v -F -- "$UPLOADS_EXCLUDE" | LC_ALL=C grep -E "$NON_ASCII" || true)
   if [ -n "$bad" ]; then
     report "$DIST/ has non-ASCII page paths — they would percent-encode in shared URLs" "$bad"
   else
@@ -105,7 +114,7 @@ fi
 
 if [ -d "$PRODUCTS_DIR" ]; then
   bad=$(find "$PRODUCTS_DIR" -mindepth 1 -maxdepth 1 -exec basename {} \; 2>/dev/null \
-        | LC_ALL=C grep -E '%|[^a-zA-Z0-9._-]' | head -20 || true)
+        | LC_ALL=C grep -E '%|[^a-zA-Z0-9._-]' || true)
   if [ -n "$bad" ]; then
     report "$PRODUCTS_DIR has non-ASCII or %-encoded slugs — they would 404 in prod (re-run the pull with the current slugify)" "$bad"
   else

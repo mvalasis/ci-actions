@@ -88,6 +88,15 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.29.8** *(tag not yet cut)* — `latin-urls` fix, no new input. Each audit cut its matches to the first 20 before counting them,
+so a site with 300 non-ASCII page paths read `dist/ has non-ASCII page paths … (20)`, the findings total counted 20, and nothing
+said any were left out. The title and the total now count every match; the job log and the step summary still list the first 20
+of each audit, then `…and N more`. Touches `report()` and its three call sites in `latin-urls/scripts/audit.sh`, and
+`selftest.sh` (two new legs, 11 checks: 21, 22 and 23 bad paths, a different count per audit, and exactly 20 per audit, every
+path listed and no `more` row; v1.29.7's `audit.sh` fails 5 of them, and 18 targeted mutants are each caught, every new check
+under at least one). **Caller-visible:** an audit with more than 20 bad paths shows the true count in its title and the total,
+and a `…and N more` row after the 20 it lists; one with 20 or fewer reads as before; verdicts and exit codes are unchanged.
+
 **v1.29.7** *(anchor `5bb602f`; `v1` moved onto it 2026-10-13)* — `security-baseline` and `deps-currency` fix, no new input. osv-scanner v2 names each lockfile
 by its absolute real path, and `security-baseline`'s SCA report row carried it as printed —
 `/home/runner/work/<repo>/<repo>/apps/web/package-lock.json` — as did a promoted `sca-critical` or `sca-high` annotation, in its
@@ -1947,7 +1956,9 @@ regardless of policy.
 
 Exit `0` clean · `1` a finding — the step fails, so the deploy never runs ·
 `2` the gate faulted (no `dist/`, an abort) — also fails, and says it is a fault,
-never a verdict. The regex is the fleet's regression anchor
+never a verdict. A finding's title counts every bad path; the log and the
+step summary list the first 20 of each audit, then `…and N more` (v1.29.8).
+The regex is the fleet's regression anchor
 `[^]a-zA-Z0-9._/[-]` (literal `]` first, `-` last, no backslashes: the
 backslashed form was a permanent no-op on every grep, 2026-07-31);
 `latin-urls/scripts/selftest.sh` pins it by mutation, and the self-test
