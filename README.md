@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.29.8** *(tag not yet cut)* — `latin-urls` fix, no new input. Each audit cut its matches to the first 20 before counting them,
+**v1.29.8** *(anchor `6aaa6b5`; `v1` moved onto it 2026-10-14)* — `latin-urls` fix, no new input. Each audit cut its matches to the first 20 before counting them,
 so a site with 300 non-ASCII page paths read `dist/ has non-ASCII page paths … (20)`, the findings total counted 20, and nothing
 said any were left out. The title and the total now count every match; the job log and the step summary still list the first 20
 of each audit, then `…and N more`. Touches `report()` and its three call sites in `latin-urls/scripts/audit.sh`, and
