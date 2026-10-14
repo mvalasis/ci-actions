@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.29.9** *(tag not yet cut)* — `test-suite` fix and a `security-baseline` guard, no new input. `test-suite`'s step summary
+**v1.29.9** *(anchor `2a8a5f4`; `v1` moved onto it 2026-10-14)* — `test-suite` fix and a `security-baseline` guard, no new input. `test-suite`'s step summary
 went missing on the suites with the most test files that fail alone, as five other actions' did until v1.29.6: under
 `isolate-files` the report gives each such file a row (about 150 bytes, 975 at `safe()`'s caps) with no limit, and GitHub drops a
 step summary over 1 MiB. A report over 900,000 bytes now keeps every other line (the head, the counts table, the verdict) and as
