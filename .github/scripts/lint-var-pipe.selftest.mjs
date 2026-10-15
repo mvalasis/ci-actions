@@ -9,6 +9,10 @@
 // misread would derail the scan and hide every pipe after it, which is why most
 // negatives are followed by a positive that must still fire.
 //
+// main()'s no-pipe tripwire is pinned both ways too: another repo's tree with no
+// printf/echo pipe passes, on a line of its own; ci-actions' own tree stripped of
+// its pipes still fails closed.
+//
 // A blocking gate whose scan is wrong fails silently in the permissive direction,
 // so this suite runs in CI ahead of the lint itself.
 
@@ -195,6 +199,8 @@ check('SIGPIPE at its default: the pipe misses, the here-string matches',
 
 // ---------------------------------------------------------------------------
 say('\n# main() fails closed, and blocks');
+// Each tree here is another repo's to the script, as the fleet sweep's are; its own
+// tree is the last section.
 
 const lint = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lint-var-pipe.mjs');
 const tree = (files) => {
@@ -205,22 +211,46 @@ const tree = (files) => {
   }
   return d;
 };
-const run = (d) => {
+const exec = (args, cwd) => {
   const env = { ...process.env };
   delete env.GITHUB_STEP_SUMMARY;
-  const p = spawnSync(process.execPath, [lint, d], { encoding: 'utf8', env });
+  return spawnSync(process.execPath, args, { encoding: 'utf8', env, cwd });
+};
+const run = (d) => {
+  const p = exec([lint, d]);
   fs.rmSync(d, { recursive: true, force: true });
   return p;
 };
 const OK_YML = 'runs:\n  steps:\n    - run: |\n        printf \'%s\\n\' "$v" | wc -l\n      shell: bash\n';
 const clean = run(tree({ 'a/action.yml': OK_YML, 'a/scripts/x.sh': 'echo "$v" | tr a b\n' }));
-check('a clean tree exits 0', clean.status === 0, JSON.stringify([clean.status, clean.stdout.slice(0, 200)]));
+check('a clean tree exits 0, on the clean line', clean.status === 0 && clean.stdout.startsWith('lint-var-pipe: ✅ clean'), JSON.stringify([clean.status, clean.stdout.slice(0, 200)]));
 const dirty = run(tree({ 'a/action.yml': OK_YML, 'a/scripts/x.sh': `true\n${BAD}\n` }));
 check('a dirty tree exits 1 with an annotation at the producer',
   dirty.status === 1 && dirty.stdout.includes('::error file=a/scripts/x.sh,line=2,col=1::'), JSON.stringify([dirty.status, dirty.stdout.slice(0, 300)]));
 check('an empty tree exits 2', run(tree({ 'README.md': 'x\n' })).status === 2);
-check('a tree with no printf/echo pipe at all exits 2 (the scan reads nothing)',
-  run(tree({ 'a/action.yml': 'runs:\n  steps:\n    - run: true\n', 'a/scripts/x.sh': 'true\n' })).status === 2);
+const noRun = run(tree({
+  '.github/workflows/w.yml': 'on: push\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v6\n',
+  'x.sh': 'echo "$v" | tr a b\n',
+}));
+check('a tree whose YAML holds no run: block exits 2', noRun.status === 2 && noRun.stdout.includes('read 0 run: block(s)'),
+  JSON.stringify([noRun.status, noRun.stdout.slice(0, 200)]));
+
+// luxairport-frontend's shape once its one finding (ci.yml:94) took a here-string:
+// run: blocks, and no printf/echo pipe left anywhere.
+const SIBLING = (line) => ({
+  '.github/workflows/ci.yml': src('on: push', 'jobs:', '  t:', '    runs-on: ubuntu-latest', '    steps:', '      - run: |',
+    '          files=$(git diff --name-only HEAD~1)', `          ${line}`, ''),
+  'scripts/x.sh': 'set -euo pipefail\ntrue\n',
+});
+const sibFixed = run(tree(SIBLING(`if grep -qx 'renovate.json' <<<"$files"; then echo changed; fi`)));
+check('another repo\'s tree with no printf/echo pipe exits 0, on the 0-pipes line and never the clean one',
+  sibFixed.status === 0 && !sibFixed.stdout.includes('✅')
+  && sibFixed.stdout.startsWith('lint-var-pipe: ⚪ 0 printf/echo pipes to read — 1 shell file(s), 1 run: block(s)'),
+  JSON.stringify([sibFixed.status, sibFixed.stdout.slice(0, 300)]));
+const sibBroken = run(tree(SIBLING(`if printf '%s\\n' "$files" | grep -qx 'renovate.json'; then echo changed; fi`)));
+check('the same tree with its pipe put back exits 1 at the producer',
+  sibBroken.status === 1 && sibBroken.stdout.includes('::error file=.github/workflows/ci.yml,line=8,col=14::'),
+  JSON.stringify([sibBroken.status, sibBroken.stdout.slice(0, 300)]));
 
 // ---------------------------------------------------------------------------
 say('\n# the live tree is clean (the lint is wired as blocking)');
@@ -231,10 +261,11 @@ check('discovery reaches the four sites\' files, a composite action and the 13 s
   shell.includes('pull-tier/scripts/selftest.sh') && yaml.includes('.github/workflows/linkcheck-selftest.yml')
   && yaml.includes('linkcheck/action.yml') && shell.length >= 13,
   JSON.stringify({ shell: shell.length, yaml: yaml.length }));
-let live = 0, livePipes = 0;
+let live = 0, livePipes = 0, liveBlocks = 0;
 for (const rel of [...shell, ...yaml]) {
   const x = lintFile(fs.readFileSync(path.join(root, rel), 'utf8'), rel);
   live += x.findings.length; livePipes += x.pipes;
+  if (/\.ya?ml$/.test(rel)) liveBlocks += x.snippets;
 }
 check(`all ${shell.length + yaml.length} files lint clean, ${livePipes} pipe(s) read`, live === 0 && livePipes > 0, `(${live} finding(s))`);
 
@@ -255,6 +286,36 @@ const undone = UNDO.map(([f, now, was]) => {
   return JSON.stringify(got) === JSON.stringify([line]) ? 'ok' : `${f}: ${JSON.stringify(got)} vs [${line}]`;
 });
 check('each removed site, put back in its live file, fires at its line', undone.every((u) => u === 'ok'), JSON.stringify(undone));
+
+// ---------------------------------------------------------------------------
+say('\n# its own tree, stripped of every pipe, still fails closed');
+// The live tree with every printf and echo renamed, so the scan reads no pipe, as a
+// broken tokenizer would. Linted from here it is another repo's tree and passes on
+// the 0-pipes line; linted by the copy of the script inside it, run as lint.yml runs
+// it, it is ci-actions' own tree and the tripwire fires. One tree, two verdicts.
+const strip = (s) => s.replace(/\b(printf|echo)\b/g, 'true');
+const mirror = tree(Object.fromEntries([...shell, ...yaml].map((rel) => [rel, strip(fs.readFileSync(path.join(root, rel), 'utf8'))])));
+const selfRel = path.relative(root, lint);
+fs.mkdirSync(path.join(mirror, path.dirname(selfRel)), { recursive: true });
+fs.copyFileSync(lint, path.join(mirror, selfRel));
+let mBlocks = 0, mPipes = 0;
+for (const rel of [...shell, ...yaml]) {
+  const x = lintFile(fs.readFileSync(path.join(mirror, rel), 'utf8'), rel);
+  mPipes += x.pipes;
+  if (/\.ya?ml$/.test(rel)) mBlocks += x.snippets;
+}
+check(`stripped, the live tree keeps its ${liveBlocks} run: block(s) and reads 0 pipes`,
+  mBlocks === liveBlocks && liveBlocks > 0 && mPipes === 0, JSON.stringify({ mBlocks, liveBlocks, mPipes }));
+const outside = exec([lint, mirror]);
+check('linted from outside, it is another repo\'s tree: exits 0 on the 0-pipes line',
+  outside.status === 0 && outside.stdout.startsWith('lint-var-pipe: ⚪ 0 printf/echo pipes to read'),
+  JSON.stringify([outside.status, outside.stdout.slice(0, 200)]));
+const inside = exec([selfRel], mirror);
+check('linted by its own copy, as lint.yml runs it, it is ci-actions\' own tree: exits 2',
+  inside.status === 2 && inside.stdout.includes(`read ${liveBlocks} run: block(s) and 0 printf/echo pipe(s)`)
+  && inside.stdout.includes('refusing to pass'),
+  JSON.stringify([inside.status, inside.stdout.slice(0, 300)]));
+fs.rmSync(mirror, { recursive: true, force: true });
 
 say(failed === 0 ? '\n✅ all lint-var-pipe self-tests passed\n' : `\n❌ ${failed} self-test(s) failed\n`);
 process.exit(failed === 0 ? 0 : 1);

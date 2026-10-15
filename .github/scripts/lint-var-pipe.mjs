@@ -53,13 +53,19 @@
 // `)` inside $( ), which ends the substitution early. Seen when it should not be:
 // a quoted assignment word ("a=b") taken for a prefix assignment.
 //
+// ANOTHER REPO'S TREE: `node lint-var-pipe.mjs <root>` lints any tree (the
+// 2026-10-15 fleet sweep ran it over every sibling repo). A tree there may hold no
+// printf/echo pipe at all (luxairport-frontend once its one finding was fixed); it
+// passes on a line of its own, "0 printf/echo pipes to read", never the clean line.
+// In ci-actions' own tree, the one this file sits in, that count fails closed.
+//
 // Repo-internal only: no caller consumes this, so changing it needs no version
 // bump and no `v1` tag move.
 // ---------------------------------------------------------------------------
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // Subject to lint-entrypoint-output's rule 1 in spirit: a variable-length report
 // followed by process.exit() goes through a synchronous write.
@@ -409,6 +415,11 @@ const REMEDY = [
   '  (on the producer\'s line or the line directly above it)',
 ];
 
+// ci-actions' own tree: the one this file sits in, two levels above .github/scripts/.
+// Compared by real path, so a relative or symlinked root still matches.
+const OWN_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const realPath = (p) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+
 function main() {
   const root = process.argv[2] || process.cwd();
   const { shell, yaml } = discover(root);
@@ -430,12 +441,21 @@ function main() {
     rows.push(`  · ${rel} (${r.pipes} pipe(s))`);
   }
 
-  // Fail CLOSED again: the tree holds printf/echo pipes into readers that read
-  // everything (tr, sed, wc), so reading none means the tokenizer or the run:
-  // extraction broke — indistinguishable, in a green run, from a clean tree.
-  if (blocks === 0 || pipes === 0) {
+  // Fail CLOSED again on no run: block read, in any tree. In ci-actions' own tree,
+  // which holds printf/echo pipes into readers that read everything (tr, sed, wc),
+  // reading no pipe fails too: the tokenizer or the run: extraction broke —
+  // indistinguishable, in a green run, from a clean tree.
+  if (blocks === 0 || (pipes === 0 && realPath(root) === realPath(OWN_ROOT))) {
     say(`::error::lint-var-pipe: read ${blocks} run: block(s) and ${pipes} printf/echo pipe(s) under ${root} — the scan is broken, refusing to pass`);
     return 2;
+  }
+
+  // Another repo's tree may hold no printf/echo pipe at all. It passes, on a line no
+  // sweep can take for the clean one: nothing was checked, so nothing was found.
+  if (pipes === 0) {
+    say(`lint-var-pipe: ⚪ 0 printf/echo pipes to read — ${shell.length} shell file(s), ${blocks} run: block(s) in ${yaml.length} YAML file(s) under ${root}: nothing to check, not a clean scan (allowed outside ci-actions' own tree, where it fails closed)`);
+    for (const r of rows) say(r);
+    return 0;
   }
 
   const scanned = `${shell.length} shell file(s), ${blocks} run: block(s) in ${yaml.length} YAML file(s), ${pipes} printf/echo pipe(s) read, ${waived} waived`;

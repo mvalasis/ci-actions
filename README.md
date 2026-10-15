@@ -1680,8 +1680,10 @@ which ignore SIGPIPE. A 1.2 MB value matching on its first line missed 50 times 
 pipe and never through a here-string; the small fixtures of a green run never race. Mechanized by
 [`.github/scripts/lint-var-pipe.mjs`](.github/scripts/lint-var-pipe.mjs) in
 [`lint.yml`](.github/workflows/lint.yml), after its fixture suite; a pipe that must stay takes
-`# lint-allow-var-pipe: <reason>`. Repo-internal: changing it needs no version bump and no `v1`
-tag move.
+`# lint-allow-var-pipe: <reason>`. It lints another repo's tree too,
+`node .github/scripts/lint-var-pipe.mjs <root>`: a tree there with `run:` blocks but no printf/echo
+pipe at all passes on its own `⚪ 0 printf/echo pipes to read` line, while in this repo's own tree
+that count fails closed. Repo-internal: changing it needs no version bump and no `v1` tag move.
 
 ## `linkcheck` — full-site broken-link / image / outbound crawl
 
