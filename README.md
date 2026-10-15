@@ -88,7 +88,7 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
-**v1.29.10** *(tag not yet cut)* — `a11y-audit` fix, no new input. The URL list was cut by `sort -u | head -n
+**v1.29.10** *(anchor `59b7712`; `v1` moved onto it 2026-10-15)* — `a11y-audit` fix, no new input. The URL list was cut by `sort -u | head -n
 "$MAX_URLS"`: head exits at its count while sort is still writing, and GitHub's runners run every job with SIGPIPE ignored,
 so a list past the pipe's 64 KiB (about a thousand sitemap URLs) left `sort: write failed: 'standard output': Broken pipe`
 and `sort: write error` in the caller's job log. Nothing read that status, so the list and the verdict were right; the log
