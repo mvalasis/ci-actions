@@ -93,6 +93,11 @@ STANDARD="${STANDARD:-WCAG2AA}"
 RUNNER="${RUNNER:-axe htmlcs}"
 FAIL_ON_VIOLATIONS="${FAIL_ON_VIOLATIONS:-false}"
 MAX_URLS="${MAX_URLS:-25}"
+# A whole number, or nothing is audited. The URL list is cut at it below, and until
+# v1.29.10 the cut was `head -n`: a value head could not read emptied the list, which
+# then reported a clean skip, so an enforcing caller went green on an audit that never
+# ran. %q keeps a newline in the value from starting a line of its own in the log.
+case "$MAX_URLS" in ''|*[!0-9]*) crash "max-urls must be a whole number, got $(printf '%q' "$MAX_URLS"). No page was audited." ;; esac
 
 # Everything this script writes goes in a private dir: the token header curl
 # reads, the pa11y-ci config (which carries the token too) and pa11y-ci's log.
@@ -132,7 +137,12 @@ fi
 if [ -n "${URLS:-}" ]; then
   urls=$(printf '%s\n%s\n' "$urls" "$URLS")
 fi
-urls=$(printf '%s\n' "$urls" | tr ' ' '\n' | sed '/^$/d' | sort -u | head -n "$MAX_URLS")
+# The cut reads to the end. Until v1.29.10 it was `head -n`, which exits at its count
+# while sort is still writing: on GitHub's runners, which ignore SIGPIPE, a list past
+# the pipe's 64 KiB (about a thousand sitemap URLs) left "sort: write failed: 'standard
+# output': Broken pipe" in the caller's log. awk, not sed `1,Np`, which prints a line at
+# 0 where head printed none: for every count head could read, the list is byte-identical.
+urls=$(printf '%s\n' "$urls" | tr ' ' '\n' | sed '/^$/d' | sort -u | awk -v cap="$MAX_URLS" 'NR <= cap + 0')
 
 note "## ♿ a11y-audit"
 if [ -z "$urls" ]; then note "- no URLs to audit — skipped"; finish 0; fi

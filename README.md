@@ -88,6 +88,25 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.29.10** *(tag not yet cut)* — `a11y-audit` fix, no new input. The URL list was cut by `sort -u | head -n
+"$MAX_URLS"`: head exits at its count while sort is still writing, and GitHub's runners run every job with SIGPIPE ignored,
+so a list past the pipe's 64 KiB (about a thousand sitemap URLs) left `sort: write failed: 'standard output': Broken pipe`
+and `sort: write error` in the caller's job log. Nothing read that status, so the list and the verdict were right; the log
+was not. The cut is now `awk 'NR <= cap + 0'`, which reads to the end: for every count `head -n` could read the list is
+byte-identical, 0 included (gawk, mawk, busybox awk and macOS awk measured). Not `sed -n "1,${MAX_URLS}p"`: it prints a line
+at 0, and GNU sed ran the `e` of `1,1e1p` as a shell command. A `max-urls` that `head -n` could not read emptied the list,
+which then reported `no URLs to audit — skipped` and exited 0 under `fail-on-violations: true`; `max-urls` is now checked
+first, and anything but a whole number is reported as `a11y-audit crashed`, exiting `fail-on-violations ? 1 : 0` with no
+page audited (the value `%q`-quoted, so a newline in it cannot start a workflow-command line). Touches the `max-urls`
+check and the cut in `a11y-audit/scripts/audit.sh`, and `selftest.sh` (two legs, 24 checks: 6,000 sitemap URLs, 168 KB, with
+SIGPIPE ignored, beside a control that the old `sort -u | head -n 50` prints Broken pipe there; five bad values, 0 and
+`025`; v1.29.9's `audit.sh` fails 12 of them, and 12 targeted mutants are each caught, every new check under at least one, on
+bash 3.2 with BSD tools and bash 5.2 with GNU). `pull-tier`'s `matches_any()` pipes `$PATHS` into a loop that returns at
+its first match, the same shape: a miss there skips a needed pull, but it first appeared at about 4 KiB of `paths` (1 in
+1,000 runs) and the fleet passes 104 to 115 bytes, so it is left as it is. **Caller-visible:** a big sitemap's log carries no
+Broken pipe; a `max-urls` that is not a whole number is reported as a crash where it skipped silently; `0` still skips; the
+list, verdicts and exit codes are otherwise unchanged. No fleet caller sets `sitemap-url` or `max-urls`.
+
 **v1.29.9** *(anchor `2a8a5f4`; `v1` moved onto it 2026-10-14)* — `test-suite` fix and a `security-baseline` guard, no new input. `test-suite`'s step summary
 went missing on the suites with the most test files that fail alone, as five other actions' did until v1.29.6: under
 `isolate-files` the report gives each such file a row (about 150 bytes, 975 at `safe()`'s caps) with no limit, and GitHub drops a

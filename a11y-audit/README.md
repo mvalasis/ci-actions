@@ -29,7 +29,7 @@ jobs:
 | `standard` | `WCAG2AA` | or `WCAG2AAA` |
 | `runner` | `axe htmlcs` | pa11y runners |
 | `fail-on-violations` | `false` | `true` = hard BLOCK |
-| `max-urls` | `25` | cap |
+| `max-urls` | `25` | cap: a whole number, `0` audits nothing; anything else is reported as a fault (v1.29.10) |
 
 Rollout: start `fail-on-violations: false` (surface the backlog), fix it, then flip to `true`.
 

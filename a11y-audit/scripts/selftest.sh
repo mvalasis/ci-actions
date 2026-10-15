@@ -280,6 +280,72 @@ reset_h
 rm -f "$WORK/bin/curl" "$WORK/bin/mktemp"
 
 echo
+echo "# (J) a sitemap of thousands of URLs, on a runner that ignores SIGPIPE"
+# GitHub's runners run every job with SIGPIPE ignored, so a writer whose reader has
+# gone gets EPIPE and says so, where a laptop's shell kills it silently. Until v1.29.10
+# the list was cut by `sort -u | head -n`: head exits at its count while sort is still
+# writing, so a list past the pipe's 64 KiB put "sort: write failed: 'standard output':
+# Broken pipe" in the caller's log (the verdict was right, nothing read that status).
+# 6,000 URLs of 28 bytes is 168 KB, far past the pipe and head's first read. SIGPIPE is
+# ignored here explicitly, so the leg races on a laptop as on a runner; the sitemap
+# lists them backwards and URLS repeats two, so the cut depends on sort -u.
+{ printf '<urlset>\n'
+  n=6000
+  while [ "$n" -gt 0 ]; do printf '<url><loc>https://example.com/p/%06d</loc></url>\n' "$n"; n=$((n - 1)); done
+  printf '</urlset>\n'; } > "$WORK/big-sitemap.xml"
+want=""; n=1
+while [ "$n" -le 50 ]; do want="$want${want:+,}\"$(printf 'https://example.com/p/%06d' "$n")\""; n=$((n + 1)); done
+cat > "$WORK/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+cat "$(cd "$(dirname "$0")/.." && pwd)/big-sitemap.xml"
+EOF
+cat > "$WORK/bin/pa11y-ci" <<'EOF'
+#!/usr/bin/env bash
+W="$(cd "$(dirname "$0")/.." && pwd)"
+while [ $# -gt 0 ]; do case "$1" in --config) cp "$2" "$W/pa11y-cfg-seen.json"; shift 2 ;; *) shift ;; esac; done
+echo "> https://example.com/p/000001 - 0 errors"
+exit 0
+EOF
+chmod +x "$WORK/bin/curl" "$WORK/bin/pa11y-ci"
+# `trap - PIPE` cannot restore a disposition the shell was started with (bash ignores
+# it), so on a runner SIGPIPE stays ignored throughout, as it already was.
+trap '' PIPE
+{ grep -oE '<loc>[^<]+</loc>' "$WORK/big-sitemap.xml" | sed -e 's#<loc>##g' -e 's#</loc>##g' | sort -u | head -n 50 >/dev/null; } 2>"$WORK/control.err"
+trap - PIPE
+check "control: sort -u | head -n 50 over these URLs prints Broken pipe here (else the next checks are vacuous)" "$(grep -qi 'broken pipe' "$WORK/control.err" && echo 0 || echo 1)"
+rm -f "$WORK/pa11y-cfg-seen.json"
+trap '' PIPE
+run_audit_sh "$AUDIT" true SITEMAP_URL=https://example.com/sitemap.xml MAX_URLS=50 \
+  URLS="https://example.com/p/000002 https://example.com/p/000001"
+trap - PIPE
+check "a clean audit still exits 0" "$([ "$RC" -eq 0 ] && echo 0 || echo 1)"
+check "no Broken pipe, nor any write error, in the job log" "$(grep -qiE 'broken pipe|write (failed|error)' "$STDERR" && echo 1 || echo 0)"
+check "the config gets the first 50 of the sorted, de-duplicated list, in order" "$(in_file "\"urls\": [ $want ] }" "$WORK/pa11y-cfg-seen.json" && echo 0 || echo 1)"
+check "…and the summary counts 50" "$(in_summary 'URLs: 50$' && echo 0 || echo 1)"
+run_audit_sh "$AUDIT" true SITEMAP_URL=https://example.com/sitemap.xml MAX_URLS=025
+check "max-urls 025 cuts at 25, as head -n did (decimal, never octal)" "$(in_summary 'URLs: 25$' && echo 0 || echo 1)"
+
+echo
+echo "# (K) max-urls must be a whole number; anything else is a fault, never a clean skip"
+# Until v1.29.10 a value head -n could not read emptied the list, which then reported
+# "no URLs to audit — skipped" and exited 0 under fail-on-violations, no page audited.
+for bad in abc 1e1 '-5' '25 ' "$(printf '5\n::error::injected')"; do
+  rm -f "$WORK/pa11y-cfg-seen.json"
+  run_audit_sh "$AUDIT" true SITEMAP_URL=https://example.com/sitemap.xml MAX_URLS="$bad"
+  shown=$(printf '%q' "$bad")
+  check "max-urls $shown: enforcing exits 1" "$([ "$RC" -eq 1 ] && echo 0 || echo 1)"
+  check "…reported as a crash naming max-urls, not a skip" "$(in_summary 'a11y-audit crashed' && in_summary 'max-urls must be a whole number' && ! in_summary 'no URLs to audit' && echo 0 || echo 1)"
+  check "…and pa11y-ci never ran" "$([ -e "$WORK/pa11y-cfg-seen.json" ] && echo 1 || echo 0)"
+done
+# The last value carries a newline: quoted, it cannot start a workflow-command line.
+check "a newline in max-urls stays on the crash line (no log line starts with ::)" "$(grep -q '^::' "$STDERR" && echo 1 || echo 0)"
+run_audit_sh "$AUDIT" false SITEMAP_URL=https://example.com/sitemap.xml MAX_URLS=abc
+check "report mode exits 0 on the same fault" "$([ "$RC" -eq 0 ] && echo 0 || echo 1)"
+run_audit_sh "$AUDIT" true SITEMAP_URL=https://example.com/sitemap.xml MAX_URLS=0
+check "max-urls 0 audits nothing: the skip it always was, not a crash" "$([ "$RC" -eq 0 ] && in_summary 'no URLs to audit' && ! in_summary 'a11y-audit crashed' && echo 0 || echo 1)"
+rm -f "$WORK/bin/curl" "$WORK/bin/pa11y-ci" "$WORK/big-sitemap.xml" "$WORK/pa11y-cfg-seen.json"
+
+echo
 if [ "$fails" -eq 0 ]; then
   echo "✅ all a11y-audit self-tests passed"
   exit 0
