@@ -13,7 +13,9 @@
 // direction, so this suite runs in CI ahead of the lint itself.
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   lintSource, lintEntrypoint, lintCrashGuardPresence, lintArgvSecret, lintStdioPath,
@@ -583,6 +585,29 @@ const selftests = fs.readdirSync(root, { withFileTypes: true })
   .map((d) => path.join(d.name, 'scripts', 'selftest.mjs'));
 check('eight action selftests exist and are out of scope',
   selftests.length === 8 && !found.some((f) => selftests.includes(f)), `(${selftests.length})`);
+
+// ---------------------------------------------------------------------------
+say('\n# main() runs when the path to the script goes through a symlink');
+// The guard at the foot of the script compares real paths: import.meta.url has its
+// symlinks resolved and process.argv[1] does not, so a bare comparison skipped main()
+// through a symlinked checkout, exit 0 and no output. The link is made here, so the
+// leg bites on Linux too, where $TMPDIR is no symlink.
+const lint = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lint-entrypoint-output.mjs');
+const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lint-entrypoint-output-link-'));
+fs.symlinkSync(root, path.join(linkDir, 'checkout'));
+fs.mkdirSync(path.join(linkDir, 'empty'));
+const linked = path.join(linkDir, 'checkout', path.relative(root, lint));
+const linkedReal = fs.realpathSync(linked);
+const runAt = (...args) => spawnSync(process.execPath, [...args, path.join(linkDir, 'empty')], { encoding: 'utf8' });
+const direct = runAt(lint), viaLink = runAt(linked), preserved = runAt('--preserve-symlinks-main', linked);
+fs.rmSync(linkDir, { recursive: true, force: true });
+check('control: the path run goes through the link to the lint (else the next check is vacuous)',
+  linked !== linkedReal && linkedReal === fs.realpathSync(lint), JSON.stringify([linked, linkedReal]));
+check('through the link, an empty tree gets the direct run\'s verdict: exit 2, not a silent 0',
+  direct.status === 2 && viaLink.status === 2 && viaLink.stdout === direct.stdout,
+  JSON.stringify([direct.status, viaLink.status, viaLink.stdout.slice(0, 200)]));
+check('and under --preserve-symlinks-main, which leaves import.meta.url unresolved too',
+  preserved.status === 2 && preserved.stdout === direct.stdout, JSON.stringify([preserved.status, preserved.stdout.slice(0, 200)]));
 
 say(failed === 0 ? '\n✅ all lint-entrypoint-output self-tests passed\n' : `\n❌ ${failed} self-test(s) failed\n`);
 process.exit(failed === 0 ? 0 : 1);

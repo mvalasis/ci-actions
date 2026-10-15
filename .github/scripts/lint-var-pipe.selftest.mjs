@@ -253,6 +253,29 @@ check('the same tree with its pipe put back exits 1 at the producer',
   JSON.stringify([sibBroken.status, sibBroken.stdout.slice(0, 300)]));
 
 // ---------------------------------------------------------------------------
+say('\n# main() runs when the path to the script goes through a symlink');
+// The guard at the foot of the script compares real paths: import.meta.url has its
+// symlinks resolved and process.argv[1] does not, so a bare comparison skipped main()
+// through a symlinked checkout, exit 0 and no output. The link is made here, so the
+// leg bites on Linux too, where $TMPDIR is no symlink.
+const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lint-var-pipe-link-'));
+const checkout = path.resolve(path.dirname(lint), '..', '..');
+fs.symlinkSync(checkout, path.join(linkDir, 'checkout'));
+fs.mkdirSync(path.join(linkDir, 'empty'));
+const linked = path.join(linkDir, 'checkout', path.relative(checkout, lint));
+const linkedReal = fs.realpathSync(linked);
+const runAt = (...args) => spawnSync(process.execPath, [...args, path.join(linkDir, 'empty')], { encoding: 'utf8' });
+const direct = runAt(lint), viaLink = runAt(linked), preserved = runAt('--preserve-symlinks-main', linked);
+fs.rmSync(linkDir, { recursive: true, force: true });
+check('control: the path run goes through the link to the lint (else the next check is vacuous)',
+  linked !== linkedReal && linkedReal === fs.realpathSync(lint), JSON.stringify([linked, linkedReal]));
+check('through the link, an empty tree gets the direct run\'s verdict: exit 2, not a silent 0',
+  direct.status === 2 && viaLink.status === 2 && viaLink.stdout === direct.stdout,
+  JSON.stringify([direct.status, viaLink.status, viaLink.stdout.slice(0, 200)]));
+check('and under --preserve-symlinks-main, which leaves import.meta.url unresolved too',
+  preserved.status === 2 && preserved.stdout === direct.stdout, JSON.stringify([preserved.status, preserved.stdout.slice(0, 200)]));
+
+// ---------------------------------------------------------------------------
 say('\n# the live tree is clean (the lint is wired as blocking)');
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');

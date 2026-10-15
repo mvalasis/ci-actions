@@ -749,6 +749,15 @@ function main() {
   return 1;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
+// main() runs for the entry point, never on the selftest's import. Node resolves
+// symlinks in the entry's import.meta.url but leaves process.argv[1] as typed, so
+// through a symlinked path (a symlinked checkout; macOS's $TMPDIR, /var ->
+// /private/var) a bare comparison never matched and main() was skipped: exit 0, no
+// output (found 2026-10-15). The real path matches; as typed is kept for
+// --preserve-symlinks-main, which leaves import.meta.url unresolved too.
+const argv1 = process.argv[1] || '';
+let argv1Real = argv1;
+try { argv1Real = fs.realpathSync(argv1); } catch { /* unreadable: compared as typed */ }
+if ([argv1, argv1Real].some((p) => import.meta.url === pathToFileURL(p).href)) {
   process.exit(main());
 }
