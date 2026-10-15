@@ -163,7 +163,7 @@ jobs:
             raw=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" \
                     --jq ".[] | select(.title==\"$TITLE\") | .number") \
               || { echo "::error::INFRA — issue list failed; cannot conclude anything"; exit 1; }
-            num=$(printf '%s\n' "$raw" | head -1)
+            num=$(head -1 <<<"$raw")
             case "$num" in ''|*[!0-9]*) ;; *) break ;; esac
             sleep 2
           done
@@ -352,7 +352,7 @@ jobs:
           [ "$state" = "closed" ] || { echo "::error::verdict=clean did NOT close #$ISSUE (state=$state)"; exit 1; }
           comments=$(gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" --jq '.[].body') \
             || { echo "::error::INFRA — comment probe failed"; exit 1; }
-          printf '%s' "$comments" | grep -qF 'Resolved' \
+          grep -qF 'Resolved' <<<"$comments" \
             || { echo "::error::#$ISSUE closed without the resolved-clean comment"; exit 1; }
           echo "✓ issue #$ISSUE closed by the clean pass"
 
@@ -376,7 +376,7 @@ jobs:
             sleep 2
           done
           if [ -n "$ISSUE" ]; then
-            printf '%s\n' "$nums" | grep -qx "$ISSUE" || nums="$(printf '%s\n%s' "$nums" "$ISSUE")"
+            grep -qx "$ISSUE" <<<"$nums" || nums="$(printf '%s\n%s' "$nums" "$ISSUE")"
           fi
           nums=$(printf '%s\n' "$nums" | grep -E '^[0-9]+$' | sort -u)
           for n in $nums; do

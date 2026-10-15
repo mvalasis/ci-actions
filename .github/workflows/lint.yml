@@ -47,6 +47,12 @@ name: lint
 # across the repo (every action.yml, every workflow, every npm lock, a11y-audit's install), while
 # security-baseline-selftest.yml, which also runs them, triggers only on security-baseline/**: a
 # change that installed a tool around its pin anywhere else went unchecked.
+#
+# var-pipe (2026-10-15): no variable printed into a reader that stops early, `printf '%s\n' "$v" |
+# grep -q x` or `| head -1`, in any shell file or `run:` of this repo (the rule, its rationale and
+# its pragma: .github/scripts/lint-var-pipe.mjs). grep -q exits at its first match with printf still
+# writing, so under pipefail a LARGE value reads as no match: 141, or 1 and "write error: Broken
+# pipe" on the runners, which ignore SIGPIPE. The small fixtures of a green run never race.
 
 on:
   push:
@@ -84,3 +90,16 @@ jobs:
         with: { node-version: '22' }
       - name: Every tool pinned, every npm lock hashed, nothing installed around them (offline)
         run: bash security-baseline/scripts/selftest-pins.sh --offline
+
+  var-pipe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      # As in entrypoint-output: a tokenizer that misreads fails in the PERMISSIVE direction.
+      - name: Lint self-test (tokenizer + matcher fixtures)
+        run: node .github/scripts/lint-var-pipe.selftest.mjs
+      - name: No variable printed into a reader that stops early (grep -q/-m/-l/-L, head)
+        run: node .github/scripts/lint-var-pipe.mjs

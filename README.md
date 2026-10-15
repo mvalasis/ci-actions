@@ -1650,6 +1650,20 @@ lint's header keeps the measured sizes), so they cannot truncate. Don't "fix" th
 Repo-internal only: no caller consumes this lint, so changing it needs **no
 version bump and no `v1` tag move**.
 
+## Repo hygiene — no variable printed into a reader that stops early
+
+**Rule:** in any shell file or `run:` of this repo, hand a reader that stops early the value
+whole, `grep -q x <<<"$v"` or `head -1 <<<"$v"`, never `printf '%s\n' "$v" | grep -q x` or
+`| head -1`. grep `-q`/`-m`/`-l`/`-L` exits at its first match and `head` at its count while
+printf is still writing, so under pipefail (every `shell: bash` step, every composite action
+step) a large value reads as no match: 141, or 1 and "write error: Broken pipe" on the runners,
+which ignore SIGPIPE. A 1.2 MB value matching on its first line missed 50 times in 50 through the
+pipe and never through a here-string; the small fixtures of a green run never race. Mechanized by
+[`.github/scripts/lint-var-pipe.mjs`](.github/scripts/lint-var-pipe.mjs) in
+[`lint.yml`](.github/workflows/lint.yml), after its fixture suite; a pipe that must stay takes
+`# lint-allow-var-pipe: <reason>`. Repo-internal: changing it needs no version bump and no `v1`
+tag move.
+
 ## `linkcheck` — full-site broken-link / image / outbound crawl
 
 Curl-based (not lychee — lychee 0.24.2 hard-panics on CF/Kinsta edges that

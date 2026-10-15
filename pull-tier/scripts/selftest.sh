@@ -60,7 +60,7 @@ check "pull_request with no input change and a fresh marker → pull=false" "$(p
 # docs/ sorts first: the input is the diff's second path, so its NUL separator must survive too.
 mkdir -p docs; printf 'n\n' > docs/note.md; printf 'g\n' > 'src/lib/λεξικό.ts'; git add -A; git commit -qm "greek lib"; HEAD4=$(git rev-parse HEAD)
 quoted=$(env -i PATH="$PATH" HOME="$WORK" git diff --name-only "$HEAD3" "$HEAD4")
-check "control: git prints the Greek path C-quoted without -z (else the next check is vacuous)" "$(printf '%s\n' "$quoted" | grep -q '^"src/lib/[\]' && echo 0 || echo 1)"
+check "control: git prints the Greek path C-quoted without -z (else the next check is vacuous)" "$(grep -q '^"src/lib/[\]' <<<"$quoted" && echo 0 || echo 1)"
 run_tier "$TIER" decide EVENT_NAME=push BEFORE_SHA="$HEAD3"
 check "a changed Greek-named pull input (src/lib/λεξικό.ts) → pull=true" "$(pull_is true && reason_has 'λεξικό.ts.*pull input' && echo 0 || echo 1)"
 
