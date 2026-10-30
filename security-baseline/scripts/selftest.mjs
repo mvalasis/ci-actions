@@ -16,7 +16,7 @@ import {
   isPromotable, baseSev, safe, redact, escapeData, escapeProperty, annotation, annotations,
   canBeCritical, faultAnnotation, shortSha, repoRelative, reportBody, GROUP_ROWS,
 } from './tiers.mjs';
-import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, gitLogOutcome, scrub, errorLine } from './outcome.mjs';
+import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, gitLogOutcome, scrub, errorLine, logTail } from './outcome.mjs';
 import { firstPartyOwners, ownerOf, parseOwners, refFromText, readLineFromDisk, filterFirstPartyGha } from './firstparty.mjs';
 import { findArgvSecrets, argvLang, argvTargets, argvFinding } from './argv-secret.mjs';
 import { findRestGateCase, restGateCandidate, restGateFinding } from './rest-gate-case.mjs';
@@ -357,7 +357,8 @@ console.log("\n# the report's worst case stays under GitHub's step-summary limit
   // gets one finding more than a group shows, its file, message and CWE at their caps in 3-byte
   // characters (the most bytes one UTF-16 code unit can take) and its line the longest a number
   // prints; every scanner leg could not look, at the longest reason and not blind (the longer row);
-  // 32 scanner notes at their cap, where scan.mjs pushes at most 12. AROUND pays for what scan.mjs
+  // the two trufflehog legs, the only ones with a log, at its 20 lines; 32 scanner notes at their
+  // cap, where scan.mjs pushes at most 12. AROUND pays for what scan.mjs
   // writes outside the body (about 4 KB at its caps) and the counts' digits; the caller's own
   // `critical-checks` and `first-party-owners` lists, which it types itself, are not counted.
   const W = '中'.repeat(1000);
@@ -365,7 +366,7 @@ console.log("\n# the report's worst case stays under GitHub's step-summary limit
   const AROUND = 10000;
   const ids = Object.keys(CHECKS).filter((k) => !RESERVED_CHECKS.has(k));
   const { graded, crit, warn, info } = evaluate(ids.flatMap((checkId) => Array.from({ length: GROUP_ROWS + 1 }, () => ({ checkId, file: W, line: LINE, msg: W, cwe: W, tool: 't' }))));
-  const faults = Object.values(LEGS).map((leg) => ({ leg, reason: W }));
+  const faults = Object.values(LEGS).map((leg) => ({ leg, reason: W, ...(/^trufflehog/.test(leg.name) ? { log: Array.from({ length: 20 }, () => W) } : {}) }));
   const body = reportBody({ graded, crit, warn, info, faults, blind: [], infra: Array.from({ length: 32 }, () => W) });
   const count = (re) => body.filter((l) => re.test(l)).length;
   check(`the worst case is the worst: ${ids.length} groups of ${GROUP_ROWS} rows, each at the longest line, then "…and 1 more"; all ${Object.keys(LEGS).length} legs; 32 notes`,
@@ -445,8 +446,17 @@ console.log('\n# outcome.mjs — a scanner that could not look never reads as on
   check('trufflehog exit 0 with JSON lines: looked, all kept', th(0, '{"Verified":true}\n{"Verified":false}\n').results.length === 2 && th(0, '').looked === true);
   const logged = minted('THLOG');
   const thDied = th(1, '', `error running scan: ${logged}`);
-  check('trufflehog exit 1: could not look, and its stderr is never quoted (not even redacted)',
-    thDied.looked === false && thDied.reason.startsWith('exit 1 — ') && !thDied.reason.includes(logged.slice(0, 8)) && !thDied.reason.includes(redact(logged)), thDied.reason);
+  check('trufflehog exit 1: could not look, its reason is the exit alone, and it may be retried',
+    thDied.looked === false && thDied.reason === 'exit 1' && thDied.retry === true, thDied.reason);
+  check('…a token in its log is cut, not even first4…last4', !thDied.log.join(' ').includes(logged.slice(0, 8)) && !thDied.log.join(' ').includes(redact(logged)) && thDied.log[0] === 'error running scan: …', thDied.log[0]);
+  const jsonLog = JSON.stringify({ level: 'error', logger: 'trufflehog', msg: 'error cloning', error: 'signal: killed', Raw: 'kept-out-of-the-quote', url: 'https://u:p@h.example/x' });
+  check('…of a JSON log line only level, msg and error are kept', th(1, '', jsonLog).log[0] === 'error error cloning signal: killed', th(1, '', jsonLog).log[0]);
+  const reported = 'shortlive';
+  check('…a value the same run reported is cut whole, however short', !th(1, JSON.stringify({ Raw: reported }), `verify failed for ${reported}`).log[0].includes(reported));
+  check('…a letters-only run of 32 is cut, a URL loses its userinfo', logTail('k abcdefghijklmnopqrstuvwxyzabcdefgh')[0] === 'k …' && !logTail('fetch https://user:pw@h.example/x')[0].includes('user'));
+  check('…only the last 20 lines, each at most 200 bytes', logTail(Array.from({ length: 30 }, (_, i) => `line ${i} ${'word '.repeat(60)}`).join('\n')).length === 20
+    && logTail(Array.from({ length: 30 }, (_, i) => `line ${i}`).join('\n'))[0] === 'line 10' && logTail(`x ${'word '.repeat(60)}`)[0].length === 200);
+  check('…a process fault is not retried: it would only spend the job again', trufflehogOutcome(R({ status: 1, signal: 'SIGKILL' })).retry === undefined);
   check('trufflehog: a JSON line cut short is could-not-look', th(0, '{"Verified":true}\n{"Verif').looked === false);
   check('trufflehog: a stdout line that is not JSON is skipped, not a fault', th(0, 'banner\n{"Verified":true}\n').looked === true);
 
@@ -1057,13 +1067,21 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('(J) the same leg with one of its checks promoted (the five lux-shaped callers): FAULT, exit 1', jp.status === 1
       && jp.stdout.includes('\nFAULT — 1 scanner leg(s) that could have blocked could not look (semgrep WP/PHP + Astro/TS rule packs).'), verdict(jp));
 
-    // (K) trufflehog dies on the diff range (T0). Its log is never quoted, so nothing it printed —
-    // a live credential included — can reach the report, not even redacted.
+    // (K) trufflehog dies on the diff range (T0). Its log's tail is quoted with tokens cut, so a live
+    // credential in it reaches no output, not even redacted.
     const thDead = stub('trufflehog-dead', `echo "error running scan: verification of ${planted.therr} failed" >&2\nexit 1`);
     const k = broken({ TRUFFLEHOG_BIN: thDead });
     check('(K) trufflehog exit 1 on the diff: FAULT, exit 1', k.status === 1
-      && k.stdout.includes('- ❌ trufflehog verified-live secrets — trufflehog exit 1 — its log is not quoted here, rerun trufflehog to read it'), verdict(k));
+      && k.stdout.includes('- ❌ trufflehog verified-live secrets — trufflehog exit 1\n'), verdict(k));
+    check('(K) the tail of its log is in the report, the token cut', k.stdout.includes('  - error running scan: verification of … failed\n'), verdict(k));
     check('(K) nothing from its stderr reaches any output, not even redacted', !leaked(k.stdout) && !leaked(k.stderr) && !k.stdout.includes(redact(planted.therr)));
+
+    const thCount = path.join(tmp, 'trufflehog-attempts');
+    const thOnce = stub('trufflehog-once', `n=$(cat '${thCount}' 2>/dev/null || echo 0); echo $((n+1)) > '${thCount}'
+if [ "$n" = 0 ]; then echo '{"Verified":true,"DetectorName":"Github","Raw":"x","SourceMetadata":{"Data":{"Git":{"file":"a.php","line":1}}}}'; echo "scan died" >&2; exit 1; fi`);
+    const thRetry = broken({ TRUFFLEHOG_BIN: thOnce });
+    check('(K) a walk that exits 1 once is retried: no fault, a scanner note with its log', !thRetry.stdout.includes('could not look ·') && thRetry.stdout.includes('exit 1 on its first run, clean on the retry; its log: scan died'), verdict(thRetry));
+    check('(K) …and a finding from the faulted attempt still blocks', thRetry.status === 1 && thRetry.stdout.includes('secret-verified'), verdict(thRetry));
 
     // (L) osv-scanner: 128 (no manifest) and 1 (vulnerabilities) both looked; 127 could not.
     const l1 = broken({ OSV_BIN: stub('osv-none', `echo 'No package sources found, --help for usage information.' >&2\nexit 128`) });
@@ -1541,13 +1559,13 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     const tw = walkScan(pa, { ...prEnv, PR_HEAD_SHA: aHead }, {}, thFailsOnOne);
     check('(T) one walk of several that cannot look: FAULT, naming that walk and its tip',
       tw.status === 1
-      && tw.stdout.includes(`- ❌ trufflehog verified-live secrets — trufflehog walk 2 of 2, from ${aMid.slice(0, 7)}, exit 1 — its log is not quoted here, rerun trufflehog to read it`), verdict(tw));
+      && tw.stdout.includes(`- ❌ trufflehog verified-live secrets — trufflehog walk 2 of 2, from ${aMid.slice(0, 7)}, exit 1\n`), verdict(tw));
     // The first walk fails after reporting: what it found stands, and the walk after it still runs.
     const thFailsAfterFirst = stub('trufflehog-fails-after-walk-1', `case " $* " in *" --branch ${aHead} "*) '${thAsMeasured}' "$@"; exit 1 ;; esac\nexec '${thAsMeasured}' "$@"`);
     const tw1 = walkScan(pa, { ...prEnv, PR_HEAD_SHA: aHead }, { TH_EMIT: '1' }, thFailsAfterFirst);
     check('(T) a walk that fails keeps what it reported, and the walks after it run: BLOCKED on all three keys, the fault named',
       tw1.status === 1 && tw1.stdout.includes('\nBLOCKED — 3 critical finding(s). ') && live(tw1, 'pr-new.live', aHead) && live(tw1, 'pr-old.live', aOld)
-      && tw1.stdout.includes(`- ❌ trufflehog verified-live secrets — trufflehog walk 1 of 2, from ${aHead.slice(0, 7)}, exit 1 — its log is not quoted here, rerun trufflehog to read it`), verdict(tw1));
+      && tw1.stdout.includes(`- ❌ trufflehog verified-live secrets — trufflehog walk 1 of 2, from ${aHead.slice(0, 7)}, exit 1\n`), verdict(tw1));
     // A second tip whose base git cannot find, or a git killed while finding it: never a walk to the
     // root, which is kept for a tip that truly shares no commit with the base (T-d).
     const tmb = walkScan(pa, { ...prEnv, PR_HEAD_SHA: aHead }, gitRefusing('merge-base', aMid));
@@ -1905,7 +1923,7 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     const thFailsOnPass = stub('trufflehog-fails-on-the-pass', `case " $* " in *" --branch ${maTip} "*) exit 1 ;; esac\nexec '${thAsMeasured}' "$@"`);
     const umf5 = mergeScan(ma, pushEnv(maBefore), {}, thFailsOnPass);
     check("(U-f) the pass's walk that cannot look: FAULT, naming the merge whose changes it walks",
-      umf5.status === 1 && umf5.stdout.includes(`- ❌ trufflehog verified-live secrets — trufflehog walk 3 of 3, of what merge ${maMerge.slice(0, 7)} adds, exit 1 — its log is not quoted here, rerun trufflehog to read it\n`), verdict(umf5));
+      umf5.status === 1 && umf5.stdout.includes(`- ❌ trufflehog verified-live secrets — trufflehog walk 3 of 3, of what merge ${maMerge.slice(0, 7)} adds, exit 1\n`), verdict(umf5));
 
     // (U-g) A scan that inherits an alternate object directory, one that already holds git's own merge
     // of the parents (as any checkout that merged them itself would). trufflehog walks only what the

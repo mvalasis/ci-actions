@@ -236,6 +236,18 @@ runs are three legs), and a leg is judged by the checks it could have found:
 - **⚠️ its checks only warn here**: listed the same way, never a fault. `PASS` stands and says how
   many legs could not look. A T2 leg (a history baseline) can never block, so it is always this kind.
 
+**A trufflehog walk that exits non-zero runs once more** (same sha, same arguments; v1.30.0), since
+its faults have cleared on rerun while no reproduction by hand ever failed. A retry that comes back
+clean is a scanner note carrying the first attempt's log, and anything the faulted attempt reported
+stands. A timeout or a kill is not retried. When both fail, the fault row quotes the last 20 lines of
+trufflehog's log: level, message and error only, with every value the run reported, every URL's
+userinfo and every token-shaped run removed outright. A secret that is short and letters-only is not
+token-shaped, so treat that quote as you would the job log.
+
+**The rerun order on a caller with a deploy gate is the baseline first, then the deploy run.** A
+consumer-side gate such as `scripts/deploy-gate.sh` refuses the deploy run until this check is green
+for the sha, so rerunning the deploy first only fails again.
+
 A fault is never counted as a finding: the tally keeps `critical: N` and adds `· could not look: N`,
 and "✅ no findings across …" prints only when every leg looked. To run without a scanner, say so:
 `verified-secrets: off` (trufflehog), `enable-sca: false` (osv-scanner), `enable-secrets-history:

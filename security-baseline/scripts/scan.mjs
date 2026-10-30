@@ -75,7 +75,7 @@ const infra = [];   // informational scanner notes (not findings, not faults)
 // Scanner legs that could not look: { leg, reason }. Never a finding, and never read as "nothing
 // found" — one whose checks can be CRITICAL for this caller takes the verdict away (see main).
 const faults = [];
-const couldNotLook = (leg, reason) => { if (!faults.some((f) => f.leg === leg)) faults.push({ leg, reason }); };
+const couldNotLook = (leg, reason, log = []) => { if (!faults.some((f) => f.leg === leg)) faults.push({ leg, reason, log }); };
 // safe() + redact() are imported from tiers.mjs (pure, selftest-covered disclosure guards).
 
 // `signal` and `error` say a process never finished (a timeout, the output cap): outcome.mjs reads
@@ -434,6 +434,16 @@ function checkoutClone() {
 // Cloning already fails on an object the checkout lacks or cannot read (upload-pack reads every one,
 // and a lazy fetch is off there); this catches what goes wrong in the clone itself. A pass walk's log
 // ran in mergePass. The walk goes ahead either way: what it did read before git died stands.
+// One trufflehog run, and one more on an exit it gave for no reason it named (#24: the same sha cleared
+// on rerun, on a walk nobody could fault by hand). A timeout or a kill is not retried: it would only
+// spend the job again. What a faulted attempt reported stands: a live key does not wait for a clean run.
+function trufflehogWalk(args, what) {
+  const first = trufflehogOutcome(run(BIN.trufflehog, args, { timeout: 300000 }));
+  if (first.looked || !first.retry) return first;
+  const again = trufflehogOutcome(run(BIN.trufflehog, args, { timeout: 300000 }));
+  if (again.looked) infra.push(`trufflehog${what} ${first.reason} on its first run, clean on the retry; its log: ${first.log.slice(-3).join(' / ') || 'empty'}`);
+  return { ...again, results: [...first.results, ...again.results] };
+}
 function walkRange(leg, walks, flags) {
   const c = checkoutClone();
   if (c.reason) { couldNotLook(leg, c.reason); return []; }
@@ -445,8 +455,8 @@ function walkRange(leg, walks, flags) {
       const why = logUnread(['-C', c.clone, ...TRUFFLEHOG_LOG, ...(w.since ? [w.tip, `^${w.since}`] : ['--diff-filter=AM', w.tip])], asTrufflehog);
       if (why) couldNotLook(leg, `trufflehog${which} could not read its walk: git log --patch ${w.tip.slice(0, 7)}${w.since ? ` ^${w.since.slice(0, 7)}` : ''}, the log trufflehog reads, failed in the clone, ${why}`);
     }
-    const o = trufflehogOutcome(run(BIN.trufflehog, ['git', `file://${c.clone}`, '--trust-local-git-config', ...flags, '--branch', w.tip, ...(w.since ? ['--since-commit', w.since] : [])], { timeout: 300000 }));
-    if (!o.looked) couldNotLook(leg, `trufflehog${which} ${o.reason}`);
+    const o = trufflehogWalk(['git', `file://${c.clone}`, '--trust-local-git-config', ...flags, '--branch', w.tip, ...(w.since ? ['--since-commit', w.since] : [])], which);
+    if (!o.looked) couldNotLook(leg, `trufflehog${which} ${o.reason}`, o.log);
     results.push(...o.results);
   });
   return results;
@@ -480,8 +490,8 @@ function collectTrufflehog() {
     for (const p of mp.pairs) own.set(p.tip, p.merge);
     results = walkRange(leg, [...range.walks, ...mp.pairs.map(({ tip, since, merge }) => ({ tip, since, merge }))], flags);
   } else {
-    const o = trufflehogOutcome(run(BIN.trufflehog, ['git', 'file://.', ...flags], { timeout: 300000 }));
-    if (!o.looked) couldNotLook(leg, `trufflehog ${o.reason}`);
+    const o = trufflehogWalk(['git', 'file://.', ...flags], '');
+    if (!o.looked) couldNotLook(leg, `trufflehog ${o.reason}`, o.log);
     results = o.results;
   }
   const seen = new Set();

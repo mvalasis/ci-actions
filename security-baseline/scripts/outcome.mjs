@@ -120,6 +120,31 @@ export function gitleaksOutcome(r, report) {
   return { looked: true, results: arr };
 }
 
+// ---------- the tail of a secret scanner's log ----------
+// A fault nobody can reproduce can only be diagnosed from its own words (#24: exit 1 on 4 of ~20 runs,
+// 0 of 70 by hand). Under --json trufflehog logs one JSON object a line, and only its level, msg and
+// error are kept, so a field that carries a value never gets here. What is left is cut harder than
+// scrub(): any value the same run reported is removed whole, a URL loses its userinfo, and a token
+// is removed rather than shortened to first4…last4, a run of 16 that mixes letters and digits or
+// any run of 32. A secret shorter than that, letters only, in free text, would still pass.
+const LOG_LINES = 20;
+const LOG_LINE_MAX = 200;
+const logFields = (line) => {
+  const o = parse(line);
+  if (!o || typeof o !== 'object') return line;
+  return [o.level, o.msg, o.error].filter((v) => v != null && v !== '').join(' ');
+};
+export function logTail(text, results = []) {
+  const known = results.flatMap((o) => [o.Raw, o.RawV2, o.Redacted]).filter((v) => typeof v === 'string' && v.length >= 4);
+  return String(text || '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-LOG_LINES).map((line) => {
+    let t = logFields(line);
+    for (const v of known) t = t.split(v).join('…');
+    t = t.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1')
+      .replace(/[A-Za-z0-9_+=/-]{16,}/g, (m) => (m.length >= 32 || (/\d/.test(m) && /[A-Za-z]/.test(m)) ? '…' : m));
+    return safe(t, LOG_LINE_MAX);
+  });
+}
+
 // ---------- trufflehog ----------
 // trufflehog exits 0 whether or not it found anything (183 is --fail, never passed here); anything
 // else is an error. Without --fail-on-scan-errors (scan.mjs passes it) a scan that failed inside —
@@ -127,8 +152,7 @@ export function gitleaksOutcome(r, report) {
 // With it, a `git log` that dies on an object the repository lacks still exits 0, having read nothing
 // (`chunks: 0`): scan.mjs runs that log first (gitLogOutcome, below).
 // stdout is one JSON object per line, and one that starts like an object and does not parse is
-// output cut short. Its stderr is NEVER quoted: that is where trufflehog logs, and a live credential
-// must not reach the report, not even redacted.
+// output cut short. `reason` NEVER quotes its stderr; `log` is that stderr's tail, cut by logTail.
 export function trufflehogOutcome(r) {
   const pf = processFault(r);
   if (pf) return { looked: false, reason: pf, results: [] };
@@ -140,7 +164,7 @@ export function trufflehogOutcome(r) {
     const o = parse(t);
     if (o && typeof o === 'object') results.push(o); else broken++;
   }
-  if (r.status !== 0) return { looked: false, reason: `exit ${r.status} — its log is not quoted here, rerun trufflehog to read it`, results };
+  if (r.status !== 0) return { looked: false, reason: `exit ${r.status}`, results, retry: true, log: logTail(r.stderr, results) };
   if (broken) return { looked: false, reason: `${broken} JSON line(s) cut short`, results };
   return { looked: true, results };
 }

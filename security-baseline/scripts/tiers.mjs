@@ -204,7 +204,7 @@ export function faultAnnotation(name, reason, level = 'error') {
 
 // The report's body, as scan.mjs writes it between the head and the verdict: the findings grouped by
 // check, criticals first, GROUP_ROWS rows a group and then how many more; the scanner legs that could
-// not look; the scanner notes; the totals line. `faults` are { leg, reason }, `blind` the ones of them
+// not look; the scanner notes; the totals line. `faults` are { leg, reason, log? }, `blind` the ones of them
 // that could have produced a CRITICAL here. Pure, so the selftest can render the worst case it allows
 // and hold it under GitHub's 1 MiB step-summary limit.
 export const ICON = { critical: '❌', warn: '⚠️', info: 'ℹ️', ok: '✅' };
@@ -232,6 +232,7 @@ export function reportBody({ graded, crit, warn, info, faults = [], blind = [], 
     for (const f of faults) {
       const can = blind.includes(f);
       note(`- ${can ? ICON.critical : ICON.warn} ${safe(f.leg.name, 80)} — ${safe(f.reason, 240)}${can ? '' : ' (its checks only warn for this caller: reported, not a fault)'}`);
+      if (f.log && f.log.length) { note(`  its last ${f.log.length} log line(s), tokens cut:`); for (const l of f.log) note(`  - ${safe(l, 200)}`); }
     }
     note('');
   }
