@@ -27,4 +27,4 @@ const run = async () => {
   return r.violations.map((v) => ({ code: v.id, message: `${v.help} (graded with ${state})`, type: 'error', element: document.documentElement }));
 };
 
-module.exports = { scripts: [axe], supports: '^9.0.0', run };
+module.exports = { scripts: [axe], supports: '^10.0.0', run };
