@@ -21,6 +21,7 @@ import { evaluate, parsePromote, safe, redact, annotations, canBeCritical, fault
 import { firstPartyOwners, filterFirstPartyGha } from './firstparty.mjs';
 import { argvTargets, findArgvSecrets, argvFinding } from './argv-secret.mjs';
 import { HOOK_GREP, restGateCandidate, findRestGateCase, restGateFinding } from './rest-gate-case.mjs';
+import { findWorkflowHardening, findCdnPins, findVendoredDrift, vendorTarget } from './workflow-hardening.mjs';
 import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, hadolintOutcome, gitLogOutcome, scrub, errorLine } from './outcome.mjs';
 
 const env = process.env;
@@ -729,6 +730,56 @@ function collectArgvSecret() {
   return out;
 }
 
+// ---------- workflow hardening + vendor pins — zero egress ----------
+// Like argv-secret's .github pass, both grade the whole tree on every run: a workflow that predates
+// the check still runs on every push, and deps.json can only be judged against every file it records.
+const trackedFiles = (leg) => {
+  const ls = run('git', ['ls-files', '-z'], { timeout: 30000 });
+  if (ls.status !== 0 || ls.error) { couldNotLook(leg, `git ls-files failed, exit ${ls.status} — nothing was listed to grade`); return null; }
+  return ls.stdout.split('\0').filter(Boolean);
+};
+// A tracked regular file under 2 MB as a Buffer; null for anything else. `seen` counts the files it refused.
+const readTracked = (file, seen) => {
+  try {
+    const st = fs.lstatSync(file);
+    if (!st.isFile()) return null;
+    if (st.size > 2 * 1024 * 1024) { seen.big++; return null; }
+    return fs.readFileSync(file);
+  } catch { seen.unread++; return null; }
+};
+function collectWorkflowHardening() {
+  const out = [];
+  const tracked = trackedFiles(LEGS.workflowHardening);
+  if (!tracked) return out;
+  const seen = { big: 0, unread: 0 };
+  for (const file of tracked.filter((f) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f))) {
+    const src = readTracked(file, seen);
+    if (src != null) for (const f of findWorkflowHardening(src.toString('utf8'))) out.push({ ...f, file });
+  }
+  if (seen.big || seen.unread) couldNotLook(LEGS.workflowHardening, `${seen.big + seen.unread} workflow file(s) could not be read`);
+  return out;
+}
+function collectVendorPins() {
+  const out = [];
+  const tracked = trackedFiles(LEGS.vendorPins);
+  if (!tracked) return out;
+  let deps = null;
+  if (tracked.includes('deps.json')) {
+    try { deps = JSON.parse(fs.readFileSync('deps.json', 'utf8')); } catch (e) {
+      couldNotLook(LEGS.vendorPins, `deps.json could not be parsed: ${scrub(e.message, 100)}`);
+      return out;
+    }
+  }
+  const seen = { big: 0, unread: 0 };
+  for (const file of tracked.filter(vendorTarget)) {
+    const src = readTracked(file, seen);
+    if (src != null) for (const f of findCdnPins(src.toString('utf8'), deps)) out.push({ ...f, file });
+  }
+  out.push(...findVendoredDrift(deps, tracked, (f) => readTracked(f, seen)));
+  if (seen.big || seen.unread) infra.push(`vendor-pin: ${seen.big + seen.unread} file(s) not graded, over 2 MB or unreadable`);
+  return out;
+}
+
 // ---------- wp-rest-gate-case (a REST gate a re-cased route walks past) — zero egress ----------
 // The matcher is rest-gate-case.mjs. A gate is graded as a whole — its registration, its callback
 // and one level of helper may sit in three files — so the tracked tree is searched every run and the
@@ -827,6 +878,8 @@ function flush() {
     [collectHadolint, [LEGS.hadolint]],
     [collectArgvSecret, [LEGS.argvSecret]],
     [collectRestGateCase, [LEGS.restGateCase]],
+    [collectWorkflowHardening, [LEGS.workflowHardening]],
+    [collectVendorPins, [LEGS.vendorPins]],
   ];
   let findings = [];
   for (const [collect, legs] of collectors) {

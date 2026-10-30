@@ -18,6 +18,7 @@ silently un-enforce every repo.
 |---|---|---|
 | **T0 — CRITICAL** | always blocks (when `fail-on-critical`, the default) | `sast-critical` (semgrep community ERROR on the diff — *today's block, unchanged*); `secret-pattern` (gitleaks pattern on the diff — *today's block, unchanged*); `secret-verified` (trufflehog `--only-verified` on the **diff range** — NEW; a provider just authenticated it → ~zero FP) |
 | **T1 — promotable WARN** | reports; a caller ELEVATES any id to CRITICAL via `critical-checks` | `sca-critical`, `sca-high` (osv-scanner); the custom **WP/PHP** rules (`wp-nonce-missing`, `wp-cap-missing`, `wp-sql-unprepared`, `wp-unserialize`, `wp-file-include`, `wp-rest-error-detail`, `wp-rest-error-detail-laundered`, `wp-weak-crypto`, `turnstile-test-key`); the custom **Astro/TS/RN** rules (`ts-dangerous-html`, `ts-eval`, `ts-child-process`, `ts-public-secret-leak`, `ts-ssrf`, `ts-open-redirect`, `ts-secret-in-log`, `rn-insecure-storage`, `rn-cleartext-http`); the **GitHub-Actions** rules (`gha-unpinned-action`, `gha-script-injection`, `gha-pr-target`); `dockerfile-lint`; `argv-secret` (a secret spelled into a child's argv — §argv-secret); `wp-rest-gate-case` (a REST gate that tests the route case-sensitively — §wp-rest-gate-case) |
+| **T1 — hardening** (v1.30.0) | as above: WARN until a caller promotes it | `wf-no-permissions`, `wf-cancel-deploy`, `wf-ssh-keyscan`, `wf-secret-in-run`, `vendor-pin` (§Workflow hardening and vendor pins) |
 | **T2 — advisory** | reports (WARN/INFO); never promotable | `sca-moderate`/`sca-low` (INFO); `wp-unescaped-output` (syntactic XSS — too FP-heavy to promote); `wp-rest-wp-error-detail` (`WP_Error::get_error_message()` in a REST/AJAX body — usually the *intended* client message, so advisory-only); `ts-cors-wildcard`; `secrets-history` (full-history baseline — clearing needs a history rewrite, so it can **never** be a merge precondition — and what the diff's secret legs find in a commit the base already holds: trufflehog since v1.19.7, gitleaks since v1.19.8) |
 
 The CRITICAL core is exactly what a clean repo always passes; **a failure there is always a real
@@ -198,6 +199,29 @@ message. Every tool-controlled string is `safe()`-stripped and every report line
 code-controlled text, so a hostile path cannot reach line-start and forge a workflow command;
 annotation values are escaped (`%`, CR, LF, and `:`/`,` in properties) so it cannot rewrite one.
 Off Actions (a local run) the report prints once to stdout, with no annotations.
+
+## Workflow hardening and vendor pins (v1.30.0)
+
+`scripts/workflow-hardening.mjs` reads every tracked `.github/workflows/*.yml` on every run, and
+needs no scanner. Each id is a T1 WARN.
+
+| Check | Fires on |
+|---|---|
+| `wf-no-permissions` | a workflow with no top-level `permissions:`, which inherits the repository default |
+| `wf-cancel-deploy` | `cancel-in-progress: true`, literally, on a workflow whose `run:` calls `rsync`, `scp`, `ssh`, `wrangler deploy` or `eas build/submit/update`: a cancel mid-transfer leaves a site half-written. A `${{ … }}` value is left alone |
+| `wf-ssh-keyscan` | `ssh-keyscan` in a `run:`: pin the host key in a tracked `known_hosts` and connect with `StrictHostKeyChecking yes` |
+| `wf-secret-in-run` | `${{ secrets.* }}` inside a `run:`: read it through the step's `env:` |
+| `vendor-pin` | a public-CDN `<script>`/`<link>` with no `integrity`; a CDN URL in a tag or a `wp_enqueue_*`/`wp_register_*` call that `deps.json` does not record; a recorded CDN entry with no `sri`, or an enqueue whose version differs from the record; a vendored file that is missing, unlisted or does not hash to its entry |
+
+`deps.json` is optional and takes the shape `{ "vendored": [{ "name", "dir", "files": { "<path>":
+"<sha256>" } }], "cdn": [{ "name", "version", "url", "sri" }] }`; other keys are ignored. With none,
+every CDN load is unrecorded. Google Fonts is left out, since its CSS differs per browser and can
+carry no integrity. `wp-admin/`, `wp-includes/`, `vendor/`, `node_modules/`, `dist/`, `build/` and
+`*.min.*` are not read.
+
+**The `actions/*` and `github/*` exemption stays** (decided in v1.30.0): those owners keep their
+tags, and `gha-unpinned-action` stays a promotable WARN, so `actions/checkout@v6` is per contract. A
+caller who wants full SHA pins, as luxairportlu does, enforces that itself.
 
 ## When a scanner cannot look — FAULT, not PASS
 

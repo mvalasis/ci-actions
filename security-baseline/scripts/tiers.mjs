@@ -54,6 +54,13 @@ export const CHECKS = {
   'gha-script-injection': { tier: 'T1', sev: SEV.WARN },
   'gha-pr-target':        { tier: 'T1', sev: SEV.WARN },
 
+  // ---- T1: promotable WARN (what a workflow lacks, and third-party code; workflow-hardening.mjs) ----
+  'wf-no-permissions': { tier: 'T1', sev: SEV.WARN },  // no top-level permissions: inherits the repository default
+  'wf-cancel-deploy':  { tier: 'T1', sev: SEV.WARN },  // cancel-in-progress: true on a workflow that deploys
+  'wf-ssh-keyscan':    { tier: 'T1', sev: SEV.WARN },  // trust on first use instead of a tracked known_hosts
+  'wf-secret-in-run':  { tier: 'T1', sev: SEV.WARN },  // ${{ secrets.* }} expanded inside a run: block
+  'vendor-pin':        { tier: 'T1', sev: SEV.WARN },  // third-party code that disagrees with deps.json, or a CDN load with no integrity
+
   // ---- T1: promotable WARN (secrets / supply chain / IaC) ----
   'argv-secret':       { tier: 'T1', sev: SEV.WARN },  // a -H/--header value expanding a *TOKEN*/*SECRET*/*KEY*/*PASS* variable into a child's argv (argv-secret.mjs)
   'secret-worktree':   { tier: 'T1', sev: SEV.WARN },  // gitleaks --no-git over .env / wp-config in the tree
@@ -221,7 +228,7 @@ export function reportBody({ graded, crit, warn, info, faults = [], blind = [], 
       const sev = fs_[0].sev;
       const tier = (CHECKS[checkId] || { tier: 'T1' }).tier;
       note(`### ${ICON[sev] || ICON.warn} \`${safe(checkId, 60)}\` · ${tier} · ${fs_.length} finding(s)`);
-      for (const f of fs_.slice(0, GROUP_ROWS)) note(`- ${ICON[f.sev] || ICON.warn} ${safe(f.file || f.source)}${Number.isFinite(+f.line) && +f.line > 0 ? ':' + (+f.line) : ''} — ${safe(f.msg, 220)}${f.cwe ? ` _(${safe(f.cwe, 40)})_` : ''}`);
+      for (const f of fs_.slice(0, GROUP_ROWS)) note(`- ${ICON[f.sev] || ICON.warn} ${safe(f.file || f.source)}${Number.isFinite(+f.line) && +f.line > 0 ? ':' + (+f.line) : ''} — ${safe(f.msg, 220)}${f.cwe ? ` _(${safe(f.cwe, 16)})_` : ''}`);
       if (fs_.length > GROUP_ROWS) note(`- …and ${fs_.length - GROUP_ROWS} more`);
       note('');
     }

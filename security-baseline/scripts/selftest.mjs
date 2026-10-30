@@ -20,6 +20,7 @@ import { LEGS, semgrepOutcome, gitleaksOutcome, trufflehogOutcome, osvOutcome, h
 import { firstPartyOwners, ownerOf, parseOwners, refFromText, readLineFromDisk, filterFirstPartyGha } from './firstparty.mjs';
 import { findArgvSecrets, argvLang, argvTargets, argvFinding } from './argv-secret.mjs';
 import { findRestGateCase, restGateCandidate, restGateFinding } from './rest-gate-case.mjs';
+import { findWorkflowHardening, runLines, findCdnPins, findVendoredDrift, vendorTarget } from './workflow-hardening.mjs';
 
 // The checkIds a scanner adapter in scan.mjs actually emits (kept in sync by the coverage
 // assertion below — a new CHECKS id must be either wired here or explicitly RESERVED).
@@ -31,6 +32,7 @@ const EMITTED = new Set([
   'ts-dangerous-html', 'ts-eval', 'ts-child-process', 'ts-public-secret-leak', 'ts-ssrf',
   'ts-open-redirect', 'ts-secret-in-log', 'rn-insecure-storage', 'rn-cleartext-http', 'ts-cors-wildcard',
   'gha-unpinned-action', 'gha-script-injection', 'gha-pr-target', 'dockerfile-lint', 'argv-secret', 'wp-rest-gate-case',
+  'wf-no-permissions', 'wf-cancel-deploy', 'wf-ssh-keyscan', 'wf-secret-in-run', 'vendor-pin',
 ]);
 
 let failed = 0;
@@ -641,6 +643,50 @@ console.log('\n# argv-secret — a secret spelled into a child\'s argv (argv-sec
     ann === '::error file=.github/workflows/deploy.yml,line=3,title=security-baseline argv-secret::argv-secret -H Authorization ← secrets.DEPLOY_API_KEY at .github/workflows/deploy.yml:3', ann);
 }
 
+console.log('\n# workflow-hardening — what a workflow lacks (workflow-hardening.mjs)');
+{
+  const ids = (src) => findWorkflowHardening(src).map((f) => f.checkId);
+  const clean = ['on: push', 'permissions:', '  contents: read', 'concurrency:', '  group: d', '  cancel-in-progress: false', 'jobs:', '  a:', '    steps:', '      - run: |', '          rsync -a x y:/z', '          echo "$TOKEN"', '        env:', '          TOKEN: ${{ secrets.T }}'].join('\n');
+  check('a hardened deploy workflow draws nothing', ids(clean).length === 0, ids(clean).join());
+  check('wf-no-permissions: only a TOP-LEVEL key counts', ids(clean.replace('permissions:\n  contents: read\n', '')).includes('wf-no-permissions')
+    && ids(clean.replace('permissions:\n  contents: read\n', 'jobs0:\n  permissions:\n')).includes('wf-no-permissions'));
+  const cancel = clean.replace('cancel-in-progress: false', 'cancel-in-progress: true');
+  check('wf-cancel-deploy: true over rsync fires, at the cancel line', findWorkflowHardening(cancel).some((f) => f.checkId === 'wf-cancel-deploy' && f.line === 6));
+  check('…true over no deploy step does not', !ids(cancel.replace('rsync -a x y:/z', 'npm test')).includes('wf-cancel-deploy'));
+  check('…an expression is left to the run', !ids(clean.replace('cancel-in-progress: false', "cancel-in-progress: ${{ github.event_name == 'pull_request' }}")).includes('wf-cancel-deploy'));
+  for (const cmd of ['scp a b:c', 'ssh deploy@h cmd', 'wrangler deploy', 'npx wrangler pages deploy dist', 'eas build -p ios']) check(`…${cmd} counts as a deploy`, ids(cancel.replace('rsync -a x y:/z', cmd)).includes('wf-cancel-deploy'));
+  check('wf-ssh-keyscan: in a block, at its line', findWorkflowHardening(clean.replace('rsync -a x y:/z', 'ssh-keyscan h >> k')).some((f) => f.checkId === 'wf-ssh-keyscan' && f.line === 11));
+  check('…a shell comment or a YAML comment does not', !ids(clean.replace('rsync -a x y:/z', '# ssh-keyscan h')).includes('wf-ssh-keyscan') && !ids(`${clean}\n# run: ssh-keyscan h`).includes('wf-ssh-keyscan'));
+  check('wf-secret-in-run: a block line and an inline run, the name in the rule', findWorkflowHardening(clean.replace('echo "$TOKEN"', 'curl -d "${{ secrets.DEPLOY_KEY }}" h')).some((f) => f.rule === 'secrets.DEPLOY_KEY')
+    && ids('permissions: {}\njobs:\n  a:\n    steps:\n      - run: echo ${{ secrets.X }}').includes('wf-secret-in-run'));
+  check('…in env: it does not, and a block ends at its own indent', !ids(clean).includes('wf-secret-in-run')
+    && runLines('- run: |\n    a\n\n    b\n  env:\n    C: d\n').map((l) => l.text).join() === 'a,b');
+  check('runLines: a folded block and CRLF line ends read the same', runLines('- run: >-\r\n    a\r\n').map((l) => l.text).join() === 'a');
+
+  const url = 'https://code.jquery.com/ui/1.13.2/themes/base/jquery-ui.css';
+  const deps = { cdn: [{ name: 'ui', version: '1.13.2', url, sri: 'sha384-x' }] };
+  const msgs = (src, d = null) => findCdnPins(src, d).map((f) => f.msg);
+  check('vendor-pin: a CDN tag with no integrity and no record draws both', msgs(`<link rel="stylesheet" href="${url}">`).length === 2);
+  check('…with integrity and a record, nothing', msgs(`<link rel="stylesheet" href="${url}" integrity="sha384-x" crossorigin>`, deps).length === 0);
+  check('…a tag split over lines is one tag, at its first line', findCdnPins(`a\n<script\n  src="${url}"\n  integrity="x"></script>`, deps).length === 0
+    && findCdnPins(`a\n<script\n  src="${url}"></script>`, deps)[0].line === 2);
+  check('…a preconnect to the host and a plain link are not a load', msgs('<link rel="preconnect" href="https://cdn.jsdelivr.net">').length === 0 && msgs(`<a href="${url}">x</a>`).length === 0);
+  check('…Google Fonts is left out', msgs('<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=X">').length === 0);
+  check('an enqueue with no record is one finding', msgs(`wp_enqueue_style( 'ui', '${url}', array(), '1.13.2' );`).length === 1);
+  check('…one that agrees is none, one whose version differs names the record', msgs(`wp_enqueue_style( 'ui', '${url}', array(), '1.13.2' );`, deps).length === 0
+    && /version deps\.json records, 1\.13\.2/.test(msgs(`wp_enqueue_style( 'ui', '${url}', array(), '1.12.0' );`, deps)[0] || ''));
+  check('…a record with no sri is a finding', msgs(`wp_enqueue_style( 'ui', '${url}', array(), '1.13.2' );`, { cdn: [{ url, version: '1.13.2' }] }).length === 1);
+  check('vendorTarget skips what a WP repo vendors', vendorTarget('wp-content/themes/t/a.php') && vendorTarget('src/σελίδα.astro') && !vendorTarget('wp-includes/a.php') && !vendorTarget('x/vendor/a.php') && !vendorTarget('a.min.html') && !vendorTarget('a.css'));
+
+  const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+  const vd = { vendored: [{ name: 'lib', dir: 'v/lib', files: { 'a.php': sha('a'), 'gone.php': sha('g'), 'b.php': sha('b') } }] };
+  const disk = { 'v/lib/a.php': 'a', 'v/lib/b.php': 'patched', 'v/lib/extra.php': 'x' };
+  const drift = findVendoredDrift(vd, Object.keys(disk), (f) => (f in disk ? Buffer.from(disk[f]) : null));
+  check('vendor-pin: a vendored dir: a changed, a missing and an unlisted file, and no other', drift.length === 3
+    && drift.some((f) => f.file === 'v/lib/b.php' && /does not hash/.test(f.msg)) && drift.some((f) => f.file === 'v/lib/gone.php') && drift.some((f) => f.file === 'v/lib/extra.php'), JSON.stringify(drift));
+  check('…no deps.json, no entry, nothing', findVendoredDrift(null, ['a'], () => null).length === 0);
+}
+
 console.log('\n# wp-rest-gate-case — a REST gate a re-cased route walks past (rest-gate-case.mjs)');
 {
   // The fixtures mark each expected finding with `// ruleid: wp-rest-gate-case` on the line above it.
@@ -989,6 +1035,8 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     putGr('scripts/έλεγχος.sh', '#!/bin/sh\ncurl -H "X-Api-Key: $GREEK_API_KEY" "$u"\n');
     putGr('δοκιμή/Dockerfile', 'FROM alpine:latest\n');
     putGr('app/πύλη.php', "<?php\nadd_filter( 'rest_pre_dispatch', function ( $result, $server, $request ) {\n\tif ( 0 === strpos( $request->get_route(), '/gr-gate/' ) && ! gr_ok() ) {\n\t\treturn new WP_Error( 'forbidden', 'Forbidden.', array( 'status' => 403 ) );\n\t}\n\treturn $result;\n}, 10, 3 );\n");
+    fs.mkdirSync(path.join(gr, 'δοκιμή'), { recursive: true });
+    fs.writeFileSync(path.join(gr, 'δοκιμή', 'σελίδα.html'), '<script src="https://unpkg.com/lib@1.0.0/lib.js"></script>\n');
     gitGr('add', '.'); gitGr('commit', '-q', '-m', 'greek names');
     const grDiff = gitGr('diff', '--name-only', 'HEAD~1...HEAD').stdout || '';
     check('(G) control: git, as the scan runs it, prints the Greek paths C-quoted when not given -z (else every Greek-path assertion below is vacuous)',
@@ -1008,6 +1056,21 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
     check('(G) diff scope: wp-rest-gate-case grades the changed Greek-named REST gate, and could look',
       grd.stdout.includes('- ⚠️ app/πύλη.php:3 — ') && !grd.stdout.includes('wp-rest-gate-case REST route casing — '), verdict(grd));
     const grf = grScan({ SCAN_SCOPE: 'full' });
+    // (G) a seeded workflow draws its finding end to end, and a caller that promotes the id blocks on it.
+    const wfRepo = path.join(tmp, 'wf-repo');
+    fs.mkdirSync(path.join(wfRepo, '.github', 'workflows'), { recursive: true });
+    fs.writeFileSync(path.join(wfRepo, '.github', 'workflows', 'd.yml'), 'on: push\njobs:\n  a:\n    steps:\n      - run: ssh-keyscan h\n');
+    for (const a of [['init', '-q'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'add', '.'], ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'wf']]) spawnSync('git', a, { cwd: wfRepo });
+    const wfWarn = broken({ SCAN_SCOPE: 'full' }, {}, wfRepo);
+    check('(G) wf-*: a seeded workflow warns by default', wfWarn.status === 0 && wfWarn.stdout.includes('`wf-no-permissions` · T1') && wfWarn.stdout.includes('.github/workflows/d.yml:5 — ssh-keyscan'), verdict(wfWarn));
+    const wfCrit = broken({ SCAN_SCOPE: 'full' }, { CRITICAL_CHECKS: 'wf-ssh-keyscan' }, wfRepo);
+    check('(G) wf-*: promoted, it blocks', wfCrit.status === 1 && wfCrit.stdout.includes('\nBLOCKED — 1 critical finding(s). '), verdict(wfCrit));
+    fs.writeFileSync(path.join(wfRepo, 'deps.json'), '{broken');
+    spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', 'add', '.'], { cwd: wfRepo });
+    const wfDeps = broken({ SCAN_SCOPE: 'full' }, { CRITICAL_CHECKS: 'vendor-pin' }, wfRepo);
+    check('(G) vendor-pin: a deps.json it cannot parse could not look; FAULT once promoted', wfDeps.status === 1 && wfDeps.stdout.includes('vendor-pin deps.json record — deps.json could not be parsed'), verdict(wfDeps));
+
+    check('(G) full scope: vendor-pin reads a Greek-named file from its own tracked-file listing', grf.stdout.includes('vendor-pin') && grf.stdout.includes('δοκιμή/σελίδα.html'), verdict(grf));
     check('(G) full scope: hadolint, from its own tracked-file listing, is handed the Dockerfile under a Greek directory',
       grf.argvs.includes('--format json δοκιμή/Dockerfile'), JSON.stringify(grf.argvs));
     check('(G) full scope: wp-rest-gate-case finds the Greek-named REST gate from its own tracked-file search',

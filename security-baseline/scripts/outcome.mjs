@@ -30,6 +30,8 @@ export const LEGS = {
   hadolint: { name: 'hadolint Dockerfile lint', checks: ['dockerfile-lint'] },
   argvSecret: { name: 'argv-secret', checks: ['argv-secret'] },
   restGateCase: { name: 'wp-rest-gate-case REST route casing', checks: ['wp-rest-gate-case'] },
+  workflowHardening: { name: 'workflow-hardening', checks: ids(/^wf-/) },
+  vendorPins: { name: 'vendor-pin deps.json record', checks: ['vendor-pin'] },
 };
 // The changed-file list feeds every diff-scoped leg; a diff that fails leaves all of them grading nothing.
 LEGS.diff = {

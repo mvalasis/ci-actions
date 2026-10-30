@@ -57,12 +57,13 @@ has a row per test file that fails alone, ≤99 files on any caller today, unbou
 The other six are bounded by construction and stay uncapped (the latest run on each of the 13
 callers, 2026-10-12): `a11y-audit` a fixed ~6 lines (pa11y-ci's per-URL output goes to the log
 only), `pull-tier` one line, `latin-urls` at most 20 rows and a `…and N more` row × 3 audits,
-`security-baseline` at most 15 rows per check id × the 35 ids a scanner emits (≤3 KB on every
+`security-baseline` at most 15 rows per check id × the 40 ids a scanner emits (≤3 KB on every
 caller), `contract-check` rows bounded by the caller's manifest, a response checked on its first
 item only, × `max-endpoints` 25 (≤2.7 KB), `agent-benchmark` one URL and a table of at most 80
 rows (14.8 KB). A bound that grows with the code gets a selftest that renders its worst case and
 holds it under 900,000: `security-baseline`'s `reportBody()` in `tiers.mjs`, every emittable id
-at `safe()`'s caps (793,621 bytes at v1.29.9; each new id adds ~21.4 KB, so a fifth fails it).
+at `safe()`'s caps (883,556 bytes at v1.30.0, the two trufflehog legs carrying their 20-line log; each
+new id adds ~20.3 KB, so the next fails it: lower a cap first).
 
 **A path the report names is relative to the workspace, as an annotation's `file=` is** — never
 the scanner's own spelling. osv-scanner v2 prints each lockfile by its absolute runner path, and a
