@@ -346,6 +346,39 @@ check "max-urls 0 audits nothing: the skip it always was, not a crash" "$([ "$RC
 rm -f "$WORK/bin/curl" "$WORK/bin/pa11y-ci" "$WORK/big-sitemap.xml" "$WORK/pa11y-cfg-seen.json"
 
 echo
+# ---- the second pass: page-has-heading-one and landmark-one-main behind a dialog --------------
+# The stub answers the main run with a clean page and the --json run with $1, as pa11y-ci prints it.
+stub_behind() {
+  mkdir -p "$WORK/bin"
+  ln -sf "$(command -v node)" "$WORK/bin/node"
+  printf '%s' "$1" > "$WORK/behind.json"
+  { printf '#!/usr/bin/env bash\n'
+    printf 'case "$*" in *--json*) cat %q ;; *) printf "> https://x.test/ - 0 errors\\n" ;; esac\n' "$WORK/behind.json"
+  } > "$WORK/bin/pa11y-ci"
+  chmod +x "$WORK/bin/pa11y-ci"
+}
+ROW='{"results":{"https://x.test/":[{"code":"page-has-heading-one","message":"Page should contain a level-one heading (graded with 1 open dialog(s) removed)"}]}}'
+echo '# the page behind a dialog'
+stub_behind "$ROW"
+run_audit_sh "$AUDIT" true URLS=https://x.test/
+check 'a failure behind a dialog, default: reported, exit 0 under fail-on-violations' "$([ "$RC" = 0 ] && grep -q 'graded with 1 open dialog(s) removed' "$SUMMARY"; echo $?)"
+run_audit_sh "$AUDIT" true URLS=https://x.test/ GRADE_BEHIND_DIALOG=block
+check 'block, under fail-on-violations: exit 1, BLOCKING' "$([ "$RC" = 1 ] && grep -q 'BLOCKING' "$SUMMARY"; echo $?)"
+run_audit_sh "$AUDIT" false URLS=https://x.test/ GRADE_BEHIND_DIALOG=block
+check 'block, report mode: exit 0, still listed' "$([ "$RC" = 0 ] && grep -q 'page-has-heading-one:' "$SUMMARY"; echo $?)"
+run_audit_sh "$AUDIT" true URLS=https://x.test/ GRADE_BEHIND_DIALOG=off
+check 'off: no second pass' "$([ "$RC" = 0 ] && ! grep -q 'page-has-heading-one' "$SUMMARY"; echo $?)"
+stub_behind '{"results":{}}'
+run_audit_sh "$AUDIT" true URLS=https://x.test/ GRADE_BEHIND_DIALOG=block
+check 'a clean second pass says so' "$([ "$RC" = 0 ] && grep -q 'also pass with any open dialog' "$SUMMARY"; echo $?)"
+for bad in 'not json' '{"results":{"https://x.test/":[{"message":"Failed to run"}]}}'; do
+  stub_behind "$bad"
+  run_audit_sh "$AUDIT" true URLS=https://x.test/ GRADE_BEHIND_DIALOG=block
+  check "a second pass that could not run is a note, never a verdict: $bad" "$([ "$RC" = 0 ] && grep -q 'could not run' "$SUMMARY" && ! grep -q 'crashed' "$SUMMARY"; echo $?)"
+done
+run_audit_sh "$AUDIT" false URLS=https://x.test/ GRADE_BEHIND_DIALOG=maybe
+check 'an unknown grade-behind-dialog is a tool fault, no page audited' "$(grep -q 'grade-behind-dialog must be' "$SUMMARY"; echo $?)"
+
 if [ "$fails" -eq 0 ]; then
   echo "✅ all a11y-audit self-tests passed"
   exit 0

@@ -93,6 +93,8 @@ STANDARD="${STANDARD:-WCAG2AA}"
 RUNNER="${RUNNER:-axe htmlcs}"
 FAIL_ON_VIOLATIONS="${FAIL_ON_VIOLATIONS:-false}"
 MAX_URLS="${MAX_URLS:-25}"
+GRADE_BEHIND_DIALOG="${GRADE_BEHIND_DIALOG:-report}"
+case "$GRADE_BEHIND_DIALOG" in report|block|off) ;; *) crash "grade-behind-dialog must be report, block or off, got $(printf '%q' "$GRADE_BEHIND_DIALOG"). No page was audited." ;; esac
 # A whole number, or nothing is audited. The URL list is cut at it below, and until
 # v1.29.10 the cut was `head -n`: a value head could not read emptied the list, which
 # then reported a clean skip, so an enforcing caller went green on an audit that never
@@ -234,6 +236,49 @@ if [ "$rc" -ne 0 ] \
   run_audit
   rc=$?
 fi
+
+# The second pass (behind-dialog-runner.cjs): the two rules axe passes unread while a modal is open.
+# Under `fail-on-violations` a failure here newly blocks a caller whose banner hid a missing h1, so
+# only `grade-behind-dialog: block` lets it take the verdict. A pass that could not run is a note,
+# never a verdict: the page's main audit stands.
+behind_failed=0
+grade_behind_dialog() {
+  local here cfg
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  cfg="$workdir/behind-dialog.json"
+  ( umask 077
+    sed -e "s#\"runners\": \[[^]]*\]#\"runners\": [\"$here/behind-dialog-runner.cjs\"]#" "$workdir/pa11y-ci.json" > "$cfg" )
+  NO_COLOR=1 pa11y-ci --json --config "$cfg" > "$workdir/behind-dialog-out.json" 2>/dev/null
+  node - "$workdir/behind-dialog-out.json" > "$workdir/behind-dialog-notes.txt" <<'JS'
+const fs = require('fs');
+const clean = (s) => String(s).replace(/[\r\n`|<>]/g, ' ').slice(0, 200);
+let report;
+try { report = JSON.parse(fs.readFileSync(process.argv[2], 'utf8')); } catch { console.log('unread'); process.exit(0); }
+const rows = [];
+let unrun = 0;
+for (const [url, issues] of Object.entries(report.results || {})) {
+  for (const i of issues) {
+    if (i && i.code) rows.push(`${clean(url)} — ${clean(i.code)}: ${clean(i.message)}`);
+    else unrun++;
+  }
+}
+if (unrun && !rows.length) console.log('unread');
+else rows.forEach((r) => console.log(`row ${r}`));
+JS
+  if [ "$(sed -n 1p "$workdir/behind-dialog-notes.txt" 2>/dev/null)" = unread ] || [ ! -s "$workdir/behind-dialog-out.json" ]; then
+    note "- ⚠️ the page-behind-a-dialog pass could not run; \`page-has-heading-one\` and \`landmark-one-main\` were graded in the main pass only, where an open dialog passes them unread"
+    return 0
+  fi
+  if grep -q '^row ' "$workdir/behind-dialog-notes.txt"; then
+    behind_failed=1
+    note "- ⚠️ page behind a dialog: \`page-has-heading-one\` / \`landmark-one-main\` graded on the page, not the banner (\`grade-behind-dialog: $GRADE_BEHIND_DIALOG\`)"
+    sed -e 's/^row /  - /' "$workdir/behind-dialog-notes.txt" | while IFS= read -r l; do note "$l"; done
+  else
+    note "- ✅ \`page-has-heading-one\` and \`landmark-one-main\` also pass with any open dialog out of the way"
+  fi
+}
+if [ "$GRADE_BEHIND_DIALOG" != off ]; then grade_behind_dialog; fi
+
 # NB this ENABLES errexit rather than restoring it — line 5 sets `-uo pipefail`,
 # never `-e` — so the verdict block below runs under errexit that the rest of the
 # script does not. Left as-is (it is not this change's bug, and it only tightens
@@ -242,8 +287,12 @@ fi
 # non-zero exit.
 set -e
 
+behind_blocks=0
+if [ "$behind_failed" -eq 1 ] && [ "$GRADE_BEHIND_DIALOG" = block ] && [ "$FAIL_ON_VIOLATIONS" = "true" ]; then behind_blocks=1; fi
+
 if [ "$rc" -eq 0 ]; then
   note "- ✅ no WCAG $STANDARD errors"
+  if [ "$behind_blocks" -eq 1 ]; then note "- ❌ a page failed behind its dialog — BLOCKING"; finish 1; fi
   finish 0
 fi
 

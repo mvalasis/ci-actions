@@ -163,5 +163,17 @@ run_real enforce-violation true URLS="$A/violation"
 check "enforce mode, violations: exit 1, BLOCKING, not a crash" \
 	eval '[ "$rc" = 1 ] && grep -q "BLOCKING" "$summary" && not_crashed'
 
+run_real banner-report true URLS="$A/banner"
+check "a dialog-role banner over a page with no h1: the main pass is clean, as axe reads no further" \
+	eval 'grep -qF "> $A/banner - 0 errors" "$log"'
+check "…report: exit 0, not a crash, and the summary names the rule and the state it was graded in" \
+	eval '[ "$rc" = 0 ] && not_crashed && grep -q "page-has-heading-one" "$summary" && grep -q "1 open dialog(s) removed" "$summary"'
+run_real banner-block true GRADE_BEHIND_DIALOG=block URLS="$A/banner"
+check "…block, under fail-on-violations: exit 1, BLOCKING" eval '[ "$rc" = 1 ] && grep -q "BLOCKING" "$summary" && not_crashed'
+run_real banner-fixed true GRADE_BEHIND_DIALOG=block URLS="$A/banner-fixed"
+check "the same banner over a page with an h1 and a main: exit 0" eval '[ "$rc" = 0 ] && ! grep -q "BLOCKING" "$summary"'
+run_real banner-off true GRADE_BEHIND_DIALOG=off URLS="$A/banner"
+check "off: no second pass, exit 0" eval '[ "$rc" = 0 ] && ! grep -q "page-has-heading-one" "$summary"'
+
 echo "== $n assertions, $([ "$fail" = 0 ] && echo 'all held' || echo 'FAILED')"
 exit "$fail"

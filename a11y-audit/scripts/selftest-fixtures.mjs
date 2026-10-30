@@ -12,6 +12,8 @@
 //   A /page         a clean page that loads a stylesheet, an image and a script from A and from B,
 //                   and fetch()es one URL on each
 //   A /redirect     302 to B /landing, a clean page with an image of its own
+//   A /banner       a dialog-role banner over a page with no h1: clean in the main pass, as axe
+//                   passes page-has-heading-one unread behind it
 //   A /violation    an <img> with no alt: two errors (axe image-alt, HTML_CodeSniffer H37)
 //
 // check: the verify-token went where a11y-audit says it goes and nowhere else. Every request that
@@ -41,6 +43,8 @@ function serve(logFile, portsFile) {
         `<link rel="stylesheet" href="/same.css"><link rel="stylesheet" href="${B}/cross.css">`)],
       '/redirect': [302, `${B}/landing`],
       '/violation': ['text/html', page('<img src="/same.png">')],
+      '/banner': ['text/html', '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>a11y-audit fixture</title></head><body><main><h2>No h1 here</h2></main><div role="dialog" aria-modal="true" aria-label="Cookies"><p>Cookies</p><button>OK</button></div></body></html>'],
+      '/banner-fixed': ['text/html', page('<div role="dialog" aria-modal="true" aria-label="Cookies"><p>Cookies</p><button>OK</button></div>')],
       '/same.css': ['text/css', 'p { color: #000 }'],
       '/same.png': ['image/png', png],
       '/same.js': ['text/javascript', '/* first party */'],

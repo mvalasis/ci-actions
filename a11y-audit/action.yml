@@ -30,6 +30,14 @@ inputs:
     description: 'Cap the number of URLs audited.'
     required: false
     default: '25'
+  grade-behind-dialog:
+    description: >-
+      Second pass of page-has-heading-one and landmark-one-main with open dialogs
+      out of the way, since axe passes both unread behind one (a cookie banner
+      with role=dialog). report = listed in the summary; block = also fails the run
+      under fail-on-violations; off = no second pass.
+    required: false
+    default: 'report'
   verify-token:
     description: >-
       Optional WAF/CF-bypass token, sent as X-Verify-Source. Scope (measured on
@@ -70,6 +78,7 @@ runs:
         RUNNER: ${{ inputs.runner }}
         FAIL_ON_VIOLATIONS: ${{ inputs.fail-on-violations }}
         MAX_URLS: ${{ inputs.max-urls }}
+        GRADE_BEHIND_DIALOG: ${{ inputs.grade-behind-dialog }}
         VERIFY_TOKEN: ${{ inputs.verify-token }}
         # The install step's private dirs: pa11y-ci alone on this step's PATH, and the pinned Chrome
         # for puppeteer, which then downloads nothing. `:?` because an empty PATH entry is the

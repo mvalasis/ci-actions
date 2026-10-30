@@ -29,9 +29,27 @@ jobs:
 | `standard` | `WCAG2AA` | or `WCAG2AAA` |
 | `runner` | `axe htmlcs` | pa11y runners |
 | `fail-on-violations` | `false` | `true` = hard BLOCK |
+| `grade-behind-dialog` | `report` | `report`, `block` or `off` (§The page behind a dialog) |
 | `max-urls` | `25` | cap: a whole number, `0` audits nothing; anything else is reported as a fault (v1.29.10) |
 
 Rollout: start `fail-on-violations: false` (surface the backlog), fix it, then flip to `true`.
+
+## The page behind a dialog (v1.30.0)
+
+axe-core's `page-has-heading-one` and `landmark-one-main` carry `passForModal: true`: while a dialog
+or a viewport-sized overlay is open, both pass without reading the page. The audit sends no consent,
+so on a site whose cookie banner is a dialog, a page with no h1 or no `<main>` passed on every URL.
+
+A second pass (`scripts/behind-dialog-runner.cjs`, a pa11y runner) grades only those two rules, on a
+load of its own: `passForModal` off, and the open `dialog[open]`, `[role=dialog]` and
+`[aria-modal=true]` removed so a heading inside one cannot stand in for the page's. The main pass is
+untouched, so a real dialog's own findings stay. Each row in the summary says what it was graded
+with: `1 open dialog(s) removed`, `a viewport-sized overlay left in place` or `no dialog open`.
+
+`grade-behind-dialog` decides what a failure does. `report`, the default, lists it; `block` also
+fails the run under `fail-on-violations: true`; `off` skips the pass. It is not the default because
+it would newly block a caller whose banner has been hiding a missing h1. A pass that could not run
+is a note, never a verdict. It costs one more page load per URL.
 
 ## Notes
 
