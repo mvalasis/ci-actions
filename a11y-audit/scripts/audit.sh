@@ -161,7 +161,7 @@ urls_json=$(printf '%s\n' "$urls" | sed 's#.*#"&"#' | paste -sd, -)
 # the race; the cookie removes the reload deterministically). Harmless without
 # Guest Mode. X-Verify-Source is added when a token is set (WAF/CF bypass).
 #
-# TOKEN SCOPE (measured on pa11y@9.1.1 / pa11y-ci@4.1.1 with Chrome for Testing 148, the
+# TOKEN SCOPE (measured on pa11y@10.0.0 / pa11y-ci@5.0.0 with Chrome for Testing 156, the
 # versions the lock installs): these go into pa11y-ci's `defaults.headers`, which
 # pa11y applies via first-request-only Puppeteer request interception — NOT
 # page.setExtraHTTPHeaders. Its handler overrides headers only while an

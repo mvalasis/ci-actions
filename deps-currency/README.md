@@ -68,8 +68,8 @@ blocking only after it has cleared its backlog.
 - **Reviewed exceptions.** osv-scanner reads an `osv-scanner.toml` beside each lockfile
   (`[[IgnoredVulns]]` with `id`, `ignoreUntil`, `reason`) and leaves those advisories out of its
   results, so this action never sees them; one past its `ignoreUntil` reports again (measured on
-  osv-scanner v2.4.0). ci-actions' own weekly check of `a11y-audit`'s lock relies on it
-  (`a11y-audit/osv-scanner.toml`); in this repo `selftest-pins.sh` fails an entry with no reason or
+  osv-scanner v2.4.0). ci-actions' own weekly check of `a11y-audit`'s lock relies on it when
+  that lock carries one; in this repo `selftest-pins.sh` fails an entry with no reason or
   an expiry more than 100 days out.
 - **A scanner fault is not a finding.** If the scan itself crashes, the report says so
   (`❌ deps-currency crashed: …` in the job log and the job summary) and the exit code follows the same

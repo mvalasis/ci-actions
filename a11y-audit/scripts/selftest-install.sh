@@ -99,7 +99,7 @@ check "pa11y-ci on that PATH is the lock's $lockv" [ "$(PATH="$bin:$PATH" pa11y-
 check "no lifecycle script ran: puppeteer's postinstall downloaded no browser into PUPPETEER_CACHE_DIR" [ ! -e "$work/puppeteer-cache" ]
 check "Chrome for Testing is the pinned build ($pin_version)" \
 	[ "$("$chrome" --version 2>/dev/null | sed 's/[[:space:]]*$//')" = "Google Chrome for Testing $pin_version" ]
-want="$(node -p 'require(process.argv[1]).PUPPETEER_REVISIONS.chrome' "$tools/node_modules/puppeteer-core/lib/cjs/puppeteer/revisions.js" 2>&1)"
+want="$(node -p 'require(process.argv[1]).PUPPETEER_REVISIONS.chrome' "$tools/node_modules/puppeteer-core/lib/puppeteer/revisions.js" 2>&1)"
 check "the pin is the build puppeteer-core in the lock launches ($want)" [ "$want" = "$pin_version" ]
 check "the action's own dir is as it was (nothing installed beside action.yml)" [ "$(ls -A "$root/a11y-audit")" = "$before" ]
 

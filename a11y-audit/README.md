@@ -55,7 +55,7 @@ is a note, never a verdict. It costs one more page load per URL.
 
 - **Every package from a vendored lockfile** (v1.22.0). `scripts/install.sh` copies
   `package.json` and `package-lock.json` into a private dir under `$RUNNER_TEMP` and runs `npm ci
-  --omit=dev --ignore-scripts --no-audit --no-fund` there: pa11y-ci 4.1.1 and the 161 packages
+  --omit=dev --ignore-scripts --no-audit --no-fund` there: pa11y-ci 5.0.0 and the 95 packages
   it pulls install at the lock's versions, each tarball checked against its sha512 integrity,
   and no lifecycle script runs (puppeteer's postinstall, the only one, would download a browser
   of its own). The audit step gets a bin dir that holds `pa11y-ci` alone on its `PATH`; nothing
@@ -64,17 +64,17 @@ is a note, never a verdict. It costs one more page load per URL.
   puppeteer, cheerio, lodash and the rest resolved within their ranges on every caller run, so
   a compromised patch release of any of them reached every caller at its next run.
 - **Chromium: Chrome for Testing, pinned by SHA-256** (v1.22.0). The browser is the build
-  puppeteer-core in the lock launches (148.0.7778.97 for puppeteer 24.43.1), installed by
+  puppeteer-core in the lock launches (156.0.8078.47 for puppeteer 25.16.0), installed by
   `security-baseline/scripts/install-pinned.sh` from its line in `security-baseline/tool-pins.txt`:
   downloaded from Google's bucket (the URL puppeteer's own download uses) to a temp dir, and
   extracted only when the zip hashes to the pin. puppeteer finds it through
   `PUPPETEER_EXECUTABLE_PATH` and downloads nothing. Chosen over puppeteer's postinstall and over
   `npx puppeteer browsers install <build>`, which pin the same build and check nothing: both
-  download and unzip without a digest (and unzip with extract-zip, below). **What cannot be
+  download and unzip without a digest. **What cannot be
   checked:** Google publishes no checksum or signature for Chrome for Testing, so the pin is
-  trust-on-first-use. It proves every runner gets the bytes first downloaded on 2026-09-28, which
+  trust-on-first-use. It proves every runner gets the bytes first downloaded on 2026-10-30, which
   matched the md5 the bucket records for the object, whose generation shows it was never replaced
-  since its 2026-04-28 upload; it cannot prove those bytes are what Google built. Likewise the
+  since its 2026-10-19 upload; it cannot prove those bytes are what Google built. Likewise the
   lock's integrity hashes prove every runner gets the tarballs first resolved, not that they were
   benign when published; the week-old rule and the advisory check below are what stand between the
   two. Node, npm, and the system libraries Chrome loads are the runner image's.
@@ -82,23 +82,19 @@ is a note, never a verdict. It costs one more page load per URL.
   its `advisories` job runs this repo's own `deps-currency` over the lock, failing on an advisory
   of any severity. `osv-scanner.toml` beside the lock carries the reviewed exceptions, each with a
   reason and an `ignoreUntil` at most 100 days out (`selftest-pins.sh` fails an entry without
-  them), so an exception is looked at again when it expires. Today: extract-zip 2.0.1 (two
-  symlink path-traversal advisories, no fixed release), reached only through `@puppeteer/browsers`'
-  `install()`, which a11y-audit never runs; it leaves the tree once a pa11y-ci release moves to
-  pa11y 10 (puppeteer 25 dropped it).
+  them), so an exception is looked at again when it expires. Today: none, so the file is gone;
+  add it back beside the lock with the first exception.
 - **An advisory with a fix outside its parent's range: `overrides`, not an exception** (v1.25.1).
   When the fixed release exists but no release of the parent depends on it, `package.json`'s
   `overrides` lifts the package to it, at an exact version like every dependency here
   (`selftest-pins.sh` fails a range, or an override the lock does not install at that version), and
   the lock is regenerated the usual way (below); an `osv-scanner.toml` exception is for an advisory
-  with no fixed release. Today: basic-ftp 6.2.1 (GHSA-c475-qrg2-pj4r, fixed in 6.2.1), under get-uri
-  6.0.5 ← pac-proxy-agent ← proxy-agent ← `@puppeteer/browsers`, where even get-uri's latest asks
-  for `^5.3.1`. Its 6.0.0 break is a safer default (no separate transfer host, against FTP bounce);
-  the `Client` API get-uri calls is unchanged. Nothing on the audit path loads it unless the runner
-  sets a `pac+` proxy URL: proxy-agent loads pac-proxy-agent, and get-uri with it, only for one.
-  The override comes out when get-uri's range reaches 6.
-- **Modern browser.** pa11y-ci 4.1.1 → pa11y 9.1.1 → puppeteer 24.43.1, driving Chrome for
-  Testing 148. The earlier `pa11y-ci@3` shipped Chromium 91, which predates CSS cascade layers (`@layer`, Chrome
+  with no fixed release. Today: none.
+- **Node 22.13 or later** (v1.30.1). pa11y 10 and puppeteer 25 declare `^22.13.0 || >=24`, and
+  puppeteer 25 is ESM-only, which pa11y loads with `require`. `ubuntu-latest` has Node 22; a caller
+  that runs `setup-node` with an older version before this action gets `a11y-audit crashed`.
+- **Modern browser.** pa11y-ci 5.0.0 → pa11y 10.0.0 → puppeteer 25.16.0, driving Chrome for
+  Testing 156. The earlier `pa11y-ci@3` shipped Chromium 91, which predates CSS cascade layers (`@layer`, Chrome
   99+); on any layered stylesheet — e.g. **Tailwind v4** — the utilities block was dropped,
   so the page rendered unstyled and axe reported **bogus contrast failures** (text fell back
   to the UA link colour). The current engine renders the page as real users see it.
@@ -174,7 +170,7 @@ reviewed at least that often, and one carrying none moves when osv.dev knows of 
 
 1. pa11y-ci: a release at least a week old, set as an exact version in `package.json`.
 2. Resolve every package to what was published at least a week ago, the way the lock was cut
-   (2026-09-28, `--before=2026-09-21`):
+   (2026-10-30, `--before=2026-10-23`):
    ```bash
    npm install --package-lock-only --ignore-scripts --no-audit --no-fund --before="$(date -u -v-7d +%F)"
    ```
@@ -188,7 +184,7 @@ reviewed at least that often, and one carrying none moves when osv.dev knows of 
    release at least a week old that no parent's range reaches takes an `overrides` entry in
    `package.json` (§Notes), then step 2 again; drop an override once a parent's range reaches it.
 4. The Chrome build: install the new lock in a scratch dir as the action does (`npm ci
-   --ignore-scripts`) and read `node -p "require('./node_modules/puppeteer-core/lib/cjs/puppeteer/revisions.js').PUPPETEER_REVISIONS.chrome"`.
+   --ignore-scripts`) and read `node -p "require('./node_modules/puppeteer-core/lib/puppeteer/revisions.js').PUPPETEER_REVISIONS.chrome"`.
    If it moved, download
    `https://storage.googleapis.com/chrome-for-testing-public/<build>/linux64/chrome-linux64.zip`,
    hash it (`shasum -a 256`), compare its md5 (`openssl dgst -md5 -binary <zip> | base64`) with the
