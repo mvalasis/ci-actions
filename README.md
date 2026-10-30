@@ -1978,6 +1978,40 @@ this action only decides whether the pull step runs. Pair it with skipping
 `astro check` on `repository_dispatch` (no code changed) and each event does
 only its half.
 
+## `verify-signature` — was this tip signed by a listed operator key?
+
+Anything holding a repo-scoped token can move a branch, and GitHub Free has no ruleset on a private
+repository. What a token cannot do is sign with an operator's SSH key, or edit a list that lives in
+the workflow file, since that takes the `workflow` scope. Put the step right after the checkout and
+before the build, on the workflow's own branch events:
+
+```yaml
+- uses: mvalasis/ci-actions/verify-signature@v1
+  with:
+    allowed-signers: |
+      manos namespaces="git" ssh-ed25519 AAAA…
+```
+
+Keep the list inline. Read from a variable, a secret or a tracked file, it is back within reach of
+the token this gate exists to stop.
+
+| Exit | Meaning |
+|---|---|
+| 0 | an SSH signature that verifies against a listed key; the log names the signer |
+| 1 | unsigned; GPG-signed, which is what GitHub does to a merge it makes (the web button, `gh pr merge`, Dependabot); SSH-signed by a key not listed; a signature of another kind |
+| 2 | it could not verify: an empty list, a commit the checkout lacks, a runner without `ssh-keygen -Y`, its own crash |
+
+Every path but exit 0 fails the step: there is no report mode. A `pull_request` run checks out
+GitHub's test merge, which nobody signed, so guard the step with `if: github.event_name != 'pull_request'`
+where a deploy workflow also runs on PRs.
+
+**Before wiring a caller:** every machine that lands on its deploy branch has `commit.gpgsign true`
+and `gpg.format ssh`, and PRs are merged locally with `--no-ff`. Wired first, the next unsigned tip
+stops that site's deploys. A workflow whose deploy also fires on a dispatch or a schedule grades
+whatever tip the branch holds, so the branch's existing tip needs a signature too.
+
+**Self-test:** `bash verify-signature/scripts/selftest.sh` (real git and `ssh-keygen`, throwaway keys).
+
 ## `latin-urls` — ASCII page-URL gate for Astro sites
 
 Shareable **page** URLs must be ASCII: a non-ASCII path percent-encodes (breaks

@@ -1,0 +1,26 @@
+name: 'Verify signature (was this tip signed by a listed operator key?)'
+description: >-
+  Refuses a commit no listed operator SSH key signed, before a deploy builds it.
+  Anything holding a repo-scoped token can move a branch; it cannot sign with a
+  key it does not hold, or edit a list that lives in the workflow file. Fails
+  closed: exit 1 on an unsigned, GPG-signed or unlisted commit, exit 2 when it
+  could not verify at all. There is no report mode.
+
+inputs:
+  allowed-signers:
+    description: >-
+      One `<principal> namespaces="git" ssh-ed25519 <key>` line per key, written
+      INLINE in the caller's workflow: the point of the gate is that changing
+      this list takes the workflow scope. Never pass a repository variable, a
+      secret or a file's contents here.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Verify the commit's signature
+      shell: bash
+      env:
+        ALLOWED_SIGNERS: ${{ inputs.allowed-signers }}
+        HEAD_SHA: ${{ github.sha }}
+      run: bash "${{ github.action_path }}/scripts/verify.sh"
