@@ -33,7 +33,7 @@ signers="$(sed '/^[[:space:]]*$/d' <<<"${ALLOWED_SIGNERS:-}")"
 git cat-file -e "$sha^{commit}" 2>/dev/null || refuse 2 "$sha is not a commit in this checkout; nothing may deploy"
 
 umask 077
-list="$(mktemp)" || { list=""; refuse 2 "mktemp failed; nothing may deploy"; }
+list="$(mktemp "${TMPDIR:-/tmp}/verify-signature.XXXXXX")" || { list=""; refuse 2 "mktemp failed; nothing may deploy"; }
 printf '%s\n' "$signers" > "$list" || refuse 2 "could not write the list; nothing may deploy"
 
 # What the commit carries, read off the object itself. Only an SSH signature is ever verified.
