@@ -43,7 +43,7 @@ cp "$action/package.json" "$action/package-lock.json" "$dir/" ||
 (cd "$dir" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund) ||
 	die "npm ci refused the vendored lock (a tarball that does not match its integrity hash, a lock that disagrees with package.json, or a registry that did not answer; npm's reason is above). Nothing was audited."
 [ -x "$dir/node_modules/.bin/pa11y-ci" ] || die "npm ci left no node_modules/.bin/pa11y-ci in $dir"
-# node_modules/.bin also links extract-zip, semver, js-yaml and more: none is for audit.sh's PATH.
+# node_modules/.bin also links semver, js-yaml and more: none is for audit.sh's PATH.
 { mkdir -p "$dir/bin" && ln -s "$dir/node_modules/.bin/pa11y-ci" "$dir/bin/pa11y-ci"; } ||
 	die "cannot link pa11y-ci into $dir/bin"
 

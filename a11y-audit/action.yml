@@ -41,7 +41,7 @@ inputs:
   verify-token:
     description: >-
       Optional WAF/CF-bypass token, sent as X-Verify-Source. Scope (measured on
-      pa11y-ci 4.1.1 / pa11y 9.1.1 / Chrome 148 by the real-install self-test): it
+      pa11y-ci 5.0.0 / pa11y 10.0.0 / Chrome 156 by the real-install self-test): it
       rides ONLY the navigation request to each audited URL and the sitemap fetch —
       pa11y uses first-request-only request interception, so it is NOT sent with
       any subresource or to a redirect target. Still a secret sent to the audited
@@ -57,10 +57,10 @@ runs:
     - name: Install pa11y-ci (vendored lockfile) and Chrome for Testing (pinned)
       id: install
       shell: bash
-      # pa11y-ci@4 → pa11y@9 → puppeteer 24 (modern Chromium). pa11y-ci@3's bundled Chromium 91
+      # pa11y-ci@5 → pa11y@10 → puppeteer 25 (modern Chromium). pa11y-ci@3's bundled Chromium 91
       # predates CSS cascade layers (@layer, Chrome 99+), so Tailwind v4 utilities were silently
       # dropped → bogus contrast fails on any layered stylesheet. The versions are ALSO a security
-      # control: pa11y@9 confines the verify-token to the first (navigation) request via request
+      # control: pa11y@10 confines the verify-token to the first (navigation) request via request
       # interception; a pa11y that switched to setExtraHTTPHeaders would broadcast it to every
       # cross-origin subresource. The real-install self-test measures that scope on every change to
       # the lock (a11y-audit-selftest.yml).
