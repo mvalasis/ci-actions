@@ -1,0 +1,62 @@
+name: verify-signature self-test
+
+# Offline regression guard for the deploy signature gate. `engine-selftest` drives every verdict of
+# verify.sh with real git, real ssh-keygen and throwaway keys. `action` goes through the real action.yml,
+# which the engine leg cannot see: the input reaching ALLOWED_SIGNERS, the sha reaching HEAD_SHA, and a
+# refusal failing the step. Ubuntu only: the deploy workflows that call this run nowhere else.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'verify-signature/**'
+      - '.github/workflows/verify-signature-selftest.yml'
+  pull_request:
+    paths:
+      - 'verify-signature/**'
+      - '.github/workflows/verify-signature-selftest.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  engine-selftest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Behavioural self-test
+        shell: bash
+        run: bash verify-signature/scripts/selftest.sh
+
+  action:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      # The private half of this key was deleted the moment it was made, so no commit carries a
+      # signature it can verify and the step must refuse whatever tip this run is on.
+      - name: The real action refuses a tip no listed key signed
+        id: refused
+        uses: ./verify-signature
+        continue-on-error: true
+        with:
+          allowed-signers: |
+            nobody@example.invalid namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO4+snDgKy/nPVze4PZce7i7vj7zSxLviemtBC+WgkUq
+
+      # outcome is the step's own result, conclusion what continue-on-error made of it: a caller
+      # rolling the gate out depends on both.
+      - name: The refusal failed the step and continue-on-error kept the job
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.refused.outcome }}
+          CONCLUSION: ${{ steps.refused.conclusion }}
+        run: |
+          echo "outcome=$OUTCOME conclusion=$CONCLUSION"
+          if [ "$OUTCOME" != failure ] || [ "$CONCLUSION" != success ]; then
+            echo "::error title=verify-signature self-test::expected outcome failure and conclusion success"
+            exit 1
+          fi

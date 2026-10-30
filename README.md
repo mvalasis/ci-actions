@@ -2005,7 +2005,9 @@ the token this gate exists to stop.
 | 1 | unsigned; GPG-signed, which is what GitHub does to a merge it makes (the web button, `gh pr merge`, Dependabot); SSH-signed by a key not listed; a signature of another kind |
 | 2 | it could not verify: an empty list, a commit the checkout lacks, a runner without `ssh-keygen -Y`, its own crash |
 
-Every path but exit 0 fails the step: there is no report mode. A `pull_request` run checks out
+Every path but exit 0 fails the step: the action has no report mode. A caller still rolling it out
+sets `continue-on-error: true` on the step, so the deploy carries on and the refusal stays an error
+annotation on the run; deleting that line is the flip. A `pull_request` run checks out
 GitHub's test merge, which nobody signed, so guard the step with `if: github.event_name != 'pull_request'`
 where a deploy workflow also runs on PRs.
 
@@ -2014,7 +2016,8 @@ and `gpg.format ssh`, and PRs are merged locally with `--no-ff`. Wired first, th
 stops that site's deploys. A workflow whose deploy also fires on a dispatch or a schedule grades
 whatever tip the branch holds, so the branch's existing tip needs a signature too.
 
-**Self-test:** `bash verify-signature/scripts/selftest.sh` (real git and `ssh-keygen`, throwaway keys).
+**Self-test:** `bash verify-signature/scripts/selftest.sh` (real git and `ssh-keygen`, throwaway keys);
+`verify-signature-selftest.yml` runs it and drives the real `action.yml`.
 
 ## `latin-urls` — ASCII page-URL gate for Astro sites
 
