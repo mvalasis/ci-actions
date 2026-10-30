@@ -232,11 +232,3 @@ export function analyzeTrustPages(pages) {
 
 // ---------- sitemap lastmod ----------
 
-export function analyzeSitemapLastmod(urlsetXml) {
-  const xml = String(urlsetXml || '');
-  const urls = (xml.match(/<url>/gi) || []).length;
-  if (!urls) return [];
-  const dated = (xml.match(/<lastmod>\s*[^<\s]+\s*<\/lastmod>/gi) || []).length;
-  if (!dated) return [f('sitemap-lastmod', SEV.INFO, `none of ${urls} sitemap entries carries a lastmod date — agents and crawlers cannot tell what changed`)];
-  return [f('sitemap-lastmod', SEV.OK, `${dated}/${urls} sitemap entries carry a lastmod date`)];
-}

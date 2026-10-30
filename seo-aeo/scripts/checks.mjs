@@ -23,13 +23,21 @@ export const T1_CHECKS = new Set([
   // agent readiness (agent.mjs): absent is INFO and never elevated, so promoting one of these
   // locks in an adopted capability without blocking a site that has not adopted it yet
   'agent-markdown', 'agent-skills-index', 'agent-ard', 'agent-content-signal',
+  // AEO and crawl access. They stay WARN until a caller opts in; `ai-crawler-allowlist` promotes only
+  // its answer-bot WARN, its training-bot INFO being a policy choice elevate() never touches
+  'search-engine-blocked', 'ai-crawler-allowlist', 'llms-txt', 'jsonld-type', 'entity-sameas',
+  'ai-ua-blocked', 'sitemap-lastmod', 'sitemap-url-status',
+  // cross-page, emitted once the sample is in
+  'duplicate-title', 'duplicate-meta', 'hreflang-reciprocity', 'canonical-resolve',
 ]);
 // Everything else is T2 (advisory; ignored if a caller tries to promote it).
 
 const CLASSIC_SEARCH_BOTS = ['Googlebot', 'Bingbot'];                        // blocking → de-indexed from Google/Bing (classic-SEO catastrophe)
-const AI_ANSWER_BOTS = ['OAI-SearchBot', 'Claude-SearchBot', 'PerplexityBot']; // blocking → invisible to AI answer engines (AEO cost)
-const AI_TRAINING_BOTS = ['GPTBot', 'ClaudeBot', 'anthropic-ai', 'Google-Extended', 'Applebot-Extended', 'CCBot', 'Amazonbot', 'Bytespider', 'Meta-ExternalAgent', 'Perplexity-User', 'ChatGPT-User', 'Claude-User']; // blocking is editorial policy, not a defect
-export const AI_BOTS = [...CLASSIC_SEARCH_BOTS, ...AI_ANSWER_BOTS, ...AI_TRAINING_BOTS];
+const AI_ANSWER_BOTS = ['OAI-SearchBot', 'Claude-SearchBot', 'PerplexityBot', 'Applebot']; // blocking → invisible to AI answer engines (AEO cost)
+// Fetch a page because a person asked an assistant about it: blocking one hides the site from that answer.
+const AI_USER_FETCHERS = ['ChatGPT-User', 'Claude-User', 'Perplexity-User', 'MistralAI-User', 'DuckAssistBot'];
+const AI_TRAINING_BOTS = ['GPTBot', 'ClaudeBot', 'anthropic-ai', 'Google-Extended', 'Applebot-Extended', 'CCBot', 'Amazonbot', 'Bytespider', 'Meta-ExternalAgent']; // blocking is editorial policy, not a defect
+export const AI_BOTS = [...CLASSIC_SEARCH_BOTS, ...AI_ANSWER_BOTS, ...AI_USER_FETCHERS, ...AI_TRAINING_BOTS];
 
 const RETIRED_RICH_RESULT = new Set(['FAQPage', 'HowTo']); // valid schema, no rich result since 2026-05-07
 
@@ -411,6 +419,12 @@ export function analyzeHomeEntity(nodes) {
   return out;
 }
 
+// The fields Google documents for each rich result; a type with logic of its own is below.
+const LD_REQUIRED = {
+  LocalBusiness: ['name', 'address', 'telephone'], Store: ['name', 'address', 'telephone'],
+  Organization: ['name', 'url', 'logo'], WebSite: ['name', 'url'], ItemList: ['itemListElement'],
+};
+
 // Required/recommended fields per @type — WARN only, scoped to types actually present.
 function validateLdFields(nodes, pageType = 'generic') {
   const out = [];
@@ -436,6 +450,16 @@ function validateLdFields(nodes, pageType = 'generic') {
           if (!has(li, 'name') && !has(li.item || {}, 'name')) out.push(f('jsonld-fields', SEV.WARN, `breadcrumb item ${idx + 1} missing name`));
           if (idx < arr.length - 1 && !has(li, 'item')) out.push(f('jsonld-fields', SEV.WARN, `breadcrumb item ${idx + 1} missing item URL`));
         });
+      } else if (t === 'JobPosting') {
+        const miss = ['title', 'description', 'datePosted', 'hiringOrganization', 'validThrough'].filter((p) => !has(n, p));
+        if (!has(n, 'jobLocation') && !has(n, 'jobLocationType')) miss.push('jobLocation/jobLocationType');
+        if (miss.length) out.push(f('jsonld-fields', SEV.WARN, `JobPosting JSON-LD missing ${miss.join(', ')}`));
+      } else if (LD_REQUIRED[t]) {
+        const miss = LD_REQUIRED[t].filter((p) => !has(n, p));
+        if (miss.length) out.push(f('jsonld-fields', SEV.WARN, `${t} JSON-LD missing ${miss.join(', ')}`));
+      } else if (t === 'Offer') {
+        if (!(has(n, 'price') || has(n, 'priceSpecification') || has(n, 'lowPrice'))) out.push(f('jsonld-fields', SEV.WARN, 'Offer missing price/priceSpecification'));
+        if (!has(n, 'priceCurrency') && !has(n.priceSpecification || {}, 'priceCurrency')) out.push(f('jsonld-fields', SEV.WARN, 'Offer missing priceCurrency'));
       } else if (t === 'FAQPage') {
         const qs = [].concat(n.mainEntity || []);
         if (!qs.length || !qs.some((q) => has(q, 'acceptedAnswer'))) out.push(f('jsonld-fields', SEV.WARN, 'FAQPage has no Question with acceptedAnswer'));
@@ -507,11 +531,78 @@ export function analyzeRobots({ status, body }) {
   // Classic search engines vs AI answer engines vs AI training crawlers — three different stakes.
   const blockedClassic = CLASSIC_SEARCH_BOTS.filter((b) => robots.rootBlocked(b));
   const blockedAnswer = AI_ANSWER_BOTS.filter((b) => robots.rootBlocked(b));
+  const blockedFetch = AI_USER_FETCHERS.filter((b) => robots.rootBlocked(b));
   const blockedTrain = AI_TRAINING_BOTS.filter((b) => robots.rootBlocked(b));
   if (blockedClassic.length) findings.push(f('search-engine-blocked', SEV.WARN, `classic search engine(s) blocked at root: ${blockedClassic.join(', ')} — this DE-INDEXES the site from Google/Bing (almost always a mistake outside staging)`));
   if (blockedAnswer.length) findings.push(f('ai-crawler-allowlist', SEV.WARN, `AI answer engines blocked in robots.txt: ${blockedAnswer.join(', ')} — costs AEO visibility (verify this is intentional)`));
+  if (blockedFetch.length) findings.push(f('ai-crawler-allowlist', SEV.WARN, `user-triggered AI fetchers blocked in robots.txt: ${blockedFetch.join(', ')} — they fetch a page when a person asks an assistant about it, so the site drops out of that answer (verify this is intentional)`));
   if (blockedTrain.length) findings.push(f('ai-crawler-allowlist', SEV.INFO, `AI training crawlers blocked (policy choice, not a defect): ${blockedTrain.join(', ')}`));
   return { findings, robots };
+}
+
+// N entries spread across the whole list, first and last included, rather than its first N.
+export function spreadSample(list, n) {
+  const items = [...list];
+  if (n <= 0) return [];
+  if (items.length <= n) return items;
+  if (n === 1) return [items[0]];
+  return Array.from({ length: n }, (_, i) => items[Math.round((i * (items.length - 1)) / (n - 1))]);
+}
+
+// `pattern -> label` lines: the pattern is a regular expression over the URL's path, first match
+// wins. A pattern that does not compile is handed back, so the report can say it did nothing.
+export function parseTemplateMap(text) {
+  const rules = [], bad = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const i = line.indexOf('->');
+    if (i < 0) { if (line.trim()) bad.push(line.trim()); continue; }
+    try { rules.push({ re: new RegExp(line.slice(0, i).trim()), label: line.slice(i + 2).trim() }); } catch { bad.push(line.trim()); }
+  }
+  return { rules, bad };
+}
+// A URL's template: the first rule that matches, else its first path segment.
+export function templateOf(url, rules = []) {
+  let p = '/'; try { p = new URL(url).pathname; } catch { /* the root group */ }
+  const hit = rules.find((r) => r.re.test(p));
+  return hit ? hit.label : (p.split('/').filter(Boolean)[0] || '/');
+}
+// K URLs per template, spread across each group. Round-robin over the groups, so a max-urls cut
+// loses depth in every template before it loses a template.
+export function samplePerTemplate(urls, k, rules = []) {
+  const groups = new Map();
+  for (const u of urls) { const t = templateOf(u, rules); if (!groups.has(t)) groups.set(t, []); groups.get(t).push(u); }
+  const picks = [...groups.values()].map((g) => spreadSample(g, k));
+  const out = [];
+  for (let i = 0; i < k; i++) for (const p of picks) if (i < p.length) out.push(p[i]);
+  return { urls: out, groups: groups.size };
+}
+
+// The share of <url> entries with a valid W3C date, over every urlset read. Below the threshold is
+// a WARN: a site with no lastmod passed clean until v1.30.0, its absence an INFO.
+const W3C_DATE = /^\d{4}(?:-\d{2}(?:-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2}))?)?)?$/;
+export const LASTMOD_MIN_SHARE = 0.8;
+export function analyzeSitemapLastmod(urlsets) {
+  let urls = 0, dated = 0;
+  for (const xml of [].concat(urlsets)) {
+    for (const m of String(xml || '').matchAll(/<url>([\s\S]*?)<\/url>/gi)) {
+      urls++;
+      const d = m[1].match(/<lastmod>\s*([^<\s]+)\s*<\/lastmod>/i);
+      if (d && W3C_DATE.test(d[1]) && !Number.isNaN(Date.parse(d[1]))) dated++;
+    }
+  }
+  if (!urls) return [];
+  const share = Math.round((dated / urls) * 100);
+  if (dated / urls < LASTMOD_MIN_SHARE) return [f('sitemap-lastmod', SEV.WARN, `${dated} of ${urls} sitemap entries (${share}%) carry a valid W3C lastmod date, under ${LASTMOD_MIN_SHARE * 100}% — crawlers and agents cannot tell what changed`)];
+  return [f('sitemap-lastmod', SEV.OK, `${dated}/${urls} sitemap entries carry a valid lastmod date`)];
+}
+
+// Each answer bot's status on `/` against the same fetch from a default user agent: robots.txt can
+// say allowed while the edge answers 403. `base` and `bots` hold { status } or { error }.
+const REFUSED = (s) => s === 401 || s === 403 || s === 429 || (s >= 500 && s < 600);
+export function analyzeAiUaProbe(base, bots) {
+  if (base.error || REFUSED(base.status)) return [f('ai-ua-blocked', SEV.INFO, `the UA probe has no baseline: the default fetch answered ${base.error ? 'with a fetch error' : `HTTP ${base.status}`}`)];
+  const out = bots.filter((b) => !b.error && REFUSED(b.status)).map((b) => f('ai-ua-blocked', SEV.WARN, `${b.bot} gets HTTP ${b.status} on / where a default fetch gets HTTP ${base.status} — an edge rule refuses it whatever robots.txt says`));
+  return out.length ? out : [f('ai-ua-blocked', SEV.OK, `${bots.length} answer-bot user agents get what a default fetch gets`)];
 }
 
 export function analyzeSitemap({ status, body }) {

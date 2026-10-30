@@ -7,18 +7,28 @@ import fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import {
   SEV, T1_CHECKS, analyzePage, analyzeRobots, analyzeSitemap, analyzeLlms, analyzeRedirects,
-  safe, annotations, SUMMARY_CAP, fitReport,
+  safe, annotations, SUMMARY_CAP, fitReport, spreadSample, parseTemplateMap, samplePerTemplate,
+  analyzeSitemapLastmod, analyzeAiUaProbe,
 } from './checks.mjs';
 import {
   analyzeAgentHome, analyzeWebmcp, analyzeMarkdownNegotiation, analyzeMarkdown404, analyzeContentSignal,
   analyzeLlmsGuidance, parseSkillsIndex, gradeSkillArtifacts, analyzeArd, analyzeTrustPages,
-  analyzeSitemapLastmod, sameSite,
+  sameSite,
 } from './agent.mjs';
 
 const env = process.env;
 const FAIL_ON_CRITICAL = env.FAIL_ON_CRITICAL === 'true';
 const MAX_URLS = Math.max(1, parseInt(env.MAX_URLS || '15', 10) || 15);
 const VERIFY_TOKEN = env.VERIFY_TOKEN || '';
+const SITEMAP_SAMPLE = Math.max(0, parseInt(env.SITEMAP_SAMPLE ?? '10', 10) || 0);
+const SAMPLE_PER_TEMPLATE = Math.max(0, parseInt(env.SAMPLE_PER_TEMPLATE || '0', 10) || 0);
+const AI_UA_PROBE = env.AI_UA_PROBE === 'true';
+const AI_PROBE_UAS = [
+  ['GPTBot', 'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.3; +https://openai.com/gptbot)'],
+  ['OAI-SearchBot', 'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; OAI-SearchBot/1.3; +https://openai.com/searchbot)'],
+  ['ClaudeBot', 'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0; +claudebot@anthropic.com)'],
+  ['PerplexityBot', 'Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)'],
+];
 const CRITICAL_CHECKS = (env.CRITICAL_CHECKS || '').split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
 
 // The report goes to the job LOG always, and to the step summary when there is one. The summary
@@ -107,7 +117,7 @@ async function probeRedirect(label, host, startUrl) {
 }
 
 // ---- build the URL list ----
-async function expandSitemap(sm) {
+async function expandSitemap(sm, maxChildren = 5) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const r = await fetchPage(sm);
     if (!r.error && r.status >= 200 && r.status < 300) {
@@ -115,7 +125,7 @@ async function expandSitemap(sm) {
       // a sitemap index points to child sitemaps — expand one level
       if (/<sitemapindex\b/i.test(r.body) && locs.length) {
         const kids = [];
-        for (const child of locs.slice(0, 5)) {
+        for (const child of locs.slice(0, maxChildren)) {
           const cr = await fetchPage(child);
           if (!cr.error) kids.push(...extractLocs(cr.body));
         }
@@ -158,7 +168,17 @@ function finish(code) {
   let urls = [];
   let sitemapTotal = 0;
   const inputGiven = !!(env.URLS || env.SITEMAP_URL);
-  if (env.SITEMAP_URL) { const all = await expandSitemap(env.SITEMAP_URL); sitemapTotal = all.length; urls.push(...all); }
+  const templates = parseTemplateMap(env.TEMPLATE_MAP);
+  let templateGroups = 0;
+  if (env.SITEMAP_URL) {
+    const all = await expandSitemap(env.SITEMAP_URL, SAMPLE_PER_TEMPLATE ? 50 : 5);
+    sitemapTotal = all.length;
+    if (SAMPLE_PER_TEMPLATE) {
+      const s = samplePerTemplate(all, SAMPLE_PER_TEMPLATE, templates.rules);
+      templateGroups = s.groups;
+      urls.push(...s.urls);
+    } else urls.push(...all);
+  }
   if (env.URLS) urls.push(...env.URLS.split(/[\s]+/));
   urls = [...new Set(urls.map((u) => u.trim()).filter(Boolean))];
   const truncated = urls.length > MAX_URLS;
@@ -179,6 +199,8 @@ function finish(code) {
 
   note(`- mode: ${FAIL_ON_CRITICAL ? '**BLOCK on critical**' : 'report-only (never blocks)'}`);
   note(`- pages checked: ${urls.length}${truncated ? ` (capped at max-urls=${MAX_URLS} of ${sitemapTotal} in sitemap — partial coverage)` : ''}`);
+  if (templateGroups) note(`- sampled: up to ${SAMPLE_PER_TEMPLATE} per template across ${templateGroups} template(s), from ${sitemapTotal} sitemap URLs`);
+  if (templates.bad.length) note(`- ⚠️ ignored \`template-map\` line(s): ${templates.bad.map((b) => `\`${safe(b, 60)}\``).join(', ')}`);
   if (CRITICAL_CHECKS.length) {
     const ok = CRITICAL_CHECKS.filter((c) => T1_CHECKS.has(c));
     const bad = CRITICAL_CHECKS.filter((c) => !T1_CHECKS.has(c));
@@ -245,6 +267,8 @@ function finish(code) {
     for (const sm of smCandidates) { const rr = await fetchPage(sm); if (!rr.error && rr.status >= 200 && rr.status < 300 && /<(sitemapindex|urlset)\b/i.test(rr.body)) { smResp = rr; break; } }
     hostFindings.push(analyzeSitemap(smResp));
 
+    hostFindings.push(...await sitemapDepth(smResp));
+
     const llmsResp = await fetchPage(origin + '/llms.txt');
     hostFindings.push(...analyzeLlms(llmsResp.error ? { status: 0, body: '' } : llmsResp));
     siteFiles.set(origin, { robotsResp, smResp, llmsResp });
@@ -258,6 +282,7 @@ function finish(code) {
         probeRedirect('host', host, `https://${host === www ? apex : www}/`),
       ]);
       hostFindings.push(...analyzeRedirects(probes));
+      if (AI_UA_PROBE) hostFindings.push(...analyzeAiUaProbe(...await probeAiUas(origin)));
 
       // trailing-slash consistency: toggle the slash on a sampled inner page; if BOTH forms
       // serve 200 (neither redirects to the other), the canonical form is ambiguous → advisory.
@@ -293,7 +318,8 @@ function finish(code) {
   }
 
   // ---- cross-page duplicate detection (group by canonical to exclude hreflang alternates) ----
-  const dupNote = [];
+  const crossPage = [];
+  const cross = (id, msg) => crossPage.push({ id, sev: SEV.WARN, msg });
   for (const [field, label] of [['title', 'title'], ['desc', 'meta description']]) {
     const byVal = new Map();
     for (const p of pages) {
@@ -302,7 +328,7 @@ function finish(code) {
       if (!byVal.has(v)) byVal.set(v, new Set());
       byVal.get(v).add(key);
     }
-    for (const [v, keys] of byVal) if (keys.size > 1) dupNote.push(`- ⚠️ \`duplicate-${field === 'title' ? 'title' : 'meta'}\` — ${keys.size} pages share the same ${label}: "${safe(v, 60)}"`);
+    for (const [v, keys] of byVal) if (keys.size > 1) cross(`duplicate-${field === 'title' ? 'title' : 'meta'}`, `${keys.size} pages share the same ${label}: "${safe(v, 60)}"`);
   }
   // hreflang reciprocity within the sampled set: if A lists B as an alternate but B (also in
   // the sample) doesn't link back, the cluster is non-reciprocal (Google ignores one-way pairs).
@@ -311,7 +337,7 @@ function finish(code) {
     const a = norm2(p.finalUrl);
     for (const h of (p.hreflang || [])) {
       const b = norm2(h.href);
-      if (b && b !== a && byUrl.has(b) && !byUrl.get(b).has(a)) dupNote.push(`- ⚠️ \`hreflang-reciprocity\` — ${safe(p.finalUrl)} lists ${safe(h.href)} as an alternate, but that page doesn't link back`);
+      if (b && b !== a && byUrl.has(b) && !byUrl.get(b).has(a)) cross('hreflang-reciprocity', `${safe(p.finalUrl)} lists ${safe(h.href)} as an alternate, but that page doesn't link back`);
     }
   }
   // canonical-target resolution: a canonical pointing to a same-host URL that doesn't 200 is a
@@ -326,9 +352,14 @@ function finish(code) {
   }
   for (const href of [...canonTargets.values()].slice(0, 10)) {
     const r = await fetchPage(href);
-    if (r.error || !(r.status >= 200 && r.status < 300)) dupNote.push(`- ⚠️ \`canonical-resolve\` — canonical target ${safe(href)} returned ${r.error ? 'a fetch error' : 'HTTP ' + r.status} (canonical points to a non-200 URL)`);
+    if (r.error || !(r.status >= 200 && r.status < 300)) cross('canonical-resolve', `canonical target ${safe(href)} returned ${r.error ? 'a fetch error' : 'HTTP ' + r.status} (canonical points to a non-200 URL)`);
   }
-  if (dupNote.length) { note(''); note('### Cross-page & canonical resolution'); [...new Set(dupNote)].forEach((d) => { note('  ' + d); warn++; }); }
+  const crossFindings = [...new Map(crossPage.map((x) => [`${x.id}\n${x.msg}`, x])).values()].map(elevate);
+  if (crossFindings.length) {
+    note(''); note('### Cross-page & canonical resolution');
+    tally(crossFindings, origins[0] || '');
+    renderFindings(crossFindings);
+  }
 
   // ---- verdict ----
   note('');
@@ -344,6 +375,47 @@ function finish(code) {
   try { flush(); } catch { /* summary sink unwritable; the job log already has the report */ }
   process.exit(FAIL_ON_CRITICAL ? 1 : 0);
 });
+
+// The whole sitemap, not its front: every urlset's <lastmod>, and a sample of its URLs spread from
+// first to last. A URL that answered like a WAF is not a dead one, so only what looked is graded.
+async function sitemapDepth(smResp) {
+  if (!ok2xx(smResp.status)) return [];
+  const sets = [];
+  if (/<sitemapindex\b/i.test(smResp.body)) {
+    for (const child of extractLocs(smResp.body).slice(0, 50)) {
+      const c = await fetchPage(child);
+      if (!c.error && ok2xx(c.status)) sets.push(c.body);
+    }
+  } else sets.push(smResp.body);
+  const out = [...analyzeSitemapLastmod(sets)];
+  const locs = [...new Set(sets.flatMap(extractLocs))];
+  const sample = spreadSample(locs, SITEMAP_SAMPLE);
+  if (!sample.length) return out;
+  const dead = [];
+  let looked = 0;
+  for (const u of sample) {
+    const r = await fetchPage(u);
+    if (couldNotLook(r)) continue;
+    looked++;
+    if (!ok2xx(r.status)) dead.push(`${safe(u, 120)} HTTP ${r.status}`);
+  }
+  if (dead.length) out.push({ id: 'sitemap-url-status', sev: SEV.WARN, msg: `${dead.length} of ${looked} sitemap URLs sampled across ${locs.length} did not answer 200: ${dead.slice(0, 5).join(', ')}` });
+  else out.push({ id: 'sitemap-url-status', sev: SEV.OK, msg: `${looked} of ${locs.length} sitemap URLs sampled, all 200` });
+  return out;
+}
+
+// `/` once per answer-bot UA and once from the default UA, none with the WAF token: the token is what
+// a real bot does not have. One hop, as a refusal is the first answer an edge gives.
+async function probeAiUas(origin) {
+  const one = async (ua) => {
+    try { const r = await fetch(`${origin}/`, { headers: { 'user-agent': ua }, redirect: 'manual', signal: AbortSignal.timeout(25000) }); await r.arrayBuffer(); return { status: r.status }; }
+    catch (e) { return { error: e.message || String(e) }; }
+  };
+  const base = await one(baseHeaders['user-agent']);
+  const bots = [];
+  for (const [bot, ua] of AI_PROBE_UAS) bots.push({ bot, ...await one(ua) });
+  return [base, bots];
+}
 
 // ---- agent readiness for one origin: fetch the agent-facing surface, agent.mjs grades it ----
 // Same origin only (a skill on another host is listed, never fetched). A leg that could not look is a
@@ -419,16 +491,6 @@ async function agentReadiness(origin, { robotsResp, smResp, llmsResp }) {
   if (trustWhy) cnl('agent-trust-pages', 'the trust pages', trustWhy);
   else out.push(...analyzeTrustPages(trust));
 
-  // <lastmod> on the sitemap's entries (an index: its first child sitemap)
-  if (ok2xx(smResp.status)) {
-    let urlset = smResp.body;
-    if (/<sitemapindex\b/i.test(urlset)) {
-      const first = extractLocs(urlset)[0];
-      const child = first ? await fetchPage(first) : { error: 'no child sitemap' };
-      urlset = !child.error && ok2xx(child.status) ? child.body : '';
-    }
-    out.push(...analyzeSitemapLastmod(urlset));
-  }
   return out;
 }
 

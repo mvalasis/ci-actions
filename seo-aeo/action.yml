@@ -24,9 +24,30 @@ inputs:
     required: false
     default: 'false'
   max-urls:
-    description: 'Cap the number of URLs checked (sampled from the front of the list/sitemap).'
+    description: 'Cap the number of URLs checked (from the front of the list/sitemap, unless sample-per-template is set).'
     required: false
     default: '15'
+  sitemap-sample:
+    description: 'URLs spread across the WHOLE sitemap to check for a 200 (sitemap-url-status). 0 = off.'
+    required: false
+    default: '10'
+  sample-per-template:
+    description: >-
+      With sitemap-url: check this many URLs per template instead of the front of the sitemap, so the
+      type checks reach product, article and job pages. Templates are the first path segment, or
+      template-map. max-urls still caps the run. 0 = off.
+    required: false
+    default: '0'
+  template-map:
+    description: 'Optional `path regex -> label` lines, first match wins, for sample-per-template.'
+    required: false
+    default: ''
+  ai-ua-probe:
+    description: >-
+      true = fetch / once per answer-bot user agent, without the verify-token, and WARN (ai-ua-blocked)
+      when an edge rule refuses one that a default fetch is served.
+    required: false
+    default: 'false'
   verify-token:
     description: 'Optional WAF/CF-bypass token, sent as the X-Verify-Source header to the checked host (Cloudflare-tunnel / WAF-fronted origins).'
     required: false
@@ -41,7 +62,10 @@ inputs:
       meta-description, html-lang, viewport, jsonld-valid, og-core, robots-txt, sitemap,
       robots-sitemap-directive, redirect-consistency, external-webfont, agent-markdown,
       agent-skills-index, agent-ard, agent-content-signal (an agent check that is absent is
-      INFO and never elevated, so promoting one blocks only a broken or regressed adoption).
+      INFO and never elevated, so promoting one blocks only a broken or regressed adoption),
+      search-engine-blocked, ai-crawler-allowlist, llms-txt, jsonld-type, entity-sameas,
+      ai-ua-blocked, sitemap-lastmod, sitemap-url-status, duplicate-title, duplicate-meta,
+      hreflang-reciprocity, canonical-resolve.
     required: false
     default: ''
 
@@ -62,5 +86,9 @@ runs:
         FAIL_ON_CRITICAL: ${{ inputs.fail-on-critical }}
         MAX_URLS: ${{ inputs.max-urls }}
         VERIFY_TOKEN: ${{ inputs.verify-token }}
+        SITEMAP_SAMPLE: ${{ inputs.sitemap-sample }}
+        SAMPLE_PER_TEMPLATE: ${{ inputs.sample-per-template }}
+        TEMPLATE_MAP: ${{ inputs.template-map }}
+        AI_UA_PROBE: ${{ inputs.ai-ua-probe }}
         CRITICAL_CHECKS: ${{ inputs.critical-checks }}
       run: node "${{ github.action_path }}/scripts/check.mjs"

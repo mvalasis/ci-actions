@@ -17,7 +17,8 @@ everything else reports without ever blocking, and a clean caller can opt indivi
 |---|---|---|
 | **T0 — CRITICAL** | blocks when `fail-on-critical: true` | `http-200` (page resolves to a real 2xx — a WAF 403/429/timeout is downgraded to infra-WARN, not a block), `title-present`, `h1-present` |
 | **T1 — promotable WARN** | reports; a caller may elevate any of these to CRITICAL via `critical-checks` | `noindex`, `single-h1`, `canonical-present`, `canonical-valid`, `meta-description`, `html-lang`, `viewport`, `jsonld-valid`, `og-core`, `robots-txt`, `sitemap`, `robots-sitemap-directive`, `redirect-consistency`, `external-webfont`, and the agent-readiness four (v1.29.0): `agent-markdown`, `agent-skills-index`, `agent-ard`, `agent-content-signal` |
-| **T2 — advisory WARN/INFO** | reports only, never promotable | length bounds, `charset`, `mixed-content`, `canonical-resolve`, `hreflang`/`hreflang-reciprocity`, `jsonld-type`/`jsonld-fields`/`jsonld-present` (Microdata/RDFa-aware), `entity-sameas`, `twitter-card`, `img-alt`, duplicate title/meta, `search-engine-blocked`, `ai-crawler-allowlist`, `search-verification`, `llms-txt`/`llms-structure`, `trailing-slash`, `soft-404`, `semantic-landmark`, `heading-hierarchy`, freshness, `jsonld-retired`, and agent readiness: `entity-fields`, `homepage-type-breadth`, `sitemap-lastmod`, `agent-link-headers`, `agent-webmcp`, `agent-markdown-404`, `agent-llms-guidance`, `agent-trust-pages` |
+| **T1 — access and answers** (v1.30.0) | as above | `search-engine-blocked`, `ai-crawler-allowlist` (its answer-bot and user-fetcher WARN; the training-bot INFO stays a policy choice), `llms-txt`, `jsonld-type`, `entity-sameas`, `ai-ua-blocked`, `sitemap-lastmod`, `sitemap-url-status`, `duplicate-title`, `duplicate-meta`, `hreflang-reciprocity`, `canonical-resolve` |
+| **T2 — advisory WARN/INFO** | reports only, never promotable | length bounds, `charset`, `mixed-content`, `hreflang`, `jsonld-fields`/`jsonld-present` (Microdata/RDFa-aware), `entity-sameas`, `twitter-card`, `img-alt`, duplicate title/meta, `search-engine-blocked`, `ai-crawler-allowlist`, `search-verification`, `llms-txt`/`llms-structure`, `trailing-slash`, `soft-404`, `semantic-landmark`, `heading-hierarchy`, freshness, `jsonld-retired`, and agent readiness: `entity-fields`, `homepage-type-breadth`, `sitemap-lastmod`, `agent-link-headers`, `agent-webmcp`, `agent-markdown-404`, `agent-llms-guidance`, `agent-trust-pages` |
 
 **`external-webfont` (v1.28.0)** flags, in the served JS-disabled HTML, any `<link>` (`rel` stylesheet / preload /
 preconnect / dns-prefetch — the `media="print" onload=…` async loader is still a `rel=stylesheet` link) or inline
@@ -28,6 +29,17 @@ each request hands the visitor's IP to a third party and puts a CSS→font chain
 page: the reference count, the host(s), and up to 3 distinct URLs (sanitised like every page-controlled string).
 Self-hosted `@font-face` and same-origin `/fonts/…` never fire. Default **WARN**, so a caller is never newly-blocked;
 `critical-checks: external-webfont` makes it block once the caller's own pages are clean.
+
+**`sitemap-lastmod` (v1.30.0)** reads every urlset, up to 50 children of an index, and WARNs when under
+80% of `<url>` entries carry a valid W3C date. Until v1.30.0 it read one child and only said so when
+no entry had one, as an INFO. **The robots.txt lists** moved with it: `ChatGPT-User`, `Claude-User` and
+`Perplexity-User` fetch a page because a person asked about it, so they left the training list for a
+WARN of their own, joined by `MistralAI-User` and `DuckAssistBot`; `Applebot` joined the answer bots.
+A site that blocks one now draws a WARN it did not draw before, which still blocks nobody by default.
+
+**JSON-LD fields** cover Product, Article, BreadcrumbList and FAQPage, and since v1.30.0 the fields
+Google documents for JobPosting, LocalBusiness, Store, Organization, WebSite, ItemList and a standalone
+Offer. It stays a `jsonld-fields` WARN, and full schema.org validation stays out of scope.
 
 **Scope — this is a detector, not a generator.** It *flags* a missing/poor meta description, an
 absent sitemap, a noindex, a dead canonical; it never *authors* copy or *creates* a sitemap —
@@ -84,6 +96,10 @@ jobs:
 | `fail-on-critical` | `false` | `true` = BLOCK on any CRITICAL (HTTP non-2xx, missing title/h1, or a promoted check). |
 | `max-urls` | `15` | Cap; sampled from the front of the list/sitemap. Partial coverage is noted in the report. |
 | `verify-token` | `''` | Sent as `X-Verify-Source` (+ a benign `_lscache_vary` cookie) **only to the checked host** — clears a Cloudflare/LiteSpeed bot-challenge. |
+| `sitemap-sample` | `10` | URLs spread from first to last across the whole sitemap, checked for a 200 (`sitemap-url-status`). A WAF or transient answer is not counted as dead. `0` = off. |
+| `sample-per-template` | `0` | With `sitemap-url`: K URLs per template instead of the sitemap's front, so the type checks reach product, article and job pages. An index is read to 50 child sitemaps. `max-urls` still caps the run, round-robin, so a cut loses depth before it loses a template. |
+| `template-map` | `''` | `path regex -> label` lines, first match wins, for `sample-per-template`. Without one a template is the first path segment. A line it cannot use is named in the report. |
+| `ai-ua-probe` | `false` | Fetch `/` once per answer-bot user agent (GPTBot, OAI-SearchBot, ClaudeBot, PerplexityBot) without the `verify-token`, and WARN (`ai-ua-blocked`) when a bot is refused where a default fetch is served: robots.txt can allow what an edge rule answers 403. |
 | `critical-checks` | `''` | Comma/space list of **T1** check IDs to elevate to CRITICAL for **this** caller. Advisory (T2) / unknown IDs are reported and ignored. Empty = never newly-blocked. |
 
 ## Promoting checks per-caller (without forking)
@@ -184,7 +200,6 @@ the caller promoted that id, because a promoted check never passes on a response
 | `agent-webmcp` | T2 | `<form toolname>`, and `modelContext.registerTool` inline or in ≤6 same-origin bundles (`modulepreload` included) | no tool | — |
 | `agent-llms-guidance` | T2 | an llms.txt `##` heading such as "When to use (for AI agents)" | none | — |
 | `agent-trust-pages` | T2 | `/about`, `/contact`, `/privacy`, redirects followed (a page on another host counts as missing) | missing, or under 500 chars outside nav/header/footer | — |
-| `sitemap-lastmod` | T2 | `<lastmod>` in the sitemap (of an index: its first child) | no entry dated | — |
 | `entity-fields` | T2 | the homepage JSON-LD entity nodes (a field on any of them counts) | no address / contactPoint (never asked of a Person) | no `description` |
 | `homepage-type-breadth` | T2 | the homepage JSON-LD types | only the entity and WebSite | — |
 

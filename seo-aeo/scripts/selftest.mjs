@@ -11,10 +11,11 @@ import { fileURLToPath } from 'node:url';
 import {
   SEV, T0_CHECKS, T1_CHECKS, analyzePage, analyzeRobots, analyzeLlms, analyzeSitemap, analyzeRedirects,
   collectLdNodes, typesOf, safe, escapeData, escapeProperty, annotation, annotations, fitReport,
+  spreadSample, parseTemplateMap, templateOf, samplePerTemplate, analyzeSitemapLastmod, analyzeAiUaProbe,
 } from './checks.mjs';
 import {
   parseLinkHeader, analyzeAgentHome, analyzeWebmcp, analyzeMarkdownNegotiation, analyzeMarkdown404, analyzeContentSignal,
-  analyzeLlmsGuidance, parseSkillsIndex, gradeSkillArtifacts, sha256hex, analyzeArd, analyzeTrustPages, analyzeSitemapLastmod,
+  analyzeLlmsGuidance, parseSkillsIndex, gradeSkillArtifacts, sha256hex, analyzeArd, analyzeTrustPages,
 } from './agent.mjs';
 
 let failed = 0;
@@ -40,7 +41,7 @@ console.log('\n# page analyzer');
 
 // 1. clean homepage is pristine (low false-positive rate is the whole point)
 {
-  const fs = P(HEAD(`<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","name":"Brand","url":"https://example.com/","description":"What Brand does, in one sentence.","address":{"@type":"PostalAddress","addressCountry":"GR"},"contactPoint":{"@type":"ContactPoint","contactType":"customer service","email":"hi@example.com"},"sameAs":["https://www.linkedin.com/company/brand"]},{"@type":"WebSite","url":"https://example.com/"},{"@type":"ItemList","itemListElement":[]}]}</script>`), { url: 'https://example.com/', finalUrl: 'https://example.com/' }).findings;
+  const fs = P(HEAD(`<script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"Organization","name":"Brand","url":"https://example.com/","logo":"https://example.com/l.png","description":"What Brand does, in one sentence.","address":{"@type":"PostalAddress","addressCountry":"GR"},"contactPoint":{"@type":"ContactPoint","contactType":"customer service","email":"hi@example.com"},"sameAs":["https://www.linkedin.com/company/brand"]},{"@type":"WebSite","name":"Brand","url":"https://example.com/"},{"@type":"ItemList","itemListElement":[{"@type":"ListItem","position":1,"name":"One"}]}]}</script>`), { url: 'https://example.com/', finalUrl: 'https://example.com/' }).findings;
   const noisy = fs.filter((x) => x.sev !== SEV.OK);
   check('clean page → zero crit/warn/info', noisy.length === 0, `got: ${JSON.stringify(noisy.map((x) => x.id + ':' + x.sev))}`);
 }
@@ -327,7 +328,7 @@ const only = (fs, id) => [...new Set(sevOf(fs, id))].sort().join(',');   // the 
   check('one 404 → INFO naming it', only(analyzeTrustPages(pages({ '/privacy': { status: 404 } })), 'agent-trust-pages') === SEV.INFO && analyzeTrustPages(pages({ '/privacy': { status: 404 } }))[0].msg.includes('/privacy'));
   check('mutant: a page whose length is all nav/footer chrome is thin → INFO', only(analyzeTrustPages(pages({ '/about': { html: `<html><body><nav>${'menu '.repeat(200)}</nav><p>short</p><footer>${'footer '.repeat(200)}</footer></body></html>` } })), 'agent-trust-pages') === SEV.INFO);
   check('a redirect to another host does not count → INFO', only(analyzeTrustPages(pages({ '/contact': { offSite: true } })), 'agent-trust-pages') === SEV.INFO);
-  check('a sitemap without lastmod → INFO sitemap-lastmod', only(analyzeSitemapLastmod('<urlset><url><loc>https://e/</loc></url></urlset>'), 'sitemap-lastmod') === SEV.INFO);
+  check('a sitemap without lastmod → WARN sitemap-lastmod', only(analyzeSitemapLastmod('<urlset><url><loc>https://e/</loc></url></urlset>'), 'sitemap-lastmod') === SEV.WARN);
   check('a sitemap with lastmod → OK', only(analyzeSitemapLastmod('<urlset><url><loc>https://e/</loc><lastmod>2026-10-08</lastmod></url></urlset>'), 'sitemap-lastmod') === SEV.OK);
   check('a sitemap index (no <url>) → nothing graded here', analyzeSitemapLastmod('<sitemapindex><sitemap><loc>x</loc></sitemap></sitemapindex>').length === 0);
 }
@@ -345,13 +346,52 @@ const only = (fs, id) => [...new Set(sevOf(fs, id))].sort().join(',');   // the 
   check('inner pages are not graded for entity fields', !ids(P(HEAD('<script type="application/ld+json">{"@type":"Organization","name":"B"}</script>')).findings).includes('entity-fields'));
 }
 
+console.log('\n# #16 — AEO promotion, bot lists, sitemap depth, UA probe, template sampling, JSON-LD fields');
+{
+  for (const id of ['search-engine-blocked', 'ai-crawler-allowlist', 'llms-txt', 'jsonld-type', 'entity-sameas', 'ai-ua-blocked', 'sitemap-lastmod', 'sitemap-url-status', 'duplicate-title', 'duplicate-meta', 'hreflang-reciprocity', 'canonical-resolve']) check(`${id} is promotable`, T1_CHECKS.has(id));
+  const robots = (bot) => analyzeRobots({ status: 200, body: `User-agent: ${bot}\nDisallow: /\n\nUser-agent: *\nAllow: /\nSitemap: https://x.test/s.xml\n` }).findings;
+  for (const bot of ['ChatGPT-User', 'Claude-User', 'Perplexity-User', 'MistralAI-User', 'DuckAssistBot', 'Applebot']) {
+    check(`${bot} blocked is a WARN: it hides the site from an answer`, sevOf(robots(bot), 'ai-crawler-allowlist').join() === 'warn', JSON.stringify(robots(bot)));
+  }
+  for (const bot of ['GPTBot', 'ClaudeBot', 'Applebot-Extended']) check(`${bot} blocked stays an INFO: a policy choice`, sevOf(robots(bot), 'ai-crawler-allowlist').join() === 'info');
+
+  check('spreadSample: first and last in, evenly', spreadSample([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 3).join() === '0,5,10');
+  check('…a short list whole, 0 nothing, 1 the first', spreadSample([1, 2], 5).join() === '1,2' && spreadSample([1, 2], 0).length === 0 && spreadSample([1, 2, 3], 1).join() === '1');
+  const set = (n, stamp) => `<urlset>${Array.from({ length: n }, (_, i) => `<url><loc>https://x.test/${i}</loc>${stamp(i)}</url>`).join('')}</urlset>`;
+  check('sitemap-lastmod: none is a WARN', sevOf(analyzeSitemapLastmod(set(5, () => '')), 'sitemap-lastmod').join() === 'warn');
+  check('…at the threshold, OK; one under, a WARN', sevOf(analyzeSitemapLastmod(set(5, (i) => (i < 4 ? '<lastmod>2026-10-01</lastmod>' : ''))), 'sitemap-lastmod').join() === 'ok'
+    && sevOf(analyzeSitemapLastmod(set(5, (i) => (i < 3 ? '<lastmod>2026-10-01</lastmod>' : ''))), 'sitemap-lastmod').join() === 'warn');
+  check('…an invalid date does not count; a full W3C datetime does', sevOf(analyzeSitemapLastmod(set(2, () => '<lastmod>yesterday</lastmod>')), 'sitemap-lastmod').join() === 'warn'
+    && sevOf(analyzeSitemapLastmod(set(2, () => '<lastmod>2026/10/01</lastmod>')), 'sitemap-lastmod').join() === 'warn'
+    && sevOf(analyzeSitemapLastmod(set(2, () => '<lastmod>2026-10-01T10:00:00+03:00</lastmod>')), 'sitemap-lastmod').join() === 'ok');
+  check('…several urlsets count as one; no entry is no finding', sevOf(analyzeSitemapLastmod([set(4, () => '<lastmod>2026-10-01</lastmod>'), set(1, () => '')]), 'sitemap-lastmod').join() === 'ok' && analyzeSitemapLastmod('').length === 0);
+
+  check('ai-ua-probe: a bot refused where the default is served is a WARN naming it', analyzeAiUaProbe({ status: 200 }, [{ bot: 'GPTBot', status: 403 }, { bot: 'ClaudeBot', status: 200 }]).map((x) => `${x.sev}:${/GPTBot/.test(x.msg)}`).join() === 'warn:true');
+  check('…a redirect is not a refusal; no mismatch is OK', analyzeAiUaProbe({ status: 200 }, [{ bot: 'GPTBot', status: 301 }])[0].sev === SEV.OK);
+  check('…a refused baseline proves nothing, an INFO', analyzeAiUaProbe({ status: 403 }, [{ bot: 'GPTBot', status: 403 }])[0].sev === SEV.INFO);
+
+  const us = ['/product/a', '/product/b', '/product/c', '/blog/x', '/', '/jobs/1'].map((p) => `https://x.test${p}`);
+  check('samplePerTemplate: one per first segment, every group in', samplePerTemplate(us, 1).groups === 4 && samplePerTemplate(us, 1).urls.length === 4);
+  check('…K per group, round-robin so a cut keeps every template', samplePerTemplate(us, 2).urls.slice(0, 4).map((u) => templateOf(u)).join() === 'product,blog,/,jobs');
+  const map = parseTemplateMap('^/(product|shop)/ -> catalog\n([bad -> x\nno arrow');
+  check('parseTemplateMap: a rule, and what it could not use handed back', map.rules.length === 1 && map.bad.length === 2 && templateOf('https://x.test/shop/1', map.rules) === 'catalog' && templateOf('https://x.test/blog/1', map.rules) === 'blog');
+
+  const ld = (o) => `<script type="application/ld+json">${JSON.stringify({ '@context': 'https://schema.org', ...o })}</script>`;
+  const fields = (o) => analyzePage({ requestUrl: 'https://example.com/page/', finalUrl: 'https://example.com/page/', status: 200, headers: {}, html: `<!doctype html><html lang="en"><head><title>A page with a title</title>${ld(o)}</head><body><h1>x</h1></body></html>` }).findings.filter((x) => x.id === 'jsonld-fields').map((x) => x.msg).join(' | ');
+  check('JobPosting: each required field, location either way', /title, description, datePosted, hiringOrganization, validThrough, jobLocation\/jobLocationType/.test(fields({ '@type': 'JobPosting' }))
+    && fields({ '@type': 'JobPosting', title: 't', description: 'd', datePosted: 'x', hiringOrganization: {}, validThrough: 'y', jobLocationType: 'TELECOMMUTE' }) === '');
+  check('LocalBusiness and Store', /LocalBusiness JSON-LD missing address, telephone/.test(fields({ '@type': 'LocalBusiness', name: 'n' })) && /Store JSON-LD missing name, address, telephone/.test(fields({ '@type': 'Store' })));
+  check('Organization, WebSite, ItemList', /Organization JSON-LD missing logo/.test(fields({ '@type': 'Organization', name: 'n', url: 'u' })) && /WebSite JSON-LD missing url/.test(fields({ '@type': 'WebSite', name: 'n' })) && /ItemList JSON-LD missing itemListElement/.test(fields({ '@type': 'ItemList' })));
+  check('a standalone Offer', /Offer missing price/.test(fields({ '@type': 'Offer' })) && /Offer missing priceCurrency/.test(fields({ '@type': 'Offer', price: 1 })) && fields({ '@type': 'Offer', price: 1, priceCurrency: 'EUR' }) === '');
+}
+
 console.log('\n# severity-tier contract');
 check('T0 core is exactly {http-200,title-present,h1-present}', [...T0_CHECKS].sort().join(',') === 'h1-present,http-200,title-present');
 check('promotable T1 set excludes T0 ids', ![...T0_CHECKS].some((c) => T1_CHECKS.has(c)));
 check('noindex is promotable (T1), title-length is not', T1_CHECKS.has('noindex') && !T1_CHECKS.has('title-length'));
 check('external-webfont is promotable T1 and never a T0 (default WARN)', T1_CHECKS.has('external-webfont') && !T0_CHECKS.has('external-webfont'));
 check('the four agent WARNs are promotable T1', ['agent-markdown', 'agent-skills-index', 'agent-ard', 'agent-content-signal'].every((c) => T1_CHECKS.has(c) && !T0_CHECKS.has(c)));
-check('the other agent ids stay advisory (never promotable)', ['agent-link-headers', 'agent-webmcp', 'agent-llms-guidance', 'agent-trust-pages', 'agent-markdown-404', 'sitemap-lastmod', 'entity-fields', 'homepage-type-breadth'].every((c) => !T1_CHECKS.has(c)));
+check('the other agent ids stay advisory (never promotable)', ['agent-link-headers', 'agent-webmcp', 'agent-llms-guidance', 'agent-trust-pages', 'agent-markdown-404', 'entity-fields', 'homepage-type-breadth'].every((c) => !T1_CHECKS.has(c)));
 {
   // the promise behind promoting them: a site that adopted NONE of the four yields only INFO under their ids
   const absent = [
@@ -465,6 +505,10 @@ console.log('\n# check.mjs end to end — the job log carries the report; CRITIC
     const base = `http://${req.headers.host}`;
     if (req.url === '/ok/') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(OK(`${base}/ok/`)); return; }
     if (req.url === '/gfont/') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(OK(`${base}/gfont/`).replace('</head>', '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter&display=swap"></head>')); return; }
+    if (req.url === '/dup-a/' || req.url === '/dup-b/') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(OK(`${base}${req.url}`)); return; }
+    if (req.url === '/sm.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); res.end(`<urlset>${['ok', 'dup-a', 'dup-b', 'blog/1', 'blog/2', 'gone-at-the-end'].map((p) => `<url><loc>${base}/${p}/</loc></url>`).join('')}</urlset>`); return; }
+    if (req.url === '/robots.txt' && process.env.SEO_E2E_BLOCK) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('User-agent: Googlebot\nDisallow: /\n'); return; }
+    if (req.url === '/' && /GPTBot/.test(req.headers['user-agent'] || '')) { res.writeHead(403); res.end('no'); return; }
     if (req.url === '/hostile/') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(HOSTILE); return; }
     if (req.url === '/empty-sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); res.end('<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>'); return; }
     res.writeHead(404, { 'content-type': 'text/html' }); res.end('<html><head><title>404</title></head><body><h1>Not found</h1></body></html>');
@@ -494,6 +538,19 @@ console.log('\n# check.mjs end to end — the job log carries the report; CRITIC
   // A line the runner would read as a command: `::` after leading whitespace, or `##[` anywhere.
   const commands = (text) => text.split('\n').filter((l) => /^\s*::/.test(l) || l.includes('##['));
   const why = (r) => `exit ${r.status}, ${r.stdout.length} B stdout, stderr ${JSON.stringify(r.stderr.split('\n').find((l) => l.trim()) || '')}`;
+  // #16 end to end: a seeded defect warns by default, and a caller who promotes the id blocks on it.
+  const d = await run({ URLS: `${BASE}/dup-a/ ${BASE}/dup-b/`, FAIL_ON_CRITICAL: 'true' });
+  check('cross-page: duplicate-title is a finding, a WARN by default', d.status === 0 && d.stdout.includes('⚠️ `duplicate-title` — 2 pages share'), why(d));
+  const dp = await run({ URLS: `${BASE}/dup-a/ ${BASE}/dup-b/`, FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: 'duplicate-title' });
+  check('…promoted, it blocks', dp.status === 1 && dp.stdout.includes('❌ `duplicate-title`') && dp.stdout.includes('BLOCKED — 1 critical'), why(dp));
+  const sm = await run({ SITEMAP_URL: `${BASE}/sm.xml`, URLS: `${BASE}/ok/`, MAX_URLS: '1', FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: 'llms-txt' });
+  check('a promoted llms-txt blocks a site with none', sm.status === 1 && sm.stdout.includes('❌ `llms-txt`'), why(sm));
+  const uaOff = await run({ URLS: `${BASE}/ok/` });
+  check('ai-ua-probe is opt-in', !uaOff.stdout.includes('ai-ua-blocked'), why(uaOff));
+  const ua = await run({ URLS: `${BASE}/ok/`, AI_UA_PROBE: 'true', FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: 'ai-ua-blocked' });
+  check('ai-ua-probe: GPTBot refused on / is named; promoted, it blocks', ua.status === 1 && ua.stdout.includes('GPTBot gets HTTP 403'), why(ua));
+  const tpl = await run({ SITEMAP_URL: `${BASE}/sm.xml`, SAMPLE_PER_TEMPLATE: '1' });
+  check('sample-per-template: the report says so, and reaches a page past the front of the sitemap', tpl.stdout.includes('per template across 5 template(s)') && tpl.stdout.includes('pages checked: 5') && tpl.stdout.includes('/gone-at-the-end/'), why(tpl));
   const HEADER = '## 🔎 seo-aeo';
   const once = (r) => r.stdout.split(HEADER).length === 2 && !r.stdout.includes('crashed');
   const URLS = `${BASE}/gone/ ${BASE}/hostile/ ${BASE}/ok/`;
@@ -599,9 +656,9 @@ console.log('\n# check.mjs end to end — the job log carries the report; CRITIC
     try {
       const ga = await run({ URLS: `${GOOD}/`, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: PROMOTE });
       const inPlace = (agentSection(ga).match(/✅ in place: (.*)/) || [])[1] || '';
-      const all = ['agent-link-headers', 'agent-webmcp', 'agent-markdown', 'agent-markdown-404', 'agent-content-signal', 'agent-llms-guidance', 'agent-skills-index', 'agent-ard', 'agent-trust-pages', 'sitemap-lastmod'];
+      const all = ['agent-link-headers', 'agent-webmcp', 'agent-markdown', 'agent-markdown-404', 'agent-content-signal', 'agent-llms-guidance', 'agent-skills-index', 'agent-ard', 'agent-trust-pages'];
       check('agent e2e, adopting site: exit 0 with all four promoted, nothing annotated', ga.status === 0 && commands(ga.stdout).length === 0, why(ga) + JSON.stringify(commands(ga.stdout)));
-      check('…all ten agent checks in place, no ℹ️/⚠️ in the agent section', all.every((id) => inPlace.includes(`\`${id}\``)) && !/^\s+- (ℹ️|⚠️)/m.test(agentSection(ga)), JSON.stringify(agentSection(ga)));
+      check('…all nine agent checks in place, no ℹ️/⚠️ in the agent section', all.every((id) => inPlace.includes(`\`${id}\``)) && !/^\s+- (ℹ️|⚠️)/m.test(agentSection(ga)), JSON.stringify(agentSection(ga)));
 
       ownTokens.length = 0;
       const gb = await run({ URLS: `${BROKEN}/`, GITHUB_ACTIONS: 'true', FAIL_ON_CRITICAL: 'true', CRITICAL_CHECKS: PROMOTE, VERIFY_TOKEN: 'e2e-agent-token' });
