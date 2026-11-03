@@ -87,6 +87,7 @@ jobs:
 | `cls-budget` | no | `0.1` | `motion` only: cumulative layout shift above this, per viewport, is a `cls` finding. |
 | `fail-on-consent` | no | `false` | Governs `consent` only. |
 | `consent-selector` | no | `''` | `consent` only: CSS selector of the banner, overriding detection. A selector that matches nothing is a note, not a finding. |
+| `consent-allow` | no | `''` | `consent` only (v1.31.0): comma list of CSS selectors of checkboxes exempt from `consent-prechecked`, for a locked always-on category the detection misses. A selector that matches no checkbox in the banner, or is not CSS, is a note, not a finding. |
 | `max-urls` | no | `12` | Cap the rendered URL count. |
 | `verify-token` | no | `''` | `X-Verify-Source`, sent **only** to the target host (+ www/apex). |
 | `wait-ms` | no | `1200` | Settle time after load+networkidle. |
@@ -397,7 +398,7 @@ banner. Smallest wins. "Manage / settings / preferences" is not a reject.
 |---|---|
 | `consent-no-reject` | an accept control is on the first layer and no reject is (the detail adds "refusing sits behind a settings control" when there is one) |
 | `consent-reject-smaller` | reject's width **or** height is under 80% of accept's (the largest accept and the largest reject are compared) |
-| `consent-prechecked` | an optional-category checkbox (`input[type=checkbox]`, `[role=checkbox|switch][aria-checked=true]`) in the banner is checked and not disabled. Always-on boxes — a label/name/id mentioning necessary / essential / required / strictly — are exempt, and so is a disabled one. One in a collapsed preferences panel inside the banner counts (the detail says so): a pre-ticked box is invalid wherever the user meets it. |
+| `consent-prechecked` | an optional-category checkbox (`input[type=checkbox]`, `[role=checkbox|switch][aria-checked=true]`) in the banner is checked and not disabled. Always-on boxes — a label/name/id mentioning necessary / essential / required / strictly — are exempt, and so is a disabled one. So is a locked category (v1.31.0): the box's row (its widest wrapper in the banner holding no other box and no accept or reject control) or its label says "always active" / "always on", or carries a class containing `always-active` — Complianz's "Functional" box is checked and not disabled, inside `.cmplz-always-active` with the text "Always active". A box the `consent-allow` input names is exempt too. One in a collapsed preferences panel inside the banner counts (the detail says so): a pre-ticked box is invalid wherever the user meets it. |
 
 **Visual weight** (filled vs outline, colour) is an `ℹ️ INFO` note and a stat, **never a finding** — whether a
 gold button beside an outline one "nudges" is a judgement call; size and position are not.

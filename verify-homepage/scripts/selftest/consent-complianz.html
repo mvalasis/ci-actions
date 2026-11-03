@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>consent fixture — Complianz (a locked always-active category)</title>
+<!-- The markup Complianz (WordPress) renders, cut down. Its strictly-necessary category is "Functional": a
+     checked box that is NOT disabled, id cmplz-functional-optin, inside .cmplz-always-active with the visible
+     text "Always active". It is NOT a finding (v1.31.0): until then the word list (necessary / essential /
+     required / strictly) never saw it, and a Complianz caller could not set fail-on-consent. "Statistics" is
+     pre-ticked in the same banner and IS a finding; "Preferences" and "Marketing" are unticked. The category
+     description says "strictly necessary" — outside the box's label, so it never decided anything. -->
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  .cmplz-cookiebanner { position: fixed; left: 0; right: 0; bottom: 0; background: #fff; color: #222; padding: 12px; box-shadow: 0 0 8px #0004; }
+  .cmplz-category summary { list-style: none; }
+  .cmplz-category-header { display: flex; gap: 12px; align-items: center; }
+  .cmplz-btn { width: 140px; height: 44px; margin-right: 8px; border: 1px solid #333; background: #eee; }
+  .screen-reader-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+</style>
+</head>
+<body>
+<main><h1>Consent — Complianz</h1><p>Page content.</p></main>
+<div id="cmplz-cookiebanner-container">
+<div class="cmplz-cookiebanner cmplz-show banner-1 optin" aria-modal="true" role="dialog" aria-labelledby="cmplz-header-1-optin">
+  <div class="cmplz-header"><div class="cmplz-title" id="cmplz-header-1-optin">Manage Cookie Consent</div></div>
+  <div class="cmplz-body">
+    <div class="cmplz-message">To provide the best experiences, we use technologies like cookies to store and/or access device information.</div>
+    <div class="cmplz-categories">
+      <details class="cmplz-category cmplz-functional">
+        <summary><span class="cmplz-category-header">
+          <span class="cmplz-category-title">Functional</span>
+          <span class="cmplz-always-active">
+            <span class="cmplz-banner-checkbox">
+              <input type="checkbox" id="cmplz-functional-optin" data-category="cmplz_functional" class="cmplz-consent-checkbox cmplz-functional" value="1" checked>
+              <label class="cmplz-label" for="cmplz-functional-optin" tabindex="0"><span class="screen-reader-text">Functional</span></label>
+            </span>
+            Always active
+          </span>
+        </span></summary>
+        <div class="cmplz-description"><span class="cmplz-description-functional">The technical storage or access is strictly necessary for the legitimate purpose of enabling the use of a specific service explicitly requested by the subscriber or user.</span></div>
+      </details>
+      <details class="cmplz-category cmplz-preferences">
+        <summary><span class="cmplz-category-header">
+          <span class="cmplz-category-title">Preferences</span>
+          <span class="cmplz-banner-checkbox">
+            <input type="checkbox" id="cmplz-preferences-optin" data-category="cmplz_preferences" class="cmplz-consent-checkbox cmplz-preferences" value="1">
+            <label class="cmplz-label" for="cmplz-preferences-optin" tabindex="0"><span class="screen-reader-text">Preferences</span></label>
+          </span>
+        </span></summary>
+      </details>
+      <details class="cmplz-category cmplz-statistics">
+        <summary><span class="cmplz-category-header">
+          <span class="cmplz-category-title">Statistics</span>
+          <span class="cmplz-banner-checkbox">
+            <input type="checkbox" id="cmplz-statistics-optin" data-category="cmplz_statistics" class="cmplz-consent-checkbox cmplz-statistics" value="1" checked>
+            <label class="cmplz-label" for="cmplz-statistics-optin" tabindex="0"><span class="screen-reader-text">Statistics</span></label>
+          </span>
+        </span></summary>
+      </details>
+      <details class="cmplz-category cmplz-marketing">
+        <summary><span class="cmplz-category-header">
+          <span class="cmplz-category-title">Marketing</span>
+          <span class="cmplz-banner-checkbox">
+            <input type="checkbox" id="cmplz-marketing-optin" data-category="cmplz_marketing" class="cmplz-consent-checkbox cmplz-marketing" value="1">
+            <label class="cmplz-label" for="cmplz-marketing-optin" tabindex="0"><span class="screen-reader-text">Marketing</span></label>
+          </span>
+        </span></summary>
+      </details>
+    </div>
+  </div>
+  <div class="cmplz-buttons">
+    <button class="cmplz-btn cmplz-accept" type="button">Accept</button>
+    <button class="cmplz-btn cmplz-deny" type="button">Deny</button>
+    <button class="cmplz-btn cmplz-view-preferences" type="button">View preferences</button>
+  </div>
+</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>consent fixture — locked rows, each by one signal, and one that only looks locked</title>
+<!-- Each half of the always-active rule (v1.31.0) on its own, plus the row's bound:
+     "Security"     pre-ticked, its row says "Always on" and carries no such class → NOT a finding (text)
+     "Preferences"  pre-ticked, its row's class is cat--always-active and it says nothing → NOT a finding (class)
+     "Advertising"  pre-ticked, alone in the footer beside the intro "…are always active" and the two buttons.
+                    Its row stops at its <label>: the footer holds the accept and reject controls, so the
+                    intro sentence is not about this box → IS a finding. -->
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  #cookie-banner { position: fixed; left: 0; right: 0; bottom: 0; background: #223; color: #fff; padding: 12px; }
+  #cookie-banner button { width: 150px; height: 44px; margin-right: 8px; border: 0; }
+  .lock { display: inline-block; width: 12px; height: 12px; background: #888; }
+</style>
+</head>
+<body>
+<main><h1>Consent — locked rows</h1></main>
+<div id="cookie-banner" role="dialog" aria-label="Cookie preferences">
+  <div class="cats">
+    <div class="cat"><label><input type="checkbox" name="security" checked> Security</label> <span class="badge">Always on</span></div>
+    <div class="cat cat--always-active"><label><input type="checkbox" name="prefs" checked> Preferences</label> <span class="lock"></span></div>
+  </div>
+  <div class="foot">
+    <p>We use cookies. Strictly necessary cookies are always active.</p>
+    <label><input type="checkbox" name="ads" checked> Advertising</label>
+    <button id="acc" type="button">Accept all</button>
+    <button id="rej" type="button">Reject all</button>
+  </div>
+</div>
+</body>
+</html>

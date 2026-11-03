@@ -717,6 +717,8 @@ console.log('\n# UX families — opt-in, and the action.yml wiring');
   check('action.yml: cls-budget defaults to 0.1 and CLS_BUDGET reaches the script', inputDefault('cls-budget') === '0.1' && /CLS_BUDGET: \$\{\{ inputs\.cls-budget \}\}/.test(actionYml));
   check('action.yml: consent-selector defaults to empty and CONSENT_SELECTOR reaches the script',
     inputDefault('consent-selector') === '' && /CONSENT_SELECTOR: \$\{\{ inputs\.consent-selector \}\}/.test(actionYml));
+  check('action.yml: consent-allow defaults to empty and CONSENT_ALLOW reaches the script',
+    inputDefault('consent-allow') === '' && /CONSENT_ALLOW: \$\{\{ inputs\.consent-allow \}\}/.test(actionYml));
 }
 
 // ---------------------------------------------------------------------------
@@ -865,6 +867,35 @@ console.log('\n# consent — first-visit banner: reject, size, pre-ticked');
   const miss = run(famEnv('consent', 'consent-none.html', { CONSENT_SELECTOR: '#nope', FAIL_ON_CONSENT: 'true' }));
   check('a consent-selector that matches nothing is a note, not a finding and not a fault',
     miss.exit === 0 && /matched no rendered element/.test(miss.stdout) && !/could not look/.test(miss.stdout), miss.stdout.slice(-300));
+
+  // v1.31.0: a locked always-active category is exempt, and `consent-allow` exempts what the heuristic misses.
+  const cz = run(famEnv('consent', 'consent-complianz.html'));
+  check('Complianz: the pre-ticked "Statistics" box is still a finding',
+    /consent-prechecked\*\* `[^`]*cmplz-statistics-optin[^`]*` “Statistics”/.test(cz.stdout), cz.stdout);
+  check('Complianz: the "Functional / Always active" box (checked, NOT disabled) is not, and no other rule fires',
+    !/cmplz-functional-optin|“Functional”|consent-no-reject|consent-reject-smaller/.test(cz.stdout) &&
+      /banner found: 1 accept, 1 reject, 4 checkbox\(es\)/.test(cz.stdout), cz.stdout);
+  const lk = run(famEnv('consent', 'consent-locked.html'));
+  check('a row that says "Always on" (no class) exempts its box, and so does a row whose class holds always-active (no words)',
+    !/name=security|name=prefs|“Security”|“Preferences”/.test(lk.stdout) && /banner found: 1 accept, 1 reject, 3 checkbox\(es\)/.test(lk.stdout), lk.stdout);
+  check('…but "always active" in the banner intro, outside the box\'s row, exempts nothing: "Advertising" is a finding',
+    /consent-prechecked\*\* `input\[name=ads\]` “Advertising”/.test(lk.stdout), lk.stdout);
+  const al = run(famEnv('consent', 'consent-bad.html', { CONSENT_ALLOW: 'input[name=analytics], :is(#a, #b), input[' }));
+  check('consent-allow exempts the box it names ("Analytics") and only that one ("Profiling" stays a finding)',
+    !/name=analytics/.test(al.stdout) && /consent-prechecked\*\* `input\[name=profiling\]`/.test(al.stdout), al.stdout);
+  // Three selectors, not four: the comma inside :is() does not split it.
+  check('consent-allow: a selector that matches no box is a note, named by its place in the list',
+    /consent-allow selector 2 of 3 matched no checkbox in the banner/.test(al.stdout), al.stdout);
+  check('consent-allow: a selector that is not CSS is a note, not a fault',
+    /consent-allow selector 3 of 3 is not valid CSS/.test(al.stdout) && !/could not look/.test(al.stdout), al.stdout);
+  const czOk = run(famEnv('consent', 'consent-complianz.html', { CONSENT_ALLOW: '#cmplz-statistics-optin', FAIL_ON_CONSENT: 'true' }));
+  check('a Complianz caller can enforce: with Statistics listed, fail-on-consent: true passes; Functional needs no listing',
+    czOk.exit === 0 && /consent PASS/.test(czOk.stdout), `exit=${czOk.exit} ${czOk.stdout.slice(-300)}`);
+  const { splitSelectors } = await import(pathToFileURL(path.join(HERE, 'consent.mjs')).href);
+  const split = (s) => (typeof splitSelectors === 'function' ? splitSelectors(s) : ['splitSelectors is not exported']);
+  check('splitSelectors: a comma inside brackets, quotes or an escape does not split; empty parts drop',
+    JSON.stringify(split(' a , :is(#a, #b),[value="x,y"], #c\\,d,, ')) === JSON.stringify(['a', ':is(#a, #b)', '[value="x,y"]', '#c\\,d']) &&
+      split('').length === 0, JSON.stringify(split(' a , :is(#a, #b),[value="x,y"], #c\\,d,, ')));
 }
 
 // ---------------------------------------------------------------------------

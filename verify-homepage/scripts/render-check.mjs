@@ -132,6 +132,7 @@ const PAGE_FAMILIES = PAGE_ORDER.map((n) => FAMILIES.find((f) => f.name === n)).
 const OWN_FAMILIES = FAMILIES.filter((f) => f.own);
 const CLS_BUDGET = Number.isFinite(parseFloat(env.CLS_BUDGET)) ? parseFloat(env.CLS_BUDGET) : 0.1;
 const CONSENT_SELECTOR = (env.CONSENT_SELECTOR || '').trim();
+const CONSENT_ALLOW = (env.CONSENT_ALLOW || '').trim();
 const MAX_URLS = Math.max(1, parseInt(env.MAX_URLS || '12', 10) || 12);
 const VERIFY_TOKEN = env.VERIFY_TOKEN || '';
 const WAIT_MS = Math.max(0, parseInt(env.WAIT_MS || '1200', 10) || 1200);
@@ -631,7 +632,7 @@ for (const url of targets) {
           }
           // The page-sharing families: read-only first (consent, forms, target), the Tab-walk after them.
           for (const f of PAGE_FAMILIES) {
-            addFam(f, vp, await f.run({ page, url, vp, opts: { selector: CONSENT_SELECTOR } }));
+            addFam(f, vp, await f.run({ page, url, vp, opts: { selector: CONSENT_SELECTOR, allow: CONSENT_ALLOW } }));
           }
           // AFFORDANCE runs LAST on the page: its label-click leg interacts with the document (and
           // restores it), which nothing above may see.

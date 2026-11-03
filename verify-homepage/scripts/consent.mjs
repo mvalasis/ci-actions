@@ -22,6 +22,12 @@
 //                           (always-on "necessary / essential / required" boxes are exempt, and so is a
 //                           disabled one). A checkbox in a collapsed preferences panel inside the banner
 //                           counts: a pre-ticked box is invalid wherever the user meets it.
+//                           A locked category is exempt too (v1.31.0): its row says "always active" /
+//                           "always on", or carries a class containing `always-active`. Complianz renders
+//                           its strictly-necessary category as "Functional", checked and NOT disabled, inside
+//                           `.cmplz-always-active` with the text "Always active", so the word list missed it.
+//                           A CMP the heuristic misses is the caller's `consent-allow` (selectors of exempt
+//                           boxes; one that matches no box in the banner is a note).
 // Visual weight (filled vs outline, colour) is reported as an INFO note and in the stats — never a finding:
 // whether a gold button against an outline one is "nudging" is a judgement call, size and position are not.
 // No banner found → a stat and an INFO note only, never a finding (a site with none, or one that appears
@@ -45,7 +51,10 @@ const SCAN = (H, a) => {
   const ACCEPT = /(?<![\p{L}\p{N}])(accept|agree|allow|ok|okay|got it|αποδοχ\p{L}*|αποδεχ\p{L}*|συμφων\p{L}*)(?![\p{L}\p{N}])/u;
   const REJECT = /(?<![\p{L}\p{N}])(reject|decline|deny|refuse|necessary only|essential only|only necessary|only essential|necessary cookies only|do not accept|don't accept|dont accept|απορρι\p{L}*|μονο απαραιτητ\p{L}*)(?![\p{L}\p{N}])/u;
   const ALWAYS_ON = /necessary|essential|required|strictly|απαραιτητ|αναγκαι/;
+  const ALWAYS_ACTIVE = /(?<![\p{L}\p{N}])always (active|on)(?![\p{L}\p{N}])/u;
+  const LOCKED = '[class*="always-active" i]';
   const CONTROLS = 'button,a[href],[role="button"],input[type="button"],input[type="submit"]';
+  const BOXES = 'input[type="checkbox"],[role="checkbox"],[role="switch"]';
 
   const labelOf = (el) =>
     strip(`${el.tagName === 'INPUT' ? el.value : textOf(el, true)} ${el.getAttribute('aria-label') || ''}`);
@@ -123,15 +132,43 @@ const SCAN = (H, a) => {
     if (fa !== fr) notes.push(`INFO: accept is ${fa ? 'filled' : 'an outline'} and reject is ${fr ? 'filled' : 'an outline'} — visual weight differs (a judgement call, never a finding)`);
   }
 
-  const boxes = [...banner.querySelectorAll('input[type="checkbox"],[role="checkbox"],[role="switch"]')];
+  const boxes = [...banner.querySelectorAll(BOXES)];
   stats.checkboxes = boxes.length;
+  // The caller's own exemptions, for a CMP the heuristics below miss. A note names a selector by its place in
+  // the list: the report's safe() drops `#` and `[`, so the selector itself would print as a different one.
+  const allowed = new Set();
+  const allow = a.allow || [];
+  for (const [i, sel] of allow.entries()) {
+    const which = `consent-allow selector ${i + 1} of ${allow.length}`;
+    try { document.createDocumentFragment().querySelector(sel); } catch {
+      notes.push(`the ${which} is not valid CSS`);
+      continue;
+    }
+    const hit = boxes.filter((b) => b.matches(sel));
+    if (!hit.length) notes.push(`the ${which} matched no checkbox in the banner`);
+    for (const b of hit) allowed.add(b);
+  }
+  // A box's category row: its widest ancestor inside the banner that holds no other box and no accept or
+  // reject control (Complianz: the category's <details>; a one-line list: the <label>). Text outside the row,
+  // like "necessary cookies are always active" in the banner's intro, says nothing about this box.
+  const rowOf = (b) => {
+    let row = b;
+    for (let el = b.parentElement; el && el !== banner; el = el.parentElement) {
+      if ([...el.querySelectorAll(BOXES)].some((x) => x !== b)) break;
+      if ([...el.querySelectorAll(CONTROLS)].some((c) => c !== b && kind(c) !== 'other')) break;
+      row = el;
+    }
+    return row;
+  };
+  const locked = (b) => [rowOf(b), ...(b.labels || [])].some((el) =>
+    el.matches(LOCKED) || !!el.querySelector(LOCKED) || ALWAYS_ACTIVE.test(strip(textOf(el, false))));
   for (const b of boxes) {
     const input = b.tagName === 'INPUT';
     const checked = input ? b.checked : b.getAttribute('aria-checked') === 'true';
     const disabled = input ? b.disabled || !!b.closest('fieldset:disabled') : b.getAttribute('aria-disabled') === 'true';
-    if (!checked || disabled) continue;
+    if (!checked || disabled || allowed.has(b)) continue;
     const words = strip(`${[...(b.labels || [])].map((l) => textOf(l, false)).join(' ')} ${b.getAttribute('aria-label') || ''} ${b.name || ''} ${b.id || ''} ${b.value || ''}`);
-    if (ALWAYS_ON.test(words)) continue;
+    if (ALWAYS_ON.test(words) || locked(b)) continue;
     findings.push({
       rule: 'consent-prechecked', sel: selectorOf(b), text: norm([...(b.labels || [])].map((l) => textOf(l, false)).join(' ') || b.getAttribute('aria-label') || '').slice(0, 40),
       detail: `an optional-category box is pre-ticked${rendered(b) ? '' : ' (in a collapsed panel)'} — consent must be an affirmative act`,
@@ -140,10 +177,32 @@ const SCAN = (H, a) => {
   return { findings, notes, stats };
 };
 
-export async function runConsent(page, { selector = '' } = {}) {
+// `consent-allow` is a comma list of selectors, and one selector can hold a comma of its own
+// (`:is(#a, #b)`, `[value="a,b"]`, `#a\,b`): split only at a comma outside brackets, quotes and escapes.
+export function splitSelectors(list) {
+  const out = [];
+  let cur = '';
+  let depth = 0;
+  let quote = '';
+  let esc = false;
+  for (const ch of String(list || '')) {
+    if (esc) esc = false;
+    else if (ch === '\\') esc = true;
+    else if (quote) { if (ch === quote) quote = ''; }
+    else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '(' || ch === '[') depth++;
+    else if ((ch === ')' || ch === ']') && depth > 0) depth--;
+    else if (ch === ',' && depth === 0) { out.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  out.push(cur);
+  return out.map((s) => s.trim()).filter(Boolean);
+}
+
+export async function runConsent(page, { selector = '', allow = '' } = {}) {
   const out = { findings: [], notes: [], stats: { banner: 0, accept: 0, reject: 0, checkboxes: 0 }, fault: '' };
   try {
-    const r = await inPage(page, SCAN, { selector });
+    const r = await inPage(page, SCAN, { selector, allow: splitSelectors(allow) });
     out.findings.push(...r.findings);
     out.notes.push(...r.notes);
     Object.assign(out.stats, r.stats);

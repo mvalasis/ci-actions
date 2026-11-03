@@ -66,6 +66,10 @@ inputs:
     description: 'Only for `checks: …consent`. CSS selector of the first-visit consent banner, overriding detection (a fixed/sticky element or dialog holding an accept control). Empty = detect. A selector that matches nothing is a note, not a finding.'
     required: false
     default: ''
+  consent-allow:
+    description: 'Only for `checks: …consent`. Comma list of CSS selectors of checkboxes exempt from consent-prechecked, for a locked always-on category the detection misses (a box whose row says "always active" / "always on", or carries a class containing always-active, is already exempt). A selector that matches no checkbox in the banner is a note, not a finding.'
+    required: false
+    default: ''
   max-urls:
     description: 'Cap the number of URLs rendered (the browser matrix is the costly part).'
     required: false
@@ -121,6 +125,7 @@ runs:
         FAIL_ON_CONSENT: ${{ inputs.fail-on-consent }}
         CLS_BUDGET: ${{ inputs.cls-budget }}
         CONSENT_SELECTOR: ${{ inputs.consent-selector }}
+        CONSENT_ALLOW: ${{ inputs.consent-allow }}
         MAX_URLS: ${{ inputs.max-urls }}
         VERIFY_TOKEN: ${{ inputs.verify-token }}
         WAIT_MS: ${{ inputs.wait-ms }}
