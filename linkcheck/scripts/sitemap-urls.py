@@ -14,7 +14,9 @@ cross-host child-sitemap <loc> or redirect target. curl reads the header
 from a mode-600 file, never from its argv or env. Uses a real-browser
 UA so the fetch isn't challenged on cloud-runner IPs. A body that
 declares a DOCTYPE, or runs past the protocol's 50 MB before or after
-gunzip, is refused before it is parsed (see parse()).
+gunzip, is refused before it is parsed (see parse()). A final response
+that is not 2xx, or whose Content-Type is not XML, is named in its WARN
+and never parsed (see BadResponse).
 
 # lint-allow-no-crash-guard: this is a PIPELINE STAGE, not a gate, and it has no
 # report-mode input to consult. Its whole output is the URL list the crawl runs
@@ -135,6 +137,25 @@ def parse(data):
     return ET.fromstring(data)
 
 
+# An index can list a child that is not there: an SEO plugin serves an empty
+# post type's sitemap as the theme's 404 page while the index still lists it.
+# Parsing that page reported expat's `syntax error: line 1, column 0`, which
+# reads as malformed XML (a caller's weekly run, 2026-11-02). The final
+# response's status and type are the cause, so fetch() raises them instead.
+class BadResponse(ValueError):
+    """A final response that is not 2xx, or whose Content-Type is not XML."""
+
+
+# Besides an XML type, what a .gz sitemap is served as (binary/octet-stream is
+# S3's default). No Content-Type at all says nothing either way, so it is parsed.
+GZIP_OR_BINARY = ("application/gzip", "application/x-gzip",
+                  "application/octet-stream", "binary/octet-stream")
+
+
+def _may_be_sitemap(media):
+    return not media or media.endswith("/xml") or media in GZIP_OR_BINARY
+
+
 def fetch(url):
     # Shell out to curl rather than urllib: the WP edge can enforce a hardened
     # TLS floor that macOS's bundled LibreSSL-Python fails to negotiate; curl
@@ -144,41 +165,55 @@ def fetch(url):
     cur, data = url, b""
     for _ in range(MAX_HOPS):
         with tempfile.NamedTemporaryFile() as tf:
+            # The Content-Type gets a line of its own: it can hold spaces.
             cmd = ["curl", "-sS", "--compressed", "--max-time", "30", "-A", UA,
-                   "-o", tf.name, "-w", "%{http_code} %{redirect_url}"]
+                   "-o", tf.name, "-w", "%{http_code} %{redirect_url}\\n%{content_type}"]
             if TOKEN and is_allowed(cur):
                 cmd += ["-H", "@" + _token_header()]
             env = {k: v for k, v in os.environ.items() if k != "VERIFY_HOMEPAGE_TOKEN"}
-            wo = subprocess.run(cmd + [cur], capture_output=True, check=True,
-                                env=env).stdout.decode("utf-8", "ignore").split()
+            out = subprocess.run(cmd + [cur], capture_output=True, check=True,
+                                 env=env).stdout.decode("utf-8", "ignore")
             with open(tf.name, "rb") as f:
                 data = _capped(f.read(MAX_SITEMAP_BYTES + 1), "the body")
+        head, _, ctype = out.partition("\n")
+        wo = head.split()
         code = int(wo[0]) if wo and wo[0].isdigit() else 0
         nxt = wo[1] if len(wo) > 1 else ""
         if 300 <= code < 400 and nxt:
             cur = nxt
             continue
         break
+    else:
+        raise BadResponse(f"HTTP {code} after {MAX_HOPS} redirects")
+    media = ctype.split(";", 1)[0].strip().lower()
+    if not 200 <= code < 300:
+        raise BadResponse(f"HTTP {code} {media or '(no Content-Type)'}")
+    if not _may_be_sitemap(media):
+        raise BadResponse(f"HTTP {code} {media}, not XML")
     if cur.endswith(".gz") or data[:2] == b"\x1f\x8b":
         with gzip.GzipFile(fileobj=io.BytesIO(data)) as gz:
             data = _capped(gz.read(MAX_SITEMAP_BYTES + 1), "the gunzipped body")
     return data
 
 
-def collect(url, seen_sitemaps, pages):
+def collect(url, seen_sitemaps, pages, parent=""):
     if url in seen_sitemaps:
         return
     seen_sitemaps.add(url)
+    listed = f" (listed in {parent})" if parent else ""   # so the consumer finds what listed it
     try:
         root = parse(fetch(url))
+    except BadResponse as exc:  # the response names the cause; its body was never parsed
+        print(f"WARN: {url}: {exc}{listed}", file=sys.stderr)
+        return
     except Exception as exc:  # noqa: BLE001 — one bad child shouldn't abort the run
-        print(f"WARN: failed to fetch/parse {url}: {exc}", file=sys.stderr)
+        print(f"WARN: failed to fetch/parse {url}: {exc}{listed}", file=sys.stderr)
         return
     tag = root.tag.split("}")[-1]
     if tag == "sitemapindex":
         for loc in root.findall(".//sm:sitemap/sm:loc", NS):
             if loc.text:
-                collect(loc.text.strip(), seen_sitemaps, pages)
+                collect(loc.text.strip(), seen_sitemaps, pages, url)
     else:  # urlset
         for loc in root.findall(".//sm:url/sm:loc", NS):
             if loc.text:

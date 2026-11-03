@@ -88,6 +88,8 @@ A normal release = **one tag move**, not a commit in any caller repo. As of
 from prose: `git tag --points-at v1` (the entries below are in release order,
 newest first — an entry whose tag is not yet cut says so).
 
+**v1.30.3** *(tag not yet cut)* — `linkcheck` fix, no new input. `sitemap-urls.py` read curl's status only to follow redirects, so a child of a sitemap index that answered 404 with the theme's error page went to the XML parser, and the job log said `WARN: failed to fetch/parse <url>: syntax error: line 1, column 0`, which reads as malformed XML (a caller's weekly run, 2026-11-02: an empty post type's sitemap, still listed in the index, answered by the 404 page). A final response that is not 2xx, or whose Content-Type is not XML, is now named and never parsed: `WARN: <url>: HTTP 404 text/html (listed in <index>)`, `HTTP 200 text/html, not XML`, `HTTP 301 after 8 redirects`. A `.gz` child that 404s is named the same way, where it read `Not a gzipped file`, and every WARN about a child names the index that listed it. `text/xml`, `application/xml`, the gzip and generic binary types a `.gz` sitemap is served as, and no Content-Type at all are fetched as before; every child sitemap of the six callers answers `200` with `application/xml` or `text/xml`, the one 404 above aside (measured 2026-11-03). One bad child still only WARNs, and the token scoping and the manual redirect handling are unchanged. Touches `fetch()` and `collect()` in `linkcheck/scripts/sitemap-urls.py`, and `selftest.py` (16 new checks: three types still fetched; the 404, the soft 404, the `.gz` 404 and a redirect loop named; the same end to end with the index named, a seed that 404s named alone; and the new fixture `fixtures/site/sitemap_index_dangling.xml`, served by `http.server` itself. v1.30.2's script fails 10 of them, and each of 9 targeted mutants is caught). **Caller-visible:** the WARN lines in the job log read as above, and a sitemap served `200` with a type that is not XML (`text/html`, `text/plain`) is skipped with a WARN where it was parsed. Verdicts and exit codes are otherwise unchanged.
+
 **v1.30.2** *(anchor `42db0cf`; `v1` moved onto it 2026-11-03)* — `a11y-audit`'s lock overrides pa11y-ci's globby 7.1.1 with 11.1.0. The scheduled `advisories` job went red on 2026-11-02 on minimatch 3.1.5 (GHSA-g3hv-75wg-m249, published 2026-10-30), fixed only in minimatch 11.0.1, which glob 7 under globby 7 cannot take; pa11y-ci 5.0.0 is the latest release and still pins `globby ~7.1.1`. globby 11 globs through fast-glob, so 19 package versions leave the tree, glob 7 and minimatch among them, and 24 come in (96 packages to 101, no advisory on osv.dev). pa11y-ci calls globby once, on the paths given on its command line, and `audit.sh` gives none (`--config` only), so the call gets an empty list and returns one under either version. Nothing changes for a caller.
 
 **v1.30.1** *(anchor `2ef31b7`; `v1` moved onto it 2026-10-30)* — `a11y-audit`'s lock moves to pa11y-ci 5.0.0, pa11y 10.0.0, puppeteer 25.16.0 and Chrome for Testing 156.0.8078.47. The `advisories` job was red on undici 6.28.1, ip-address 10.7.2 and zod 3.25.76, whose fix sits a major above chromium-bidi 14's range. The move takes undici to 7.30.1 and zod to 4.6.7, drops ip-address, basic-ftp (and its override) and extract-zip (and its two exceptions, so `osv-scanner.toml` goes), and shrinks the tree from 162 packages to 96. pa11y 10's first-request-only interception is unchanged, read in `lib/pa11y.js` and measured by the real-install self-test. **Node 22.13 or later is now required** (`ubuntu-latest` has Node 22; no caller in the fleet runs `setup-node` before this action).
@@ -1835,6 +1837,17 @@ pages and says why in a `WARN: failed to fetch/parse <url>: refused: …` line. 
 answering for a sitemap is named there as `<!DOCTYPE html>`. A lowercase `<!doctype html>`
 is not XML at all, so it fails as a syntax error, as it always did. A seed sitemap that is
 refused ends the run as `sitemap expansion produced no URLs`, with the WARN just above it.
+
+### A sitemap that is not there is named, not parsed (v1.30.3)
+
+A sitemap index can go on listing a child the site no longer serves, and the site then
+answers with its 404 page. A final response that is not 2xx, or whose Content-Type is not
+XML, is never parsed: its WARN names it, and the index that listed it, as `WARN: <url>:
+HTTP 404 text/html (listed in <index>)` (or `HTTP 200 text/html, not XML`, or `HTTP 301
+after 8 redirects`). `text/xml`, `application/xml`, `application/gzip`,
+`application/x-gzip`, `application/octet-stream`, `binary/octet-stream` and no Content-Type
+at all are parsed as before. A child named this way contributes no pages and the run goes
+on; fix it in the index, or on the site.
 
 ### Token scoping & self-test
 

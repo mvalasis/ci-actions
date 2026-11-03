@@ -32,6 +32,14 @@ the page itself 404s and is reported `on: sitemap` (v1.29.1). A sitemap page tha
 offline instead, in `scripts/selftest.py` (`page_outcome_checks`): `python3 -m http.server`
 cannot serve a 500.
 
+## `sitemap_index_dangling.xml` — not a pass of the job above
+
+An index whose first child, `sitemap-gone.xml`, is not in this directory, so `http.server`'s
+own 404 page answers for it. `scripts/selftest.py` (`bad_response_checks`) serves a copy of
+this directory with the port rewritten and asserts that `sitemap-urls.py` names that child as
+`HTTP 404 text/html (listed in …/sitemap_index_dangling.xml)` and still lists `clean.html`
+from the second (v1.30.3).
+
 ## Two rules when editing these fixtures
 
 1. **Never serve a WAF fingerprint** — `x-amzn-waf-action`, `cf-mitigated`, `cf-chl-bypass`

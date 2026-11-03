@@ -20,6 +20,10 @@ And that a hostile sitemap cannot exhaust the machine parsing it (v1.16.1): a
 DOCTYPE is refused inside expat before ElementTree runs, and the body is capped at
 the protocol's 50 MB as read and as gunzipped (hostile_sitemap_checks).
 
+And that a sitemap the site does not serve is named by its final response (v1.30.3):
+a child that answers 404, or 200 with a type that is not XML, is never parsed, and
+its WARN says `HTTP 404 text/html (listed in <index>)` (bad_response_checks).
+
 And that a sitemap page's OWN response is a verdict (v1.29.1): one that 404s or
 500s fails the run named `on: sitemap` even when nothing links to it, graded as a
 link to it would be — one re-check for a transient 5xx, a WAF fingerprint to
@@ -88,17 +92,23 @@ def _make_handler(label):
             self.send_header("Content-Length", "0")
             self.end_headers()
 
-        def _ok(self, body):
+        def _ok(self, body, ctype=None):
+            # A .xml path is served as XML, as real sitemaps are: since v1.30.3
+            # sitemap-urls.py names a text/html answer instead of parsing it.
+            if ctype is None:
+                ctype = ("application/xml" if urlsplit(self.path).path.endswith(".xml")
+                         else "text/html")
             self.send_response(200)
-            self.send_header("Content-Type", "text/html")
+            if ctype:
+                self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
 
-        def _status(self, code, body, extra=()):
+        def _status(self, code, body, extra=(), ctype="text/html"):
             self.send_response(code)
-            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Type", ctype)
             for k, v in extra:
                 self.send_header(k, v)
             self.send_header("Content-Length", str(len(body)))
@@ -117,20 +127,50 @@ def _make_handler(label):
             if self.command != "HEAD":
                 self.wfile.write(gz)
 
+        def _sm_child(self, name):
+            """A sitemap index whose children answer as real ones do (v1.30.3). The
+            three bad children come first, so the good one proves the run carries on."""
+            import gzip as _gz
+
+            def urlset(page):
+                return (f'<?xml version="1.0" encoding="UTF-8"?><urlset {SM_NS}><url><loc>'
+                        f'http://localhost:{INT_PORT}/{page}</loc></url></urlset>').encode()
+            theme_404 = b'<!doctype html>\n<html lang="en-US">\n<head><title>Not found</title></head></html>'
+            html = "text/html; charset=UTF-8"
+            if name == "index.xml":
+                self._ok((f'<?xml version="1.0" encoding="UTF-8"?><sitemapindex {SM_NS}>'
+                          + "".join(f"<sitemap><loc>http://localhost:{INT_PORT}/sm-child/{c}</loc>"
+                                    "</sitemap>" for c in ("404.xml", "soft-404.xml",
+                                                           "gone.xml.gz", "rank-math.xml"))
+                          + "</sitemapindex>").encode())
+            elif name in ("404.xml", "gone.xml.gz"):    # the 2026-11-02 shape: the theme's 404 page
+                self._status(404, theme_404, ctype=html)
+            elif name == "soft-404.xml":                # the same page, answered 200
+                self._status(200, theme_404, ctype=html)
+            elif name == "rank-math.xml":               # the type Rank Math and Yoast send
+                self._ok(urlset("page-b"), "text/xml; charset=UTF-8")
+            elif name == "no-type.xml":                 # no Content-Type at all
+                self._ok(urlset("page-c"), "")
+            elif name == "octet.xml.gz":                # a .gz sitemap as a bucket serves it
+                self._ok(_gz.compress(urlset("page-d")), "application/octet-stream")
+            else:
+                self._status(404, b"<html>no such fixture</html>")
+
         def _serve(self):
             _record(label, self)
             p = urlsplit(self.path).path
-            if p == "/to-external":      # internal page that 3xx-redirects off-host
-                self._redirect(f"http://127.0.0.1:{EXT_PORT}/ext-landing")
+            if p in ("/to-external", "/to-external.xml"):   # 3xx off-host (.xml: a sitemap's)
+                self._redirect(f"http://127.0.0.1:{EXT_PORT}/ext-landing"
+                               + p[len("/to-external"):])
             elif p == "/gz-html":        # Content-Encoding: gzip — fetch_html must decode it
                 self._gzip(b'<html><a href="http://sub.localhost/gz-link">x</a></html>')
             elif p == "/loop":           # self-redirect → exercises the MAX_HOPS cap
                 self._redirect(f"http://localhost:{INT_PORT}/loop")
             elif p == "/to-internal":    # external page that 3xx-redirects back on-host
                 self._redirect(f"http://localhost:{INT_PORT}/int-landing")
-            elif p == "/ext-landing":
+            elif p in ("/ext-landing", "/ext-landing.xml"):
                 self._ok(b"<html>EXTERNAL-LANDING</html>")
-            elif p == "/int-landing":
+            elif p in ("/int-landing", "/int-landing.xml"):
                 self._ok(b"<html>INTERNAL-LANDING</html>")
             elif p == "/sitemap.xml":    # end to end: one page on the internal host
                 self._ok(('<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/'
@@ -140,10 +180,12 @@ def _make_handler(label):
                 self._ok((f'<html><a href="http://a.localhost:{INT_PORT}/int-landing">i</a>'
                           f'<a href="http://127.0.0.1:{EXT_PORT}/ext-landing">e</a></html>').encode())
             elif p.startswith("/bytes-"):    # n bytes as-is — the body cap
-                self._ok(b"x" * int(p[len("/bytes-"):]))
+                self._ok(b"x" * int(p[len("/bytes-"):]), "application/xml")
             elif p.startswith("/gz-"):       # n bytes, gzipped, no Content-Encoding — the inflate cap
                 import gzip as _gz
-                self._ok(_gz.compress(b"\0" * int(p[len("/gz-"):])))
+                self._ok(_gz.compress(b"\0" * int(p[len("/gz-"):])), "application/gzip")
+            elif p.startswith("/sm-child/"):  # what a final response says, named, not parsed (v1.30.3)
+                self._sm_child(p[len("/sm-child/"):])
             elif p == "/dtd-index.xml":      # end to end: a DOCTYPE child beside a real one
                 self._ok(('<?xml version="1.0"?><sitemapindex xmlns="http://www.sitemaps.org/'
                           f'schemas/sitemap/0.9"><sitemap><loc>http://localhost:{INT_PORT}/'
@@ -598,6 +640,119 @@ def hostile_sitemap_checks(sitemap):
           "<!DOCTYPE urlset>" in r.stderr)
 
 
+def _fixture_site():
+    """linkcheck/fixtures/site served as the issue-lifecycle job serves it (`python3 -m
+    http.server`, whose own 404 page answers for a missing file), from a copy whose
+    URLs name this server's port instead of 8099. Returns (server, base URL)."""
+    import functools
+    tmp = tempfile.mkdtemp(prefix="lc-selftest-site.")
+    atexit.register(shutil.rmtree, tmp, True)
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=tmp))
+    srv.daemon_threads = True
+    site = f"http://127.0.0.1:{srv.server_address[1]}"
+    src = os.path.join(HERE, "..", "fixtures", "site")
+    for name in os.listdir(src):
+        with open(os.path.join(src, name), "rb") as f:
+            body = f.read().replace(b"http://127.0.0.1:8099", site.encode())
+        with open(os.path.join(tmp, name), "wb") as f:
+            f.write(body)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, site
+
+
+def bad_response_checks(sitemap):
+    """A final response that is not 2xx, or not XML, is named and never parsed (v1.30.3).
+
+    A caller's weekly run (2026-11-02) printed `WARN: failed to fetch/parse <url>:
+    syntax error: line 1, column 0` for a child its sitemap index still listed and the
+    site answered with its theme's 404 page. That reads as malformed XML; the cause was
+    the 404. fetch() now raises the final status and Content-Type instead of handing
+    the body to parse(), and collect() names the index that listed the child.
+
+    The positive controls come first: a rule that refused every answer would pass every
+    refusal below.
+    """
+    print("sitemap-urls.py — a child that is not there is named by its response, not parsed")
+    base = f"http://localhost:{INT_PORT}/sm-child/"
+
+    def fetched(url):
+        """fetch()'s body, or `<exception class>: <message>` — so a regression reads as
+        failed checks, not a traceback that hides every check after it."""
+        try:
+            return sitemap.fetch(url if "://" in url else base + url)
+        except Exception as e:  # noqa: BLE001
+            return f"{type(e).__name__}: {e}"
+
+    # --- still fetched: what real sitemaps are served as ------------------------------
+    # (application/xml: every other sitemap in this test; application/gzip: /gz-N above)
+    for name, page, what in (("rank-math.xml", "page-b", "text/xml; charset=UTF-8 (Rank Math, Yoast)"),
+                             ("no-type.xml", "page-c", "no Content-Type at all"),
+                             ("octet.xml.gz", "page-d", "a .gz served as application/octet-stream")):
+        got = fetched(name)
+        check(f"still fetched: {what}", isinstance(got, bytes) and f"/{page}<".encode() in got)
+
+    # --- named, never parsed ---------------------------------------------------------
+    try:
+        sitemap.parse(b'<!doctype html>\n<html lang="en-US">\n<head></head></html>')
+        premise = ""
+    except Exception as e:  # noqa: BLE001
+        premise = str(e)
+    check("premise: the theme's 404 page, parsed, is expat's `syntax error: line 1, column 0` "
+          "(the WARN the 2026-11-02 run printed)", premise == "syntax error: line 1, column 0")
+    check("a 404 is named by its status and type",
+          fetched("404.xml") == "BadResponse: HTTP 404 text/html")
+    check("…a 200 that is not XML (a soft 404) by its type",
+          fetched("soft-404.xml") == "BadResponse: HTTP 200 text/html, not XML")
+    check("…a .gz that 404s by its status, never gunzipped into `Not a gzipped file`",
+          fetched("gone.xml.gz") == "BadResponse: HTTP 404 text/html")
+    check("…a redirect loop by its last hop",
+          fetched(f"http://localhost:{INT_PORT}/loop")
+          == f"BadResponse: HTTP 301 after {sitemap.MAX_HOPS} redirects")
+
+    # --- end to end: main() names each bad child and the index that listed it ---------
+    def run(url):
+        tmp = tempfile.mkdtemp(prefix="lc-selftest-tmp.")
+        r = subprocess.run([sys.executable, os.path.join(HERE, "sitemap-urls.py"), url],
+                           capture_output=True, text=True, cwd=tmp,
+                           env=dict(os.environ, TMPDIR=tmp))
+        shutil.rmtree(tmp, True)
+        return r
+
+    r = run(base + "index.xml")
+    warns = r.stderr.splitlines()
+    listed = f" (listed in {base}index.xml)"
+    check("end to end: the good child after three bad ones is still listed, and the run exits 0",
+          r.returncode == 0 and r.stdout.split() == [f"http://localhost:{INT_PORT}/page-b"])
+    check("end to end: the 404 child is WARNed as `HTTP 404 text/html (listed in <index>)`",
+          f"WARN: {base}404.xml: HTTP 404 text/html{listed}" in warns)
+    check("end to end: the soft-404 child as `HTTP 200 text/html, not XML (listed in <index>)`",
+          f"WARN: {base}soft-404.xml: HTTP 200 text/html, not XML{listed}" in warns)
+    check("end to end: the .gz child that 404s as `HTTP 404 text/html (listed in <index>)`",
+          f"WARN: {base}gone.xml.gz: HTTP 404 text/html{listed}" in warns)
+    check("end to end: no WARN reads as malformed XML or a bad gzip",
+          len(warns) == 3 and "syntax error" not in r.stderr and "gzipped" not in r.stderr)
+    r = run(base + "404.xml")
+    check("end to end: a seed sitemap that 404s is named alone, with no `listed in`",
+          r.returncode == 0 and r.stdout == ""
+          and r.stderr.splitlines() == [f"WARN: {base}404.xml: HTTP 404 text/html"])
+
+    # --- the fixture: an index listing a child the fixture site does not have ---------
+    srv, site = _fixture_site()
+    try:
+        r = run(f"{site}/sitemap_index_dangling.xml")
+    finally:
+        srv.shutdown()
+    check("fixture sitemap_index_dangling.xml: the live child it lists second is still listed",
+          r.returncode == 0 and r.stdout.split() == [f"{site}/clean.html"])
+    check("fixture: the missing child, http.server's own 404 page, is named with its index",
+          f"WARN: {site}/sitemap-gone.xml: HTTP 404 text/html (listed in "
+          f"{site}/sitemap_index_dangling.xml)" in r.stderr.splitlines())
+
+
 def main():
     global INT_PORT, EXT_PORT
     int_srv, INT_PORT = _start("INT")
@@ -676,8 +831,9 @@ def main():
     sitemap._seed_allowed("localhost")
 
     # 6) sitemap fetch across an internal→external redirect: external gets no token.
+    #    The .xml routes answer as XML: a text/html answer is named, never returned.
     REC.clear()
-    data = sitemap.fetch(f"http://localhost:{INT_PORT}/to-external")
+    data = sitemap.fetch(f"http://localhost:{INT_PORT}/to-external.xml")
     check("sitemap int→ext: returned the final external body", b"EXTERNAL-LANDING" in data)
     check("sitemap int→ext: external host did NOT get the token", TOKEN not in _tokens("EXT"))
     check("sitemap int→ext: internal hop carried the token", TOKEN in _tokens("INT"))
@@ -685,7 +841,7 @@ def main():
     # 7) sitemap fetch of an off-host child never carries the token (the old bug:
     #    it sent X-Verify-Source unconditionally to every URL).
     REC.clear()
-    sitemap.fetch(f"http://127.0.0.1:{EXT_PORT}/int-landing")
+    sitemap.fetch(f"http://127.0.0.1:{EXT_PORT}/int-landing.xml")
     check("sitemap direct-external: token never sent", TOKEN not in _tokens("EXT"))
 
     check("is_allowed(localhost)", sitemap.is_allowed("http://localhost/"))
@@ -695,6 +851,7 @@ def main():
           not sitemap.is_allowed("http://localhost.evil.com/"))
 
     hostile_sitemap_checks(sitemap)
+    bad_response_checks(sitemap)
     runner_checks()
 
     int_srv.shutdown()
@@ -710,7 +867,8 @@ def main():
         print(f"FAIL — {len(FAILS)} check(s) failed: {', '.join(FAILS)}")
         raise SystemExit(1)
     print("PASS — token scoping, sitemap pages graded on their own response, the "
-          "hostile-sitemap refusals, crash-guard attribution, the crawl-size floor, the "
+          "hostile-sitemap refusals, a missing sitemap named by its response, "
+          "crash-guard attribution, the crawl-size floor, the "
           "issue-body cap and the step-summary cap hold.")
 
 
