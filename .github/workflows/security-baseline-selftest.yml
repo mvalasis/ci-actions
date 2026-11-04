@@ -47,10 +47,11 @@ jobs:
         working-directory: security-baseline
         env: { SEMGREP_SEND_METRICS: 'off' }
         run: bash scripts/selftest-rules.sh
-      # What `sast-suppressed` rests on (v1.32.0): under --disable-nosem a finding a nosemgrep comment covers is
-      # reported with extra.is_ignored true, and removed without the flag. selftest.mjs stubs semgrep, so only
-      # the real, pinned one can say this still holds.
-      - name: A nosemgrep'd finding under --disable-nosem is reported and flagged (real semgrep)
+      # What `sast-suppressed` rests on (v1.32.0): under --disable-nosem semgrep keeps a finding a nosemgrep comment
+      # covers, and removes it without the flag — the control run scan.mjs makes to tell the waived finding from the
+      # rest, since 1.178.0 marks nothing in its JSON (no extra.is_ignored). selftest.mjs stubs semgrep, so only the
+      # real, pinned one can say this still holds.
+      - name: A nosemgrep'd finding is kept under --disable-nosem and removed without it (real semgrep)
         working-directory: security-baseline
         env: { SEMGREP_SEND_METRICS: 'off' }
         run: bash scripts/selftest-nosem.sh

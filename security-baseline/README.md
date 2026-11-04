@@ -670,12 +670,16 @@ fleet shipped it twice: a CF7 proxy gate, then a second plugin's namespace gate.
   `--ignore-gitleaks-allow`, and a finding whose line carries the comment is `secret-suppressed`, a T1
   WARN naming the rule it would have silenced, its commit and its redacted value. semgrep's `nosemgrep`
   comment was the same hole: every semgrep leg runs with `--disable-nosem`, under which a finding the
-  comment covers is reported flagged `extra.is_ignored` instead of removed, and it is emitted as
-  `sast-suppressed`, a T1 WARN naming the rule — that reading is the pinned semgrep's, pinned on the
-  runner's real one by `selftest-nosem.sh`. A `.gitleaks.toml`, `.gitleaksignore`, `.semgrepignore` or
-  `osv-scanner.toml` the range adds or changes is `scan-config-changed` (T1 WARN, one per file,
-  CWE-693). So a waiver is a merge behind, by design: it takes hold once it is in the base, and the run
-  whose range adds it reports the finding beside the WARN. Honoured on purpose: the base's
+  comment covers is kept instead of removed — and since semgrep 1.178.0 marks nothing in its JSON (no
+  `extra.is_ignored`), the files the results name that say `nosem` are scanned once more without the
+  flag, and a finding that control run lacks is the one the comment covers: emitted as `sast-suppressed`,
+  a T1 WARN naming the rule. A control run that could not look, or skipped one of those files, leaves
+  the leg at fault and its findings under their own id, never silent. Both halves are the pinned
+  semgrep's, pinned on the runner's real one by `selftest-nosem.sh`. A `.gitleaks.toml`,
+  `.gitleaksignore`, `.semgrepignore` or `osv-scanner.toml` the range adds or changes is
+  `scan-config-changed` (T1 WARN, one per file, CWE-693). So a waiver is a merge behind, by design: it
+  takes hold once it is in the base, and the run whose range adds it reports the finding beside the
+  WARN. Honoured on purpose: the base's
   `.gitleaksignore`; the `gitleaks:allow` comment on the history leg, and on a run with no base
   (`scan-scope: full`), which also honours the checkout's own ignore file, as gitleaks would, and says
   so in the scanner notes. Still read from the checkout: `.semgrepignore` (flagged when it changes, not
@@ -942,9 +946,12 @@ fleet shipped it twice: a CF7 proxy gate, then a second plugin's namespace gate.
   generic-api-key`, its redacted value and its commit, and the bare one BLOCKS; promoted, the
   suppression blocks too, annotated `secret-suppressed generic-api-key at allowed.txt:1`; under
   `scan-scope: full` no flag, the comment honoured, the bare key alone. (Y) semgrep: every leg runs with
-  `--disable-nosem`; a result flagged `extra.is_ignored` is `sast-suppressed`, naming `sast-critical`
-  and the rule, never `sast-critical`, while the unflagged one beside it BLOCKS; promoted, the
-  suppression blocks and annotates by the rule. (Z) a base that fell back to `HEAD~1` is said: on a
+  `--disable-nosem`, and the community leg once more without it over exactly the file that says `nosem`;
+  a result that control run lacks is `sast-suppressed`, naming `sast-critical` and the rule, never
+  `sast-critical`, while the one sharing its line and the one sharing its rule BLOCK; promoted, the
+  suppression blocks and annotates by the rule; a control run that could not look, or skipped the file,
+  marks nothing and faults the leg naming it, the three findings standing under their own id; a fixture
+  with no `nosem` text gets no control run. (Z) a base that fell back to `HEAD~1` is said: on a
   push whose `event.before` is the all-zero sha (a new branch), or one the checkout lacks (after a
   force-push), the scanner notes name the fallback and why, and a given base is never said to be one.
   The unit legs pin `rules/gha.yaml`'s widened `gha-script-injection` regex live out of the rule file
@@ -953,13 +960,16 @@ fleet shipped it twice: a CF7 proxy gate, then a second plugin's namespace gate.
   legs (`sast-suppressed` by every semgrep leg, `secret-suppressed` by the gitleaks range leg and never
   the history leg, `scan-config-changed` by its own; all T1), and that the worst-case step summary,
   every emittable id at `safe()`'s caps, renders under 900,000 bytes (829,130 at 13 rows a group; at 15
-  it no longer fits). 34 new checks. 26 targeted mutants of `scan.mjs`, `tiers.mjs`,
+  it no longer fits). 37 new checks. 34 targeted mutants of `scan.mjs`, `tiers.mjs`,
   `outcome.mjs`, `rules/gha.yaml`, the stub and the fixture each turn it red — the vendored `--config`
   dropped; the base's ignore file replaced by an empty one, or by the checkout's own; `--source` dropped;
-  `GIT_DIR` and `GIT_WORK_TREE` not set; `--disable-nosem` dropped; `is_ignored` never read; the
-  scan-config collector unwired; the `HEAD~1` note dropped, or said of a given base too; `pinnedToMerges`
-  reading the checkout's file; 15 rows a group; `--ignore-gitleaks-allow` dropped; `allowCommented` always
-  false; the comment honoured on the range too; `redact` returning the value; `sast-suppressed` unclaimed
+  `GIT_DIR` and `GIT_WORK_TREE` not set; `--disable-nosem` dropped; `is_ignored` never read; the control
+  run dropped, run with the flag too, or its answer never marked; the `nosem` gate inverted; the result
+  key short of its rule, or of its position; a control run that could not look, or skipped the file, passed
+  over; the scan-config collector unwired; the `HEAD~1` note dropped, or said of a given base too;
+  `pinnedToMerges` reading the checkout's file; 15 rows a group; `--ignore-gitleaks-allow` dropped;
+  `allowCommented` always false; the comment honoured on the range too; `redact` returning the value;
+  `sast-suppressed` unclaimed
   by the community leg; `scan-config-changed` missing from `CHECKS`; the rule's regex as before v1.32.0,
   matching `github.` alone, matching everything, or without the title and body shapes; its tier T2; the
   stub not reading the source's ignore file, reading none at all, or ignoring the comment — and every new
@@ -970,10 +980,12 @@ fleet shipped it twice: a CF7 proxy gate, then a second plugin's namespace gate.
   fires, each good fixture stays silent).
 - `bash scripts/selftest-nosem.sh` (v1.32.0) — the semgrep behaviour `sast-suppressed` rests on, on the
   REAL pinned semgrep: a one-rule config over a two-line file, scanned with `--disable-nosem` (two
-  results, the `nosemgrep`'d line flagged `extra.is_ignored: true`, the other not) and without it (the
-  control: one result; the comment removed the other). `selftest.mjs` stubs semgrep, so only this run can
-  say a semgrep bump still reads the flag that way. The self-test workflow runs it after
-  `selftest-rules.sh`; locally it needs a semgrep on `PATH` (or `SEMGREP_BIN`).
+  results: the `nosemgrep`'d line kept beside the other) and without it (the control: one result; the
+  comment removed the other) — the two runs `scan.mjs` makes, in that order. Whether the JSON marks the
+  kept result is printed, not asserted: 1.178.0 writes no `extra.is_ignored`, which is why the control
+  run exists (the first cut of v1.32.0 asserted the field, and was red on the runner). `selftest.mjs`
+  stubs semgrep, so only this run can say a semgrep bump still keeps and removes that way. The self-test
+  workflow runs it after `selftest-rules.sh`; locally it needs a semgrep on `PATH` (or `SEMGREP_BIN`).
 - `bash scripts/selftest-pr-shape.sh` — the shapes this repo's own pushes never produce, scanned
   with the REAL trufflehog and gitleaks: `--only-verified` is swapped for an offline pass that prints
   unverified results, and per-run minted tokens in every commit show what was read. Five shapes: the

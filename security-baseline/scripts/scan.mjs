@@ -137,15 +137,15 @@ const byExt = (files, exts) => (files || []).filter((f) => exts.some((e) => f.to
 // finding it did report: a scanner that half-failed has not un-found anything.
 function semgrepRun(leg, configs, targets, { severity } = {}) {
   if (!targets || targets.length === 0) return { results: [] };
-  // --disable-nosem (v1.32.0): a finding a `nosemgrep` comment on its line covers is reported with
-  // `extra.is_ignored: true` instead of dropped, and emitted as sast-suppressed (collectSemgrep).
-  const args = ['scan', '--json', '--metrics=off', '--disable-version-check', '--quiet', '--no-git-ignore', '--disable-nosem'];
+  const args = ['scan', '--json', '--metrics=off', '--disable-version-check', '--quiet', '--no-git-ignore'];
   if (severity) args.push('--severity', severity);
   for (const c of configs) args.push('--config', c);
-  args.push(...targets);
-  const o = semgrepOutcome(run(BIN.semgrep, args, { timeout: 420000 }));
+  // --disable-nosem (v1.32.0): a finding a `nosemgrep` comment covers is kept instead of dropped; which one
+  // it is, markSuppressed asks semgrep below, and collectSemgrep emits it as sast-suppressed.
+  const o = semgrepOutcome(run(BIN.semgrep, [...args, '--disable-nosem', ...targets], { timeout: 420000 }));
   if (!o.looked) couldNotLook(leg, `semgrep ${o.reason}`);
   if (o.skipped.length) infra.push(`${leg.name}: semgrep could not fully parse or finish ${o.skipped.length} file${o.skipped.length === 1 ? '' : 's'}, the rest were scanned — ${o.skipped.slice(0, 3).map((p) => safe(p, 80)).join(', ')}${o.skipped.length > 3 ? ', …' : ''}`);
+  if (o.looked) markSuppressed(leg, args, o.results);
   return { results: o.results };
 }
 // `rule` names the rule in annotations. A registry id is a dotted namespace worth keeping whole; a
@@ -158,10 +158,34 @@ const sgFinding = (r, checkId) => ({
   msg: (r.extra && r.extra.message) || r.check_id || '',
 });
 
-// A finding a `nosemgrep` comment would have removed (v1.32.0): semgrep, run with --disable-nosem, reports it
-// flagged `extra.is_ignored: true`, and it is emitted as `sast-suppressed` (T1 WARN, promotable), never under
-// its own id. So the scanned commit cannot silence a rule by annotating its line: the suppression is a
-// visible finding naming the rule it suppresses, and a caller who wants none promotes the id.
+// A finding a `nosemgrep` comment would have removed (v1.32.0): semgrep, run with --disable-nosem, keeps it
+// and marks nothing in its JSON — 1.178.0 has no `extra.is_ignored` on any result (measured on the runner by
+// selftest-nosem.sh; the first reading of its formatter was wrong). So which result the comment covers is
+// put to semgrep itself: the files the results name whose text says `nosem` (`nosemgrep`, `nosem`, with or
+// without a rule id) are scanned ONCE MORE with the same arguments minus the flag, and a result of the first
+// run the control run lacks is the suppression, marked `extra.is_ignored: true` here for emit() to read. It
+// is emitted as `sast-suppressed` (T1 WARN, promotable), never under its own id: the scanned commit cannot
+// silence a rule by annotating its line, the suppression is a visible finding naming the rule it suppresses,
+// and a caller who wants none promotes the id. No file says `nosem` (the common case): one run, as before.
+// A control run that could not look, or skipped one of those files, marks nothing there and leaves the leg
+// at fault: a result nobody could classify is reported under its own id beside the fault, never silently —
+// without that, a control run that answered nothing would read every finding as waived.
+const resultPath = (r) => (r && typeof r.path === 'string' && r.path ? path.normalize(r.path) : '');
+const resultKey = (r) => [r.check_id, resultPath(r), r.start && r.start.line, r.start && r.start.col, r.end && r.end.line, r.end && r.end.col].map((v) => (v == null ? '' : String(v))).join('|');
+const mentionsNosem = (p) => { try { return /nosem/i.test(fs.readFileSync(p, 'utf8')); } catch { return true; } };   // unreadable here: let semgrep say
+function markSuppressed(leg, args, results) {
+  const files = [...new Set(results.map(resultPath).filter(Boolean))].filter(mentionsNosem);
+  if (files.length === 0) return;
+  const o = semgrepOutcome(run(BIN.semgrep, [...args, ...files], { timeout: 420000 }));
+  if (!o.looked) { couldNotLook(leg, `semgrep nosemgrep-control ${o.reason}`); return; }
+  const unread = new Set(files.filter((f) => o.skipped.some((p) => path.normalize(String(p)) === f)));
+  if (unread.size) couldNotLook(leg, `semgrep nosemgrep-control could not finish ${unread.size} file${unread.size === 1 ? '' : 's'} it had scanned — ${[...unread].slice(0, 3).map((p) => safe(p, 80)).join(', ')}${unread.size > 3 ? ', …' : ''}`);
+  const kept = new Set(o.results.map(resultKey));
+  for (const r of results) {
+    const p = resultPath(r);
+    if (p && files.includes(p) && !unread.has(p) && !kept.has(resultKey(r))) r.extra = { ...(r.extra || {}), is_ignored: true };
+  }
+}
 const isIgnored = (r) => !!(r && r.extra && r.extra.is_ignored === true);
 const suppressed = (r, checkId) => {
   const f = sgFinding(r, checkId);

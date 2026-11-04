@@ -2040,26 +2040,65 @@ if [ "$n" = 0 ]; then echo '{"Verified":true,"DetectorName":"Github","Raw":"x","
     check('(X-e) NO planted value reaches the job log or stderr', txa.stdout.length > 0 && !leaked(txa.stdout) && !leaked(txa.stderr) && !leaked(txaf.stdout));
 
     // ---- (Y) a nosemgrep comment is a WARN, never a silence (v1.32.0) ----
-    // Under --disable-nosem semgrep reports a finding a nosemgrep comment covers with `extra.is_ignored:
-    // true` (pinned on the real semgrep by selftest-nosem.sh, on the runner); here the community leg answers
-    // with one such finding beside an unsuppressed one.
-    const nosem = JSON.stringify({ results: [
-      { check_id: 'php.lang.security.injection', path: 'app/login.php', start: { line: 7 }, extra: { message: 'tainted sql', is_ignored: true, metadata: { cwe: ['CWE-89'] } } },
-      { check_id: 'php.lang.security.other', path: 'app/login.php', start: { line: 9 }, extra: { message: 'other', is_ignored: false } },
-    ], errors: [] });
+    // semgrep 1.178.0 keeps a finding a nosemgrep comment covers under --disable-nosem and marks nothing in
+    // its JSON (no `extra.is_ignored`; selftest-nosem.sh pins both on the runner's real semgrep), so scan.mjs
+    // scans the files the results name that say `nosem` once more without the flag and marks what that
+    // control run lacks. The stub answers as 1.178.0 does — with the flag three community findings, without
+    // it the two the comment does not cover; one of those shares the waived finding's position (two rules on
+    // one call), the other its rule, so a result key short of its rule or of its position takes the waived
+    // one for a kept one — and logs each argv.
+    const yr = repoAt('nosem-control');
+    fs.mkdirSync(path.join(yr, '.github/workflows'), { recursive: true });
+    fs.mkdirSync(path.join(yr, 'app'));
+    commitFiles(yr, '2026-11-04T10:00:00Z', { 'README.md': 'base\n', '.github/workflows/ci.yml': 'on: push\n' }, 'base');
+    commitFiles(yr, '2026-11-04T11:00:00Z', {
+      'app/login.php': '<?php\n// fixture\n\n\n\n\n$q = "SELECT * FROM users WHERE u = " . $_GET["u"]; // nosemgrep: php.lang.security.injection\n\n$r = mysqli_query($db, "SELECT " . $_GET["x"]);\n',
+      'app/other.php': '<?php // fixture, no waiver\n',
+    }, 'a waived finding beside two bare ones');
+    const sgResult = (check_id, line, col, extra) => ({ check_id, path: 'app/login.php', start: { line, col }, end: { line, col: col + 40 }, extra });
+    const yKept = [sgResult('php.lang.security.other', 7, 6, { message: 'other' }), sgResult('php.lang.security.injection', 9, 6, { message: 'tainted sql', metadata: { cwe: ['CWE-89'] } })];
+    const yAll = JSON.stringify({ results: [sgResult('php.lang.security.injection', 7, 6, { message: 'tainted sql', metadata: { cwe: ['CWE-89'] } }), ...yKept], errors: [] });
     const sgArgv = path.join(tmp, 'semgrep-nosem-argv.log');
-    const sgNosem = stub('semgrep-nosem', `printf '%s\\n' "$*" >> '${sgArgv}'\n${semgrepAnswers(`echo '${nosem}'`)}`);
-    const y = broken({ SEMGREP_BIN: sgNosem }, { GITHUB_ACTIONS: 'true' });
-    const sgRuns = fs.existsSync(sgArgv) ? fs.readFileSync(sgArgv, 'utf8').split('\n').filter(Boolean) : [];
-    check('(Y) every semgrep leg runs with --disable-nosem', sgRuns.length === 3 && sgRuns.every((l) => / --disable-nosem /.test(` ${l} `)), JSON.stringify(sgRuns));
-    check('(Y) a finding a nosemgrep comment would have removed is sast-suppressed, a WARN naming the rule it suppresses, never sast-critical; the unsuppressed one still BLOCKS',
-      y.status === 1 && y.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && y.stdout.includes('### ⚠️ `sast-suppressed` · T1 · 1 finding(s)')
+    const nosemStub = (name, control) => stub(name, `printf '%s\\n' "$*" >> '${sgArgv}'\n${semgrepAnswers(`case "$*" in *--disable-nosem*) echo '${yAll}' ;; *) ${control} ;; esac`)}`);
+    const sgRuns = () => { const l = fs.existsSync(sgArgv) ? fs.readFileSync(sgArgv, 'utf8').split('\n').filter(Boolean) : []; fs.rmSync(sgArgv, { force: true }); return l; };
+    const flagged = (l) => / --disable-nosem /.test(` ${l} `);
+    const sgNosem = nosemStub('semgrep-nosem', `echo '${JSON.stringify({ results: yKept, errors: [] })}'`);
+    const y = broken({ SEMGREP_BIN: sgNosem }, { GITHUB_ACTIONS: 'true' }, yr);
+    const yRuns = sgRuns();
+    check('(Y) every semgrep leg runs with --disable-nosem, and the community leg once more without it over exactly the file that says nosem — the control run',
+      yRuns.filter(flagged).length === 3 && yRuns.filter((l) => !flagged(l)).length === 1
+      && yRuns.some((l) => flagged(l) && / --severity ERROR /.test(` ${l} `) && l.endsWith(' app/login.php app/other.php'))
+      && yRuns.some((l) => !flagged(l) && / --severity ERROR /.test(` ${l} `) && l.endsWith(' --config p/security-audit app/login.php')), JSON.stringify(yRuns));
+    check('(Y) the finding the comment covers is sast-suppressed, a WARN naming the rule it suppresses, never sast-critical; the one sharing its line and the one sharing its rule still BLOCK',
+      y.status === 1 && y.stdout.includes('\nBLOCKED — 2 critical finding(s). ') && y.stdout.includes('### ⚠️ `sast-suppressed` · T1 · 1 finding(s)')
       && y.stdout.includes('- ⚠️ app/login.php:7 — nosemgrep on this line suppresses sast-critical php.lang.security.injection — tainted sql _(CWE-89)_')
-      && y.stdout.includes('### ❌ `sast-critical` · T0 · 1 finding(s)') && y.stdout.includes('- ❌ app/login.php:9 — other'), verdict(y));
-    const yp = broken({ SEMGREP_BIN: sgNosem }, { GITHUB_ACTIONS: 'true', CRITICAL_CHECKS: 'sast-suppressed' });
+      && y.stdout.includes('### ❌ `sast-critical` · T0 · 2 finding(s)') && y.stdout.includes('- ❌ app/login.php:7 — other') && y.stdout.includes('- ❌ app/login.php:9 — tainted sql _(CWE-89)_')
+      && !y.stdout.includes('could not look'), verdict(y));
+    const yp = broken({ SEMGREP_BIN: sgNosem }, { GITHUB_ACTIONS: 'true', CRITICAL_CHECKS: 'sast-suppressed' }, yr);
+    sgRuns();
     check('(Y) sast-suppressed promoted: the suppression blocks too, annotated by the rule it suppresses',
-      yp.status === 1 && yp.stdout.includes('\nBLOCKED — 2 critical finding(s). ')
+      yp.status === 1 && yp.stdout.includes('\nBLOCKED — 3 critical finding(s). ')
       && commands(yp.stdout).includes('::error file=app/login.php,line=7,title=security-baseline sast-suppressed::sast-suppressed php.lang.security.injection at app/login.php:7'), JSON.stringify(commands(yp.stdout)));
+    // The control run could not look (1.178.0's registry-down answer, as in (H)): nothing is classified, the
+    // leg is at fault naming the control run, and all three stand under their own id beside it.
+    const yd = broken({ SEMGREP_BIN: nosemStub('semgrep-nosem-down', `echo '${registryDown}'; exit 7`) }, { GITHUB_ACTIONS: 'true' }, yr);
+    sgRuns();
+    check('(Y) a control run that could not look: the leg is at fault naming it, nothing is marked — the three findings stand under their own id beside the fault, never silently',
+      yd.status === 1 && yd.stdout.includes('- ❌ semgrep community SAST — semgrep nosemgrep-control exit 7: SemgrepError — Failed to download configuration from https[:]//semgrep.dev/c/p/security-audit HTTP 503.')
+      && yd.stdout.includes('### ❌ `sast-critical` · T0 · 3 finding(s)') && !yd.stdout.includes('sast-suppressed'), verdict(yd));
+    // The control run skipped the file (a timeout entry naming it, results none): without the file's answer
+    // every result of the first run would read as waived — three WARNs and a PASS over three bare findings.
+    const ySkip = JSON.stringify({ results: [], errors: [{ code: 3, level: 'warn', type: 'Timeout', path: 'app/login.php', message: 'Timeout when running php.lang.security.injection on app/login.php' }] });
+    const ys = broken({ SEMGREP_BIN: nosemStub('semgrep-nosem-skip', `echo '${ySkip}'`) }, { GITHUB_ACTIONS: 'true' }, yr);
+    sgRuns();
+    check('(Y) a control run that skipped the file: nothing in it is marked, the leg is at fault naming the file, and the three stand under their own id — never three WARNs and a PASS',
+      ys.status === 1 && ys.stdout.includes('- ❌ semgrep community SAST — semgrep nosemgrep-control could not finish 1 file it had scanned — app/login.php')
+      && ys.stdout.includes('### ❌ `sast-critical` · T0 · 3 finding(s)') && !ys.stdout.includes('sast-suppressed'), verdict(ys));
+    // No file the results name says nosem (the shared fixture): three runs with the flag, no control run.
+    const yn = broken({ SEMGREP_BIN: sgNosem }, { GITHUB_ACTIONS: 'true' });
+    const ynRuns = sgRuns();
+    check('(Y) no file the results name says nosem: three runs with the flag and no control run; the three findings under their own id',
+      ynRuns.length === 3 && ynRuns.every(flagged) && yn.stdout.includes('### ❌ `sast-critical` · T0 · 3 finding(s)') && !yn.stdout.includes('sast-suppressed'), JSON.stringify(ynRuns));
 
     // ---- (Z) a base that fell back to HEAD~1 is said (v1.32.0) ----
     const z = broken({}, { BASE_REF: '', GITHUB_BASE_REF: '', GITHUB_EVENT_BEFORE: '0'.repeat(40), PR_HEAD_SHA: '' });
