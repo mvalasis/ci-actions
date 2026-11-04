@@ -78,6 +78,15 @@ implementations: `security-baseline/scripts/scan.mjs` `collectOsv()` (since v1.2
 two copies to the same answers) and `deps-currency/scripts/scan.mjs` (since v1.29.5; its workspace
 and working directory resolved since v1.29.7).
 
+**A field the adapter reads from a scanner's output is measured on the pinned binary before anything
+relies on it.** `selftest.mjs` stubs every scanner, so a stub that answers a field the real binary never
+writes passes the whole suite and fails every caller: v1.32.0's first cut read `sast-suppressed` off
+`extra.is_ignored`, taken from semgrep's source, which 1.178.0 does not write under `--disable-nosem`
+(`selftest-nosem.sh` printed `unset` on the runner; the fix asks the binary a question it does answer, a
+second run without the flag). A new reading of a scanner's output gets its runner-only self-test on the
+real pinned binary in the same change (`selftest-nosem.sh`, `selftest-pr-shape.sh`), and the stub is
+written from that measurement, never from the tool's source.
+
 **Known limit, not papered over:** for bash the crash-guard check matches any `trap … EXIT`, so a
 pure cleanup trap reads as a guard. A behavioural self-test that actually crashes the real
 entrypoint — not a static check — is what proves the guard fires. Mutation-test every new
