@@ -19,6 +19,7 @@ silently un-enforce every repo.
 | **T0 — CRITICAL** | always blocks (when `fail-on-critical`, the default) | `sast-critical` (semgrep community ERROR on the diff — *today's block, unchanged*); `secret-pattern` (gitleaks pattern on the diff — *today's block, unchanged*); `secret-verified` (trufflehog `--only-verified` on the **diff range** — NEW; a provider just authenticated it → ~zero FP) |
 | **T1 — promotable WARN** | reports; a caller ELEVATES any id to CRITICAL via `critical-checks` | `sca-critical`, `sca-high` (osv-scanner); the custom **WP/PHP** rules (`wp-nonce-missing`, `wp-cap-missing`, `wp-sql-unprepared`, `wp-unserialize`, `wp-file-include`, `wp-rest-error-detail`, `wp-rest-error-detail-laundered`, `wp-weak-crypto`, `turnstile-test-key`); the custom **Astro/TS/RN** rules (`ts-dangerous-html`, `ts-eval`, `ts-child-process`, `ts-public-secret-leak`, `ts-ssrf`, `ts-open-redirect`, `ts-secret-in-log`, `rn-insecure-storage`, `rn-cleartext-http`); the **GitHub-Actions** rules (`gha-unpinned-action`, `gha-script-injection`, `gha-pr-target`); `dockerfile-lint`; `argv-secret` (a secret spelled into a child's argv — §argv-secret); `wp-rest-gate-case` (a REST gate that tests the route case-sensitively — §wp-rest-gate-case) |
 | **T1 — hardening** (v1.30.0) | as above: WARN until a caller promotes it | `wf-no-permissions`, `wf-cancel-deploy`, `wf-ssh-keyscan`, `wf-secret-in-run`, `vendor-pin` (§Workflow hardening and vendor pins) |
+| **T1 — the scanned commit configuring its scanner** (v1.32.0) | as above: WARN until a caller promotes it | `sast-suppressed` (a semgrep finding a `nosemgrep` comment on its line would have removed), `secret-suppressed` (a gitleaks finding a `gitleaks:allow` comment on its added line would have removed), `scan-config-changed` (a `.gitleaks.toml`, `.gitleaksignore`, `.semgrepignore` or `osv-scanner.toml` added or changed in the range) — §Honest limits |
 | **T2 — advisory** | reports (WARN/INFO); never promotable | `sca-moderate`/`sca-low` (INFO); `wp-unescaped-output` (syntactic XSS — too FP-heavy to promote); `wp-rest-wp-error-detail` (`WP_Error::get_error_message()` in a REST/AJAX body — usually the *intended* client message, so advisory-only); `ts-cors-wildcard`; `secrets-history` (full-history baseline — clearing needs a history rewrite, so it can **never** be a merge precondition — and what the diff's secret legs find in a commit the base already holds: trufflehog since v1.19.7, gitleaks since v1.19.8) |
 
 The CRITICAL core is exactly what a clean repo always passes; **a failure there is always a real
@@ -138,8 +139,10 @@ its dependencies stay the lock's, so a version they do not satisfy fails the ste
 2. Take the asset's digest from GitHub's API and check it against the vendor's checksums file, and
    its signature or provenance where one is published. Record what was checked in `tool-pins.txt`.
 3. Change the version and digest in `tool-pins.txt` and the `*-version` default in `action.yml`
-   (for osv-scanner, in `deps-currency/action.yml` too). `scripts/selftest-pins.sh` fails while
-   they disagree.
+   (for osv-scanner, in `deps-currency/action.yml` too). For gitleaks, also refresh
+   `rules/gitleaks.toml` (v1.32.0): the body below its sentinel line is `config/gitleaks.toml` at the
+   new tag, byte for byte, and the header's `source`, `gitleaks-version` and `sha256` (of that body)
+   name it. `scripts/selftest-pins.sh` fails while any of them disagree.
 4. semgrep: rerun the `uv pip compile` command in `semgrep-requirements.txt`'s header with the new
    version, `--exclude-newer` a week back and semgrep's own upload day in
    `--exclude-newer-package`; set `semgrep-version`'s default; check the lock's packages against
@@ -412,8 +415,9 @@ git's own merge of their parents`.
   HEAD instead (a PR head the checkout lacks), it is skipped by name.
 - **`.gitleaksignore`.** gitleaks pins a finding to the commit it read the line in, here the pass's.
   An entry pinned to one of the range's merges (`<merge>:<file>:<rule>:<line>`, the form the fleet
-  uses) is handed to gitleaks pinned to the pass's commit as well, beside the checkout's own file. A
-  global entry (`<file>:<rule>:<line>`) matches as before, since the file and line are the merge's.
+  uses) is handed to gitleaks pinned to the pass's commit as well, beside the rest of the file — the
+  BASE commit's copy since v1.32.0, never the checkout's (§Honest limits). A global entry
+  (`<file>:<rule>:<line>`) matches as before, since the file and line are the merge's.
 - **Cost.** A range that holds a merge clones the checkout, under `verified-secrets: off` too, and
   runs one `git merge-tree` per merge (one per head of an octopus). Merges that add lines cost one
   more gitleaks run for all of them, and a trufflehog walk each. It needs git 2.38 or later
@@ -649,6 +653,37 @@ fleet shipped it twice: a CF7 proxy gate, then a second plugin's namespace gate.
 
 ## Honest limits
 
+- **The scanned commit no longer configures its scanner (v1.32.0).** Until v1.31.0 every gitleaks run
+  took its configuration from the tree under test, so the commit that added a key could add, in the
+  same push, what silenced it. Measured on gitleaks 8.30.1 (`cmd/root.go`, `detect/`): without
+  `--config` it loads a `.gitleaks.toml` found in its `--source` directory, and an `[allowlist]` there
+  took 2 findings to 0, exit 0, `[]`; it ALWAYS adds `<source>/.gitleaksignore` to whatever
+  `--gitleaks-ignore-path` names (the flag's file, then the source's, every entry honoured — the flag
+  replaces nothing), so a 3-field entry (`<file>:<rule>:<line>`, no sha needed) committed in the range
+  did the same, flag or no flag; and a `gitleaks:allow` comment on the added line took 1 finding to 0.
+  Now every gitleaks run gets `--config rules/gitleaks.toml`, gitleaks' own default rules vendored whole
+  (held to `gitleaks-version` by `selftest-pins.sh`: the header's version and the body's sha256);
+  `--gitleaks-ignore-path`, a file of the run's holding the BASE commit's `.gitleaksignore` — what the
+  base already waived — and the run's own entries (§What a merge adds); and `--source`, an EMPTY
+  directory of the run's with `GIT_DIR` naming the checkout's repository, so the `git log` gitleaks runs
+  is this repository's and nothing of the checkout's is beside it. The range's runs also pass
+  `--ignore-gitleaks-allow`, and a finding whose line carries the comment is `secret-suppressed`, a T1
+  WARN naming the rule it would have silenced, its commit and its redacted value. semgrep's `nosemgrep`
+  comment was the same hole: every semgrep leg runs with `--disable-nosem`, under which a finding the
+  comment covers is reported flagged `extra.is_ignored` instead of removed, and it is emitted as
+  `sast-suppressed`, a T1 WARN naming the rule — that reading is the pinned semgrep's, pinned on the
+  runner's real one by `selftest-nosem.sh`. A `.gitleaks.toml`, `.gitleaksignore`, `.semgrepignore` or
+  `osv-scanner.toml` the range adds or changes is `scan-config-changed` (T1 WARN, one per file,
+  CWE-693). So a waiver is a merge behind, by design: it takes hold once it is in the base, and the run
+  whose range adds it reports the finding beside the WARN. Honoured on purpose: the base's
+  `.gitleaksignore`; the `gitleaks:allow` comment on the history leg, and on a run with no base
+  (`scan-scope: full`), which also honours the checkout's own ignore file, as gitleaks would, and says
+  so in the scanner notes. Still read from the checkout: `.semgrepignore` (flagged when it changes, not
+  bypassed — semgrep names the paths it skipped only under `--verbose`, which the legs' `--quiet`
+  excludes) and `osv-scanner.toml` (its leg is WARN-tier). The fleet on 2026-11-04: no checkout root
+  holds a `.gitleaks.toml`; `gitleaks:allow` appears in epn.one (one test file) and luxairport-frontend
+  (docs), `.gitleaksignore` in ci-actions, lampakia-astro, luxairportlu `dev` (39 entries) and
+  luxairport-frontend — all in their bases, so no diff run newly reports one.
 - **gitleaks' range lists base commits past a clock skew; what it finds there is history (v1.19.8).**
   `--log-opts <base>..HEAD` is `git log`'s range, and git stops walking the base's side once that
   side is dated older than everything left on the head's, so it can list commits the base holds.
@@ -831,16 +866,21 @@ fleet shipped it twice: a CF7 proxy gate, then a second plugin's namespace gate.
   git cannot place a minted commit. 13 new assertions; 13 targeted mutants each turn it red, and
   every new assertion goes red under at least one.
   Its (U) leg (v1.20.0) covers what a merge commit adds, on the clock-skew leg's gitleaks stub, which
-  also honours `--gitleaks-ignore-path` and the source's `.gitleaksignore` and exits 0 with `[]` when
-  its `git log` dies. The fixture is a
+  also reads the `--gitleaks-ignore-path` file AND the `--source` directory's own `.gitleaksignore`,
+  additively, as 8.30.1 does (so only an empty `--source` keeps the checkout's copy out), honours a
+  `gitleaks:allow` comment unless `--ignore-gitleaks-allow`, runs its `git log` in `--source` (`GIT_DIR`
+  is what makes an empty one read the repository), carries no line text in its report, and exits 0 with
+  `[]` when that log dies (v1.32.0). The fixture is a
   push of a merge whose conflict resolution keeps a key its base held and adds one, and which adds a
   file; the control is the range's own gitleaks run, which reads neither of the merge's keys. It asserts
   the range's run as before plus one run of the pass commit, checked against a reference computation
   of it; BLOCKED on the merge's two keys and the topic's, each named where it was added, never the
   base's, with no leg that could not look; trufflehog's walk of the same commit graded
   `secret-verified`; the note; nothing written to the checkout; and the same under
-  `verified-secrets: off`. Then an ignore entry pinned to the merge and its control pinned to another
-  commit; a merge that adds nothing (the runs exactly as without the pass); an octopus (its last head's key read
+  `verified-secrets: off`. Then an ignore entry of the BASE's pinned to the merge (a base that moved on
+  to waive it, as origin/main after a reviewer waived what the PR's report showed), its control pinned
+  to another commit, and the checkout's own file pinning the merge, which is not read (v1.32.0); a
+  merge that adds nothing (the runs exactly as without the pass); an octopus (its last head's key read
   once, in its own commit); a PR that merged its base in, walked from its head and, with a test merge
   that is not git's own, from HEAD; an inherited alternate object directory, with trufflehog reading
   only the clone; a merge the base holds, listed past a clock skew (seven base commits dated before
@@ -881,8 +921,59 @@ fleet shipped it twice: a CF7 proxy gate, then a second plugin's namespace gate.
   with no `file=`; a local run (no `GITHUB_WORKSPACE`) reads the same row. v1.29.5's `scan.mjs` fails
   4 of the 5 end-to-end checks (the fifth pins the outside row, unchanged); 9 targeted mutants each turn it red, and
   each new check goes red under at least one.
+  Its **scan-configuration** legs (v1.32.0) hold what §Honest limits' first bullet says, on the stub
+  above (8.30.1 as measured); each case first runs a control on the stub as `scan.mjs` ran gitleaks
+  until v1.31.0 — the range's own `.gitleaksignore` read and the key gone, the same with
+  `--gitleaks-ignore-path` naming an empty file and `--source` the checkout (the flag alone leaves the
+  hole open, which is why `--source` must be empty), the `gitleaks:allow` comment honoured — so no case
+  passes for the wrong reason. (X): a range that adds a key and, in the same
+  commit, a `.gitleaksignore` entry for it, an allow-all `.gitleaks.toml`, a `.semgrepignore` and an
+  `osv-scanner.toml`. The key BLOCKS; every gitleaks run carries `--config`, the vendored rules, and
+  `--gitleaks-ignore-path`, a file of the run's outside the checkout, handed over empty since the base
+  has no ignore file; the run's `--source` is an empty directory outside the checkout, `GIT_DIR` the
+  checkout's `.git` and `GIT_WORK_TREE` that directory; the four files are `scan-config-changed` WARNs
+  naming the file, and promoted they block with one `::error file=<f>` each; no planted value reaches
+  the log or stderr. (X-b) a waiver the base holds stands: its line silent, the other key BLOCKS, the
+  file handed over is the base's, and the note names the base and its entry count. (X-c) the range
+  widening that waiver changes nothing for the run: the key still BLOCKS and the file is a WARN. (X-d)
+  `scan-scope: full` honours the checkout's own file, says so, still runs with the vendored config and
+  emits no `scan-config-changed`. (X-e) a `gitleaks:allow` comment on an added line: the range's run
+  passes `--ignore-gitleaks-allow`, the commented key is `secret-suppressed` naming `secret-pattern
+  generic-api-key`, its redacted value and its commit, and the bare one BLOCKS; promoted, the
+  suppression blocks too, annotated `secret-suppressed generic-api-key at allowed.txt:1`; under
+  `scan-scope: full` no flag, the comment honoured, the bare key alone. (Y) semgrep: every leg runs with
+  `--disable-nosem`; a result flagged `extra.is_ignored` is `sast-suppressed`, naming `sast-critical`
+  and the rule, never `sast-critical`, while the unflagged one beside it BLOCKS; promoted, the
+  suppression blocks and annotates by the rule. (Z) a base that fell back to `HEAD~1` is said: on a
+  push whose `event.before` is the all-zero sha (a new branch), or one the checkout lacks (after a
+  force-push), the scanner notes name the fallback and why, and a given base is never said to be one.
+  The unit legs pin `rules/gha.yaml`'s widened `gha-script-injection` regex live out of the rule file
+  (`github.head_ref`, `github.event.inputs.*` and `github.event.client_payload.*` flagged; `github.sha`,
+  `github.event_name`, a PR number and an `env:` read not), that the three ids are claimed by the right
+  legs (`sast-suppressed` by every semgrep leg, `secret-suppressed` by the gitleaks range leg and never
+  the history leg, `scan-config-changed` by its own; all T1), and that the worst-case step summary,
+  every emittable id at `safe()`'s caps, renders under 900,000 bytes (829,130 at 13 rows a group; at 15
+  it no longer fits). 34 new checks. 26 targeted mutants of `scan.mjs`, `tiers.mjs`,
+  `outcome.mjs`, `rules/gha.yaml`, the stub and the fixture each turn it red — the vendored `--config`
+  dropped; the base's ignore file replaced by an empty one, or by the checkout's own; `--source` dropped;
+  `GIT_DIR` and `GIT_WORK_TREE` not set; `--disable-nosem` dropped; `is_ignored` never read; the
+  scan-config collector unwired; the `HEAD~1` note dropped, or said of a given base too; `pinnedToMerges`
+  reading the checkout's file; 15 rows a group; `--ignore-gitleaks-allow` dropped; `allowCommented` always
+  false; the comment honoured on the range too; `redact` returning the value; `sast-suppressed` unclaimed
+  by the community leg; `scan-config-changed` missing from `CHECKS`; the rule's regex as before v1.32.0,
+  matching `github.` alone, matching everything, or without the title and body shapes; its tier T2; the
+  stub not reading the source's ignore file, reading none at all, or ignoring the comment — and every new
+  check goes red under at least one. `selftest-pins.sh` holds `rules/gitleaks.toml` to the
+  pin (the header's version and source URL, the body's sha256 below the sentinel, at least 200
+  `[[rules]]`): 5 targeted mutants of the file each turn it red.
 - `bash scripts/selftest-rules.sh` — `semgrep --test` over every rule pack (each bad fixture
   fires, each good fixture stays silent).
+- `bash scripts/selftest-nosem.sh` (v1.32.0) — the semgrep behaviour `sast-suppressed` rests on, on the
+  REAL pinned semgrep: a one-rule config over a two-line file, scanned with `--disable-nosem` (two
+  results, the `nosemgrep`'d line flagged `extra.is_ignored: true`, the other not) and without it (the
+  control: one result; the comment removed the other). `selftest.mjs` stubs semgrep, so only this run can
+  say a semgrep bump still reads the flag that way. The self-test workflow runs it after
+  `selftest-rules.sh`; locally it needs a semgrep on `PATH` (or `SEMGREP_BIN`).
 - `bash scripts/selftest-pr-shape.sh` — the shapes this repo's own pushes never produce, scanned
   with the REAL trufflehog and gitleaks: `--only-verified` is swapped for an offline pass that prints
   unverified results, and per-run minted tokens in every commit show what was read. Five shapes: the
@@ -916,7 +1007,10 @@ fleet shipped it twice: a CF7 proxy gate, then a second plugin's namespace gate.
   walk's `^<since>`) and env (trufflehog's `GIT_DIR` alone). v1.20.0's `scan.mjs` fails all three,
   and so do 6 targeted mutants: a gitleaks log without a patch, a walk's log handed the scan's env,
   read to the root, started by name without `PATH`, without `--notes`, and a walk to the root
-  without `--diff-filter=AM`. Only this pin sees the one without `--notes`.
+  without `--diff-filter=AM`. Only this pin sees the one without `--notes`. Since v1.32.0 gitleaks' two
+  log lines must come from the scan's own empty `--source` (an absolute path, never `.`) with `GIT_DIR`
+  and `GIT_WORK_TREE` in the env: a `scan.mjs` that let gitleaks read the checkout's own
+  `.gitleaksignore` again fails here, on the real binary.
 
 - `bash scripts/selftest-pins.sh` (v1.21.0) — the installer and its pins. Offline: each pin in
   `tool-pins.txt` is well-formed and equals its `*-version` default here and in
@@ -969,6 +1063,11 @@ each is scoped to named findings:
 - The repo-root `.gitleaksignore` pins two historical gitleaks lookalikes to the commits that
   added them. In full scope the T0 gitleaks leg reads all of history, where reshaping a file
   cannot reach.
+
+Under `--disable-nosem` (v1.32.0) the two `nosemgrep` waivers surface in the self-scan as
+`sast-suppressed` WARNs naming the rule each suppresses — expected, like the fixtures' T1/T2
+findings, and the one shape a waiver now takes. The `.gitleaksignore` is read as the checkout's own
+because the self-scan is `scan-scope: full`, which has no base; on a diff run the base's copy is.
 
 A new critical in the self-scan is therefore a real one.
 

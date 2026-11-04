@@ -2,10 +2,12 @@
 # verify-signature: the commit must carry an SSH signature by a key in ALLOWED_SIGNERS. Ported from
 # luxairportlu's scripts/deploy-verify-signature.sh (7654db4). Needs no token, network or key.
 # Env: ALLOWED_SIGNERS (ssh-keygen's allowed-signers format; the principal only names the signer in
-# the log, git matches the key), HEAD_SHA (the commit).
+# the log, git matches the key), HEAD_SHA (the commit), EVENT_FORCED (`true` when the push replaced
+# history, v1.32.0).
 # Exit 0 = signed by a listed key; 1 = unsigned, GPG-signed (a merge GitHub made: the web button,
-# `gh pr merge`, Dependabot) or SSH-signed by a key not listed; 2 = it could not verify: an empty list,
-# no such commit, a runner too old, or its own crash. Every path but the first refuses the deploy.
+# `gh pr merge`, Dependabot), SSH-signed by a key not listed, or the tip of a force-push, whoever
+# signed it; 2 = it could not verify: an empty list, no such commit, a checkout on another commit than
+# the one verified, a runner too old, or its own crash. Every path but the first refuses the deploy.
 finished=0
 list=""
 on_exit() {
@@ -28,9 +30,18 @@ refuse() { # <exit> <message>
 
 sha="${HEAD_SHA:-}"
 [ -n "$sha" ] || refuse 2 "no commit to verify; nothing may deploy"
+# A signature says who made a commit, not that it belongs on this branch now: any commit an operator ever
+# signed verifies, so a token holder could force an old or a sideways signed commit onto the deploy branch.
+# A push that replaced history is refused whatever signed its tip (v1.32.0); the caller's own check that
+# the tip descends from what is deployed covers the fast-forward of another branch (README).
+[ "${EVENT_FORCED:-}" != true ] || refuse 1 "a force-push replaced this branch's history, and $sha is refused whoever signed it: a deploy's tip must be a fast-forward of what was there"
 signers="$(sed '/^[[:space:]]*$/d' <<<"${ALLOWED_SIGNERS:-}")"
 [ -n "$signers" ] || refuse 2 "allowed-signers is empty: no key may sign a deploy, so nothing may deploy"
 git cat-file -e "$sha^{commit}" 2>/dev/null || refuse 2 "$sha is not a commit in this checkout; nothing may deploy"
+# What is checked out is what the deploy builds: a workflow that checked out another ref (a dispatch's
+# `ref` input) would verify github.sha and deploy something else (v1.32.0).
+head="$(git rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true)"
+[ -z "$head" ] || [ "$head" = "$sha" ] || refuse 2 "the checkout is on $head, this run verifies $sha: a deploy must build the commit it verified; nothing may deploy"
 
 umask 077
 list="$(mktemp "${TMPDIR:-/tmp}/verify-signature.XXXXXX")" || { list=""; refuse 2 "mktemp failed; nothing may deploy"; }

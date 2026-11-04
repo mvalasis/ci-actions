@@ -8,9 +8,13 @@ trap 'rm -rf "$T"' EXIT
 fails=0
 ok() { echo "  ✅ $1"; }
 bad() { echo "  ❌ $1"; fails=$((fails + 1)); }
+# The checkout is put on the commit under test first (v1.32.0: a checkout on another commit is refused),
+# when the repo holds it.
+at() { [ -n "$1" ] && git -C "$T/repo" cat-file -e "$1^{commit}" 2>/dev/null && git -C "$T/repo" checkout -q --detach "$1"; return 0; }
 expect() { # <name> <exit> <needle> <env assignment…>
-  local name="$1" want="$2" needle="$3" out rc
+  local name="$1" want="$2" needle="$3" out rc a
   shift 3
+  for a in "$@"; do case "$a" in HEAD_SHA=*) at "${a#HEAD_SHA=}" ;; esac; done
   out="$(cd "$T/repo" && env "$@" bash "$V" 2>&1)"; rc=$?
   if [ "$rc" = "$want" ] && grep -qF -- "$needle" <<<"$out"; then ok "$name"; else bad "$name: rc $rc, $out"; fi
 }
@@ -52,6 +56,16 @@ expect 'an unset list fails closed' 2 'allowed-signers is empty' HEAD_SHA="$SIGN
 expect 'no sha fails closed' 2 'no commit to verify' ALLOWED_SIGNERS="$LIST" HEAD_SHA=
 expect 'a sha this checkout lacks fails closed' 2 'is not a commit in this checkout' ALLOWED_SIGNERS="$LIST" HEAD_SHA=1111111111111111111111111111111111111111
 
+# v1.32.0: a force-push is refused whoever signed its tip; off a push event the variable is empty and
+# nothing changes (every other case above runs without it).
+expect 'the tip of a force-push is refused, though a listed key signed it' 1 "a force-push replaced this branch's history" EVENT_FORCED=true ALLOWED_SIGNERS="$LIST" HEAD_SHA="$SIGNED"
+expect 'event.forced false changes nothing' 0 'is signed by ops@test' EVENT_FORCED=false ALLOWED_SIGNERS="$LIST" HEAD_SHA="$SIGNED"
+expect 'an unsigned tip that is also a force-push: the force-push is named' 1 "a force-push replaced this branch's history" EVENT_FORCED=true ALLOWED_SIGNERS="$LIST" HEAD_SHA="$UNSIGNED"
+# A checkout on another commit than the one verified: a signed github.sha does not vouch for what is built.
+at "$UNSIGNED"
+out="$(cd "$T/repo" && ALLOWED_SIGNERS="$LIST" HEAD_SHA="$SIGNED" bash "$V" 2>&1)"; rc=$?
+if [ "$rc" = 2 ] && grep -qF -- "the checkout is on $UNSIGNED, this run verifies $SIGNED" <<<"$out"; then ok 'a checkout on another commit than the one verified fails closed, naming both'; else bad "checkout mismatch: rc $rc, $out"; fi
+
 mkdir "$T/noskg"
 for t in git sed grep mktemp rm tail bash env cat; do ln -s "$(command -v "$t")" "$T/noskg/$t"; done
 expect 'a runner with no ssh-keygen fails closed' 2 'cannot verify SSH signatures' PATH="$T/noskg" ALLOWED_SIGNERS="$LIST" HEAD_SHA="$SIGNED"
@@ -62,6 +76,7 @@ expect 'a mktemp that fails fails closed' 2 'mktemp failed' PATH="$T/nomktemp:$P
 
 # The crash guard itself: a script that dies under it must still refuse.
 sed 's/^umask 077$/exit 7/' "$V" > "$T/crash.sh"
+at "$SIGNED"
 out="$(cd "$T/repo" && ALLOWED_SIGNERS="$LIST" HEAD_SHA="$SIGNED" bash "$T/crash.sh" 2>&1)"; rc=$?
 if [ "$rc" = 2 ] && grep -qF 'stopped before a verdict, rc 7' <<<"$out"; then ok 'a crash mid-script refuses, exit 2'; else bad "crash guard: rc $rc, $out"; fi
 
@@ -72,6 +87,6 @@ if [ -z "$(ls -A "$T/tmpdir")" ]; then ok '…neither leaves the list on disk'; 
 
 # The real action.yml wires the input and the sha under these names.
 A="$HERE/../action.yml"
-if grep -qF 'ALLOWED_SIGNERS: ${{ inputs.allowed-signers }}' "$A" && grep -qF 'HEAD_SHA: ${{ github.sha }}' "$A"; then ok 'action.yml passes the input and the sha'; else bad 'action.yml wiring'; fi
+if grep -qF 'ALLOWED_SIGNERS: ${{ inputs.allowed-signers }}' "$A" && grep -qF 'HEAD_SHA: ${{ github.sha }}' "$A" && grep -qF 'EVENT_FORCED: ${{ github.event.forced }}' "$A"; then ok 'action.yml passes the input, the sha and event.forced'; else bad 'action.yml wiring'; fi
 
 if [ "$fails" -eq 0 ]; then echo '✅ all verify-signature self-tests passed'; else echo "❌ $fails self-test(s) failed"; exit 1; fi

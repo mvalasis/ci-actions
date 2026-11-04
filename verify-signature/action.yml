@@ -23,4 +23,8 @@ runs:
       env:
         ALLOWED_SIGNERS: ${{ inputs.allowed-signers }}
         HEAD_SHA: ${{ github.sha }}
+        # `true` when the push replaced history; empty off a push event (a dispatch, a schedule).
+        # Not spelled GITHUB_*: the runner exports no such variable, and a composite step's env must
+        # never shadow one that it does (.claude/rules/action-yml-conventions.md).
+        EVENT_FORCED: ${{ github.event.forced }}
       run: bash "${{ github.action_path }}/scripts/verify.sh"

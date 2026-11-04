@@ -33,6 +33,7 @@ const EMITTED = new Set([
   'ts-open-redirect', 'ts-secret-in-log', 'rn-insecure-storage', 'rn-cleartext-http', 'ts-cors-wildcard',
   'gha-unpinned-action', 'gha-script-injection', 'gha-pr-target', 'dockerfile-lint', 'argv-secret', 'wp-rest-gate-case',
   'wf-no-permissions', 'wf-cancel-deploy', 'wf-ssh-keyscan', 'wf-secret-in-run', 'vendor-pin',
+  'sast-suppressed', 'secret-suppressed', 'scan-config-changed',
 ]);
 
 let failed = 0;
@@ -272,6 +273,25 @@ console.log('\n# rules/gha.yaml — the three-segment `uses:` regex, proven with
     ['docker://alpine:3', false, 'docker ref'],
   ];
   for (const [ref, want, why] of cases) check(`${want ? 'flags' : 'ignores'} ${ref} — ${why}`, re.test(ref) === want);
+  // gha-script-injection (v1.32.0): github.head_ref, every workflow_dispatch input and every
+  // repository_dispatch client_payload field are attacker-controllable too. Python's inline `(?s)` is
+  // JS's `s` flag; the rest is identical in both engines.
+  const inj = yaml.split(/^\s*-\s+id:\s*/m).slice(1).find((b) => b.startsWith('gha-script-injection')) || '';
+  const im = inj.match(/regex:\s*'((?:[^']|'')*)'/);
+  check('the script-injection rule still declares a metavariable-regex, tier T1, checkId gha-script-injection', !!im && /tier:\s*T1\b/.test(inj) && /checkId:\s*gha-script-injection\b/.test(inj));
+  const ire = new RegExp((im ? im[1] : 'x^').replace(/''/g, "'").replace(/^\(\?s\)/, ''), 's');
+  const runs = [
+    ['echo "${{ github.event.issue.title }}"', true, 'an issue title (the case that always fired)'],
+    ['echo "${{ github.event.pull_request.head.ref }}"', true, "a PR's head ref"],
+    ['echo "${{ github.head_ref }}"', true, 'github.head_ref, the PR branch name as a top-level context'],
+    ['echo "${{ github.event.inputs.version }}"', true, 'a workflow_dispatch input, whatever its name'],
+    ['echo "${{ github.event.client_payload.sha }}"', true, 'a repository_dispatch payload field'],
+    ['echo "${{ github.sha }}"', false, 'github.sha is not attacker-controllable'],
+    ['echo "${{ github.event_name }}"', false, 'the event name is not'],
+    ['echo "${{ github.event.pull_request.number }}"', false, 'a PR number is not'],
+    ['echo "$TITLE"', false, 'a value read through env: is the fix, not a finding'],
+  ];
+  for (const [cmd, want, why] of runs) check(`${want ? 'flags' : 'ignores'} \`run: ${cmd}\` — ${why}`, ire.test(cmd) === want);
 }
 
 console.log('\n# the OWNERSHIP WIRING — scan.mjs + action.yml, not just the pure module');
@@ -537,6 +557,11 @@ console.log('\n# which legs can take the verdict away (canBeCritical + LEGS)');
   check('a T2 leg can never block, not even "promoted" (the history baselines)',
     !canBeCritical(LEGS.gitleaksHistory.checks, ['secrets-history']) && !canBeCritical(LEGS.trufflehogHistory.checks, ['secrets-history']));
   check('the changed-file list can always block (it feeds sast-critical)', canBeCritical(LEGS.diff.checks));
+  check('sast-suppressed: claimed by every semgrep leg, secret-suppressed by the gitleaks range leg alone, scan-config-changed by its own leg; all WARN until promoted (v1.32.0)',
+    [LEGS.community, LEGS.custom, LEGS.gha].every((l) => l.checks.includes('sast-suppressed')) && JSON.stringify(LEGS.scanConfig.checks) === '["scan-config-changed"]'
+    && !canBeCritical(LEGS.scanConfig.checks) && canBeCritical(LEGS.scanConfig.checks, ['scan-config-changed']) && canBeCritical(LEGS.custom.checks, ['sast-suppressed'])
+    && T1_CHECKS.has('sast-suppressed') && T1_CHECKS.has('scan-config-changed')
+    && LEGS.gitleaks.checks.includes('secret-suppressed') && !LEGS.gitleaksHistory.checks.includes('secret-suppressed') && T1_CHECKS.has('secret-suppressed') && canBeCritical(LEGS.gitleaks.checks, ['secret-suppressed']));
   check('the diff-scoped secret legs claim secrets-history too: what they find in a commit the base already holds',
     LEGS.gitleaks.checks.includes('secrets-history') && LEGS.trufflehog.checks.includes('secrets-history'));
   // A checkId a leg emits but does not claim would turn that leg's failure into a silent PASS for a
@@ -549,7 +574,7 @@ console.log('\n# which legs can take the verdict away (canBeCritical + LEGS)');
   check('every emitted checkId belongs to a leg', [...EMITTED].every((id) => claimed.has(id)), [...EMITTED].filter((id) => !claimed.has(id)).join(','));
   check('every leg check is a real CHECKS id', [...claimed].every((id) => Object.prototype.hasOwnProperty.call(CHECKS, id)));
   check('the changed-file list claims every diff-scoped leg\'s checks',
-    [LEGS.community, LEGS.custom, LEGS.hadolint, LEGS.argvSecret, LEGS.restGateCase].every((l) => l.checks.every((id) => LEGS.diff.checks.includes(id))));
+    [LEGS.community, LEGS.custom, LEGS.hadolint, LEGS.argvSecret, LEGS.restGateCase, LEGS.scanConfig].every((l) => l.checks.every((id) => LEGS.diff.checks.includes(id))));
 
   const fa = faultAnnotation('semgrep community SAST', 'semgrep exit 2: x');
   check('faultAnnotation: one ::error, a fixed title, the leg and why', fa === '::error title=security-baseline could not look::semgrep community SAST could not look — semgrep exit 2: x', fa);
@@ -1666,19 +1691,26 @@ if [ "$n" = 0 ]; then echo '{"Verified":true,"DetectorName":"Github","Raw":"x","
     // stub is 8.30.1 as measured and as its source reads (sources/git.go, detect/detect.go): it runs
     // `git log -p -U0` with --log-opts split on spaces (with none, `--full-history --all
     // --diff-filter=tuxdb`), reports each added line holding a GLKEY with the file and line it has in
-    // that commit, skips a finding an ignore file lists (--gitleaks-ignore-path, and the source's
-    // .gitleaksignore; `<commit>:<file>:<rule>:<line>` or `<file>:<rule>:<line>`), and when its `git
-    // log` dies it still exits 0 with `[]`.
+    // that commit, skips a finding an ignore file lists (the --gitleaks-ignore-path file or directory AND
+    // the --source directory's own .gitleaksignore, additively, as cmd/root.go reads them; `<commit>:<file>:
+    // <rule>:<line>` or `<file>:<rule>:<line>`) or whose line carries `gitleaks:allow` (unless
+    // --ignore-gitleaks-allow), runs its `git log` in --source (so GIT_DIR in its env is what makes an empty
+    // source read this repository), and when that log dies it still exits 0 with `[]`. Its report, like the
+    // real one's, carries no line text.
     const glArgv = path.join(tmp, 'gitleaks-as-measured-argv.log');
     const glJs = path.join(tmp, 'gitleaks-as-measured.mjs');
     fs.writeFileSync(glJs, [
       "import { spawnSync } from 'node:child_process';",
       "import fs from 'node:fs';",
+      "import path from 'node:path';",
       'const argv = process.argv.slice(2);',
       "const opt = (n) => { const i = argv.indexOf(n); return i < 0 ? '' : argv[i + 1]; };",
       "if (process.env.GL_ARGV) fs.appendFileSync(process.env.GL_ARGV, JSON.stringify(argv) + '\\n');",
+      "if (process.env.GL_IGNORE) { let t = null; try { t = fs.readFileSync(opt('--gitleaks-ignore-path'), 'utf8'); } catch { /* none given, or unreadable */ } fs.appendFileSync(process.env.GL_IGNORE, JSON.stringify(t) + '\\n'); }",
+      "const source = opt('--source') || '.';",
+      "if (process.env.GL_ENV) { let entries = null; try { entries = fs.readdirSync(source); } catch { /* no such directory */ } fs.appendFileSync(process.env.GL_ENV, JSON.stringify({ source, entries, GIT_DIR: process.env.GIT_DIR || '', GIT_WORK_TREE: process.env.GIT_WORK_TREE || '' }) + '\\n'); }",
       "const logOpts = opt('--log-opts');",
-      "const r = spawnSync('git', ['log', '-p', '-U0', ...(logOpts ? logOpts.split(' ') : ['--full-history', '--all', '--diff-filter=tuxdb'])], { encoding: 'utf8', maxBuffer: 1 << 26 });",
+      "const r = spawnSync('git', ['-C', source, 'log', '-p', '-U0', ...(logOpts ? logOpts.split(' ') : ['--full-history', '--all', '--diff-filter=tuxdb'])], { encoding: 'utf8', maxBuffer: 1 << 26 });",
       'const found = [];',
       "let commit = '', file = '', line = 0;",
       "for (const l of r.status === 0 ? r.stdout.split('\\n') : []) {",
@@ -1686,21 +1718,25 @@ if [ "$n" = 0 ]; then echo '{"Verified":true,"DetectorName":"Github","Raw":"x","
       '  if ((m = /^commit ([0-9a-f]{40})/.exec(l))) commit = m[1];',
       "  else if ((m = /^\\+\\+\\+ (?:b\\/(.*)|\\/dev\\/null)$/.exec(l))) file = m[1] || '';",
       '  else if ((m = /^@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@/.exec(l))) line = +m[1];',
-      "  else if (l[0] === '+') { for (const k of l.match(/GLKEY[0-9A-F]{30}/g) || []) found.push({ RuleID: 'generic-api-key', File: file, StartLine: line, EndLine: line, Commit: commit, Secret: k, Match: k, Line: l.slice(1) }); line++; }",
+      "  else if (l[0] === '+') { for (const k of l.match(/GLKEY[0-9A-F]{30}/g) || []) found.push({ RuleID: 'generic-api-key', File: file, StartLine: line, EndLine: line, Commit: commit, Secret: k, Match: k, lineText: l.slice(1) }); line++; }",
       '}',
       'const ignore = new Set();',
-      "for (const f of [opt('--gitleaks-ignore-path'), '.gitleaksignore']) {",
-      "  let t = ''; try { t = fs.readFileSync(f, 'utf8'); } catch { continue; }",
+      "// 8.30.1 as its cmd/root.go reads, and as measured: the --gitleaks-ignore-path (a file, or a directory holding a .gitleaksignore; default '.') AND the source's own .gitleaksignore, every one honoured — the flag replaces nothing.",
+      "const ip = opt('--gitleaks-ignore-path') || '.';",
+      "for (const f of [ip, path.join(ip, '.gitleaksignore'), path.join(source, '.gitleaksignore')]) {",
+      "  let t = ''; try { if (!fs.statSync(f).isFile()) continue; t = fs.readFileSync(f, 'utf8'); } catch { continue; }",
       "  for (const raw of t.split('\\n')) { const e = raw.trim(); if (e && !e.startsWith('#')) ignore.add(e); }",
       '}',
-      "fs.writeFileSync(opt('--report-path'), JSON.stringify(found.filter((f) => !ignore.has([f.File, f.RuleID, f.StartLine].join(':')) && !ignore.has([f.Commit, f.File, f.RuleID, f.StartLine].join(':')))));",
+      "// A `gitleaks:allow` comment on the line removes the finding, unless --ignore-gitleaks-allow (measured: 1 finding to 0).",
+      "const allowed = (f) => !argv.includes('--ignore-gitleaks-allow') && /gitleaks:allow/.test(f.lineText);",
+      "fs.writeFileSync(opt('--report-path'), JSON.stringify(found.filter((f) => !allowed(f) && !ignore.has([f.File, f.RuleID, f.StartLine].join(':')) && !ignore.has([f.Commit, f.File, f.RuleID, f.StartLine].join(':'))).map(({ lineText, ...f }) => f)));",
     ].join('\n'));
     const glAsMeasured = stub('gitleaks-as-measured', `exec '${process.execPath}' '${glJs}' "$@"`);
     const keyFor = (tag) => (planted[tag] = mint('GLKEY'));   // a leak check covers each one
-    const glOnce = (cwd, logOpts) => {
+    const glOnce = (cwd, logOpts, extra = []) => {
       const rep = path.join(tmp, 'gitleaks-once.json');
       fs.rmSync(rep, { force: true });
-      spawnSync(glAsMeasured, ['detect', '--report-path', rep, '--log-opts', logOpts], { cwd, env: base, encoding: 'utf8' });
+      spawnSync(glAsMeasured, ['detect', '--report-path', rep, '--log-opts', logOpts, ...extra], { cwd, env: base, encoding: 'utf8' });
       return JSON.parse(fs.readFileSync(rep, 'utf8'));
     };
     const pushEnv = (before) => ({ BASE_REF: '', GITHUB_BASE_REF: '', GITHUB_EVENT_BEFORE: before, PR_HEAD_SHA: '' });
@@ -1721,10 +1757,13 @@ if [ "$n" = 0 ]; then echo '{"Verified":true,"DetectorName":"Github","Raw":"x","
       return { u, dir: u.dir, k, root, fork, pr, x7, head: u.merge('2026-09-09T12:00:00Z', 'main') };
     };
     // One scan through the as-measured gitleaks, the other scanners clean: its argv per run, and the report.
+    const glIgn = path.join(tmp, 'gitleaks-as-measured-ignore.log');   // the --gitleaks-ignore-path file handed to each run, or null
+    const glEnv = path.join(tmp, 'gitleaks-as-measured-env.log');      // each run's --source, what is in it, and its GIT_DIR / GIT_WORK_TREE
     const glScan = (cwd, env, extra = {}) => {
-      fs.rmSync(glArgv, { force: true });
-      const res = broken({ GITLEAKS_BIN: glAsMeasured }, { GL_ARGV: glArgv, GITHUB_ACTIONS: 'true', ENABLE_SECRETS_HISTORY: 'false', ...env, ...extra }, cwd);
-      return { ...res, glArgvs: fs.existsSync(glArgv) ? fs.readFileSync(glArgv, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [] };
+      fs.rmSync(glArgv, { force: true }); fs.rmSync(glIgn, { force: true }); fs.rmSync(glEnv, { force: true });
+      const res = broken({ GITLEAKS_BIN: glAsMeasured }, { GL_ARGV: glArgv, GL_IGNORE: glIgn, GL_ENV: glEnv, GITHUB_ACTIONS: 'true', ENABLE_SECRETS_HISTORY: 'false', ...env, ...extra }, cwd);
+      const logged = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+      return { ...res, glArgvs: logged(glArgv), glIgnores: logged(glIgn), glEnvs: logged(glEnv) };
     };
     const logOptsOf = (a) => (a.includes('--log-opts') ? a[a.indexOf('--log-opts') + 1] : '');
     const newKey = (file, k, sha) => `- ❌ ${file}:1 — generic-api-key ${redact(k)} in commit ${sha.slice(0, 7)} _(CWE-798)_`;
@@ -1880,16 +1919,155 @@ if [ "$n" = 0 ]; then echo '{"Verified":true,"DetectorName":"Github","Raw":"x","
       && umaOff.stdout.includes(glLine('conf.txt', 3, kRes, byMerge(maMerge))) && umaOff.stdout.includes(glLine('evil.live', 1, kEvil, byMerge(maMerge))), verdict(umaOff));
 
     // (U-b) The fleet's only ignore form pins a line to the commit that added it: for a merge's own
-    // line, the merge. gitleaks reads that line in the pass's commit, so the entry is handed over again.
-    fs.writeFileSync(path.join(ma, '.gitleaksignore'), `# the resolution's line, pinned to the merge\n  ${maMerge}:conf.txt:generic-api-key:3  \n`);
-    const umb = mergeScan(ma, pushEnv(maBefore), { VERIFIED_SECRETS: 'off' });
-    fs.writeFileSync(path.join(ma, '.gitleaksignore'), `${maBefore}:conf.txt:generic-api-key:3\n`);
-    const umbCtl = mergeScan(ma, pushEnv(maBefore), { VERIFIED_SECRETS: 'off' });
+    // line, the merge. gitleaks reads that line in the pass's commit, so the entry is handed over again —
+    // out of the BASE's .gitleaksignore (v1.32.0), never the checkout's. The base here moved on to waive the
+    // merge's line (a pull_request run's origin/main after a reviewer waived what the open PR's report
+    // showed), and is scanned against over the range it does not hold.
+    const waiver = (name, entry) => {
+      gitAt(ma)('checkout', '-q', '-b', name, maBefore);
+      const sha = commitFiles(ma, '2026-09-06T14:00:00Z', { '.gitleaksignore': `# the resolution's line, pinned\n  ${entry}  \n` }, name);
+      gitAt(ma)('checkout', '-q', 'main');
+      return sha;
+    };
+    const baseAt = (sha) => ({ BASE_REF: sha, GITHUB_BASE_REF: '', GITHUB_EVENT_BEFORE: '', PR_HEAD_SHA: '' });
+    const umb = mergeScan(ma, baseAt(waiver('waives-the-merge', `${maMerge}:conf.txt:generic-api-key:3`)), { VERIFIED_SECRETS: 'off' });
+    const umbCtl = mergeScan(ma, baseAt(waiver('waives-another-commit', `${maBefore}:conf.txt:generic-api-key:3`)), { VERIFIED_SECRETS: 'off' });
+    fs.writeFileSync(path.join(ma, '.gitleaksignore'), `${maMerge}:conf.txt:generic-api-key:3\n`);   // the checkout's own, uncommitted: never read
+    const umbOwn = mergeScan(ma, pushEnv(maBefore), { VERIFIED_SECRETS: 'off' });
     fs.rmSync(path.join(ma, '.gitleaksignore'));
-    check('(U-b) a .gitleaksignore entry pinned to the merge silences exactly that line of what the merge adds',
-      umb.status === 1 && !umb.stdout.includes(redact(kRes)) && umb.stdout.includes(glLine('evil.live', 1, kEvil, byMerge(maMerge)))
+    check("(U-b) a .gitleaksignore entry of the base's pinned to the merge silences exactly that line of what the merge adds",
+      shaIn(ma, 'HEAD') === maMerge && umb.status === 1 && !umb.stdout.includes(redact(kRes)) && umb.stdout.includes(glLine('evil.live', 1, kEvil, byMerge(maMerge)))
       && umb.stdout.includes(glLine('control.live', 1, kCtl, `in commit ${maCtl.slice(0, 7)}`)), verdict(umb));
     check('(U-b) control: the same entry pinned to another commit silences nothing', umbCtl.stdout.includes(glLine('conf.txt', 3, kRes, byMerge(maMerge))), verdict(umbCtl));
+    check("(U-b) the checkout's own .gitleaksignore, pinning the merge, is not read: the line is reported (v1.32.0)",
+      umbOwn.stdout.includes(glLine('conf.txt', 3, kRes, byMerge(maMerge))), verdict(umbOwn));
+
+    // ---- (X) the scanned commit no longer configures its scanner (v1.32.0) ----
+    // gitleaks 8.30.1 takes its configuration from the tree under test unless kept off it: without
+    // --config it loads a `.gitleaks.toml` found in --source, and it ALWAYS adds `<source>/.gitleaksignore`
+    // to the file --gitleaks-ignore-path names, so a commit that added a key could add the file that silences
+    // it (measured on the real binary: 2 findings to 0, exit 0, `[]`, with either file, a 3-field entry
+    // needing no sha; the flag alone left the ignore file's hole open). Every run now gets the vendored
+    // default config, the base's ignore file, and an EMPTY --source of its own with GIT_DIR naming the
+    // checkout's repository, so nothing of the checkout's is beside it.
+    const xr = repoAt('config-in-the-range');
+    const kX = keyFor('xKey');
+    const xBase = commitFiles(xr, '2026-11-04T10:00:00Z', { 'a.txt': 'a\n' }, 'base');
+    fs.mkdirSync(path.join(xr, 'apps'));
+    const xHead = commitFiles(xr, '2026-11-04T11:00:00Z', {
+      'conf.txt': `token=${kX}\n`,
+      '.gitleaksignore': 'conf.txt:generic-api-key:1\n',
+      '.gitleaks.toml': '[extend]\nuseDefault = true\n[allowlist]\npaths = [".*"]\n',
+      '.semgrepignore': 'conf.txt\n',
+      'apps/osv-scanner.toml': '[[IgnoredVulns]]\nid = "GHSA-xxxx"\n',
+    }, 'a key, and the files that would silence it');
+    const xCtl = glOnce(xr, `${xBase}..HEAD`);
+    check("(X) control: the stub run as the scan ran gitleaks until v1.31.0 reads the range's own .gitleaksignore and reports nothing (else the case is vacuous)", xCtl.length === 0, JSON.stringify(xCtl));
+    // The flag alone does not close it: --gitleaks-ignore-path naming an empty file of the run's, --source the checkout.
+    const xEmptyIgnore = path.join(tmp, 'empty.gitleaksignore');
+    fs.writeFileSync(xEmptyIgnore, '');
+    const xCtlFlag = glOnce(xr, `${xBase}..HEAD`, ['--gitleaks-ignore-path', xEmptyIgnore, '--source', xr]);
+    check("(X) control: with --gitleaks-ignore-path naming an empty file of the run's and --source the checkout, the stub still reads <source>/.gitleaksignore and reports nothing — the flag alone leaves the hole open (8.30.1 as measured), which is why --source must be empty", xCtlFlag.length === 0, JSON.stringify(xCtlFlag));
+    const tx = glScan(xr, pushEnv(xBase));
+    const after = (a, flag) => (a.includes(flag) ? a[a.indexOf(flag) + 1] : '');
+    const vendoredToml = fileURLToPath(new URL('../rules/gitleaks.toml', import.meta.url));
+    check("(X) the range's key BLOCKS: the .gitleaksignore it added is not read, and every gitleaks run carries --config, the vendored rules, and --gitleaks-ignore-path, a file of the run's",
+      tx.status === 1 && tx.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && tx.stdout.includes(glLine('conf.txt', 1, kX, `in commit ${xHead.slice(0, 7)}`)) && tx.glArgvs.length === 1
+      && tx.glArgvs.every((a) => after(a, '--config') === vendoredToml && path.isAbsolute(after(a, '--gitleaks-ignore-path')) && !after(a, '--gitleaks-ignore-path').startsWith(xr)),
+      JSON.stringify({ argvs: tx.glArgvs, verdict: verdict(tx) }));
+    check("(X) the ignore file handed over is the base's, which has none: empty", JSON.stringify(tx.glIgnores) === '[""]', JSON.stringify(tx.glIgnores));
+    const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+    const offRepo = (p) => path.isAbsolute(p) && !real(p).startsWith(real(xr) + path.sep);
+    check("(X) gitleaks runs in an EMPTY --source directory of the run's, with GIT_DIR naming the checkout's repository and GIT_WORK_TREE that directory: 8.30.1 adds <source>/.gitleaksignore to the file --gitleaks-ignore-path names, so the checkout's copy must not be beside it",
+      tx.glEnvs.length === 1 && offRepo(tx.glEnvs[0].source) && JSON.stringify(tx.glEnvs[0].entries) === '[]' && real(tx.glEnvs[0].GIT_DIR) === real(path.join(xr, '.git'))
+      && tx.glEnvs[0].GIT_WORK_TREE === tx.glEnvs[0].source && tx.glArgvs.every((a) => after(a, '--source') === tx.glEnvs[0].source), JSON.stringify(tx.glEnvs));
+    check('(X) each scanner configuration the range adds or changes is a scan-config-changed WARN naming the file',
+      tx.stdout.includes('### ⚠️ `scan-config-changed` · T1 · 4 finding(s)')
+      && ['.gitleaks.toml', '.gitleaksignore', '.semgrepignore', 'apps/osv-scanner.toml'].every((f) => tx.stdout.includes(`- ⚠️ ${f} — ${path.basename(f)} changed in this range: a scanner's own configuration, which may silence a finding — review the suppression before merging _(CWE-693)_`)), verdict(tx));
+    const txp = glScan(xr, pushEnv(xBase), { CRITICAL_CHECKS: 'scan-config-changed' });
+    check('(X) scan-config-changed promoted: the four files block too, one ::error each naming the file',
+      txp.status === 1 && txp.stdout.includes('\nBLOCKED — 5 critical finding(s). ')
+      && commands(txp.stdout).includes('::error file=.gitleaksignore,title=security-baseline scan-config-changed::scan-config-changed .gitleaksignore at .gitleaksignore')
+      && commands(txp.stdout).filter((l) => l.includes('scan-config-changed')).length === 4, JSON.stringify(commands(txp.stdout)));
+    check('(X) NO planted value reaches the job log or stderr', tx.stdout.length > 0 && !leaked(tx.stdout) && !leaked(tx.stderr));
+    // (X-b) A waiver the base already holds stands: its 3-field entry names the line, whatever commit adds it.
+    const xw = repoAt('waiver-in-the-base');
+    const kXw = keyFor('xWaived'), kXnew = keyFor('xNew');
+    const xwBase = commitFiles(xw, '2026-11-04T10:00:00Z', { '.gitleaksignore': '# waived by the base\nold.txt:generic-api-key:1\n' }, 'base, with a waiver');
+    const xwHead = commitFiles(xw, '2026-11-04T11:00:00Z', { 'old.txt': `token=${kXw}\n`, 'new.txt': `token=${kXnew}\n` }, 'two keys, one on the waived line');
+    const txw = glScan(xw, pushEnv(xwBase));
+    check("(X-b) a waiver the base holds stands: its line is silent, the other key BLOCKS, the file handed over is the base's, and the report says so",
+      txw.status === 1 && txw.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && !txw.stdout.includes(redact(kXw)) && txw.stdout.includes(glLine('new.txt', 1, kXnew, `in commit ${xwHead.slice(0, 7)}`))
+      && JSON.stringify(txw.glIgnores) === JSON.stringify(['# waived by the base\nold.txt:generic-api-key:1\n'])
+      && txw.stdout.includes(`\n- gitleaks: honouring the .gitleaksignore of the base, ${xwBase}, 1 entry — one the range adds or changes is not a suppression yet\n`), verdict(txw));
+    // (X-c) The range widening the base's waiver changes nothing for this run.
+    commitFiles(xw, '2026-11-04T12:00:00Z', { '.gitleaksignore': 'old.txt:generic-api-key:1\nnew.txt:generic-api-key:1\n' }, 'widen the waiver');
+    const txw2 = glScan(xw, pushEnv(xwBase));
+    check("(X-c) the range widening the base's waiver changes nothing: new.txt's key still BLOCKS, and the file is a scan-config-changed WARN",
+      txw2.status === 1 && txw2.stdout.includes(glLine('new.txt', 1, kXnew, `in commit ${xwHead.slice(0, 7)}`)) && txw2.stdout.includes('- ⚠️ .gitleaksignore — .gitleaksignore changed in this range'), verdict(txw2));
+    // (X-d) scan-scope: full has no base: the checkout's own file, as gitleaks would read it, and a note.
+    const txf = glScan(xw, { ...pushEnv(xwBase), SCAN_SCOPE: 'full' });
+    check("(X-d) scan-scope: full honours the checkout's own .gitleaksignore, says so, still runs with the vendored config, and grades no range",
+      txf.status === 0 && txf.stdout.includes("\n- gitleaks: scan-scope: full has no base, so the .gitleaksignore honoured is the checkout's own\n")
+      && JSON.stringify(txf.glIgnores) === JSON.stringify(['old.txt:generic-api-key:1\nnew.txt:generic-api-key:1\n'])
+      && txf.glArgvs.length === 1 && after(txf.glArgvs[0], '--config') === vendoredToml && !txf.stdout.includes('scan-config-changed'), JSON.stringify({ argvs: txf.glArgvs, verdict: verdict(txf) }));
+
+    // (X-e) A `gitleaks:allow` comment on the added line is the third way the range could silence itself
+    // (measured on 8.30.1: 1 finding to 0 without --ignore-gitleaks-allow; the report carries no line text, so
+    // the line is read from the commit). The range's runs pass the flag and emit the finding as
+    // secret-suppressed, a WARN naming the rule; promoted, it blocks; a run with no base (scan-scope: full)
+    // honours the comment as gitleaks does, as it honours the checkout's own ignore file.
+    const xa = repoAt('allow-in-the-range');
+    const kXa = keyFor('xAllow'), kXb = keyFor('xBare');
+    const xaBase = commitFiles(xa, '2026-11-04T10:00:00Z', { 'a.txt': 'a\n' }, 'base');
+    const xaHead = commitFiles(xa, '2026-11-04T11:00:00Z', { 'allowed.txt': `token=${kXa} # gitleaks:allow\n`, 'bare.txt': `token=${kXb}\n` }, 'two keys, one with an allow comment');
+    const xaCtl = glOnce(xa, `${xaBase}..HEAD`);
+    check('(X-e) control: the stub run as gitleaks runs by default honours the comment: the bare key alone (else the case is vacuous)', xaCtl.length === 1 && xaCtl[0].File === 'bare.txt', JSON.stringify(xaCtl));
+    const txa = glScan(xa, pushEnv(xaBase));
+    check("(X-e) the range's run passes --ignore-gitleaks-allow: the commented key is secret-suppressed, a WARN naming the rule it would have silenced; the bare one BLOCKS",
+      txa.status === 1 && txa.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && txa.glArgvs.length === 1 && txa.glArgvs[0].includes('--ignore-gitleaks-allow')
+      && txa.stdout.includes('### ⚠️ `secret-suppressed` · T1 · 1 finding(s)')
+      && txa.stdout.includes(`- ⚠️ allowed.txt:1 — gitleaks:allow on this line suppresses secret-pattern generic-api-key ${redact(kXa)} in commit ${xaHead.slice(0, 7)} — a waiver the range adds is a finding, not a silence _(CWE-798)_`)
+      && txa.stdout.includes(glLine('bare.txt', 1, kXb, `in commit ${xaHead.slice(0, 7)}`)), verdict(txa));
+    const txap = glScan(xa, pushEnv(xaBase), { CRITICAL_CHECKS: 'secret-suppressed' });
+    check('(X-e) secret-suppressed promoted: the commented key blocks too, annotated by the rule',
+      txap.status === 1 && txap.stdout.includes('\nBLOCKED — 2 critical finding(s). ')
+      && commands(txap.stdout).includes(`::error file=allowed.txt,line=1,title=security-baseline secret-suppressed::secret-suppressed generic-api-key at allowed.txt:1 in commit ${xaHead.slice(0, 7)}`), JSON.stringify(commands(txap.stdout)));
+    const txaf = glScan(xa, { ...pushEnv(xaBase), SCAN_SCOPE: 'full' });
+    check('(X-e) scan-scope: full, with no base, honours the comment as gitleaks does: no --ignore-gitleaks-allow, the bare key alone',
+      txaf.status === 1 && txaf.glArgvs.length === 1 && !txaf.glArgvs[0].includes('--ignore-gitleaks-allow') && !txaf.stdout.includes('secret-suppressed')
+      && !txaf.stdout.includes(redact(kXa)) && txaf.stdout.includes(redact(kXb)), verdict(txaf));
+    check('(X-e) NO planted value reaches the job log or stderr', txa.stdout.length > 0 && !leaked(txa.stdout) && !leaked(txa.stderr) && !leaked(txaf.stdout));
+
+    // ---- (Y) a nosemgrep comment is a WARN, never a silence (v1.32.0) ----
+    // Under --disable-nosem semgrep reports a finding a nosemgrep comment covers with `extra.is_ignored:
+    // true` (pinned on the real semgrep by selftest-nosem.sh, on the runner); here the community leg answers
+    // with one such finding beside an unsuppressed one.
+    const nosem = JSON.stringify({ results: [
+      { check_id: 'php.lang.security.injection', path: 'app/login.php', start: { line: 7 }, extra: { message: 'tainted sql', is_ignored: true, metadata: { cwe: ['CWE-89'] } } },
+      { check_id: 'php.lang.security.other', path: 'app/login.php', start: { line: 9 }, extra: { message: 'other', is_ignored: false } },
+    ], errors: [] });
+    const sgArgv = path.join(tmp, 'semgrep-nosem-argv.log');
+    const sgNosem = stub('semgrep-nosem', `printf '%s\\n' "$*" >> '${sgArgv}'\n${semgrepAnswers(`echo '${nosem}'`)}`);
+    const y = broken({ SEMGREP_BIN: sgNosem }, { GITHUB_ACTIONS: 'true' });
+    const sgRuns = fs.existsSync(sgArgv) ? fs.readFileSync(sgArgv, 'utf8').split('\n').filter(Boolean) : [];
+    check('(Y) every semgrep leg runs with --disable-nosem', sgRuns.length === 3 && sgRuns.every((l) => / --disable-nosem /.test(` ${l} `)), JSON.stringify(sgRuns));
+    check('(Y) a finding a nosemgrep comment would have removed is sast-suppressed, a WARN naming the rule it suppresses, never sast-critical; the unsuppressed one still BLOCKS',
+      y.status === 1 && y.stdout.includes('\nBLOCKED — 1 critical finding(s). ') && y.stdout.includes('### ⚠️ `sast-suppressed` · T1 · 1 finding(s)')
+      && y.stdout.includes('- ⚠️ app/login.php:7 — nosemgrep on this line suppresses sast-critical php.lang.security.injection — tainted sql _(CWE-89)_')
+      && y.stdout.includes('### ❌ `sast-critical` · T0 · 1 finding(s)') && y.stdout.includes('- ❌ app/login.php:9 — other'), verdict(y));
+    const yp = broken({ SEMGREP_BIN: sgNosem }, { GITHUB_ACTIONS: 'true', CRITICAL_CHECKS: 'sast-suppressed' });
+    check('(Y) sast-suppressed promoted: the suppression blocks too, annotated by the rule it suppresses',
+      yp.status === 1 && yp.stdout.includes('\nBLOCKED — 2 critical finding(s). ')
+      && commands(yp.stdout).includes('::error file=app/login.php,line=7,title=security-baseline sast-suppressed::sast-suppressed php.lang.security.injection at app/login.php:7'), JSON.stringify(commands(yp.stdout)));
+
+    // ---- (Z) a base that fell back to HEAD~1 is said (v1.32.0) ----
+    const z = broken({}, { BASE_REF: '', GITHUB_BASE_REF: '', GITHUB_EVENT_BEFORE: '0'.repeat(40), PR_HEAD_SHA: '' });
+    check('(Z) a push with the all-zero event.before, a new branch: the range is HEAD~1..HEAD, and the report says so',
+      z.status === 0 && z.stdout.includes('\n- diff base: HEAD~1, so the range is the tip commit alone — event.before is the all-zero sha, a new branch; set base-ref to widen it\n'), verdict(z));
+    const zf = broken({}, { BASE_REF: '', GITHUB_BASE_REF: '', GITHUB_EVENT_BEFORE: shaOf('a tip this checkout no longer holds'), PR_HEAD_SHA: '' });
+    check('(Z) an event.before the checkout lacks, as after a force-push: named as such', zf.stdout.includes(`event.before ${shaOf('a tip this checkout no longer holds').slice(0, 7)} is not in this checkout, as after a force-push; set base-ref`), verdict(zf));
+    check('(Z) a base that was given is not said to be a fallback', !uma.stdout.includes('diff base: HEAD~1'), verdict(uma));
 
     // (U-c) A merge that adds nothing git's own merge lacks: v1.19.7's runs, and a note.
     const mc = repoAt('merge-adds-nothing');

@@ -61,6 +61,11 @@ export const CHECKS = {
   'wf-secret-in-run':  { tier: 'T1', sev: SEV.WARN },  // ${{ secrets.* }} expanded inside a run: block
   'vendor-pin':        { tier: 'T1', sev: SEV.WARN },  // third-party code that disagrees with deps.json, or a CDN load with no integrity
 
+  // ---- T1: promotable WARN (the scanned commit configuring its own scanner, v1.32.0) ----
+  'sast-suppressed':     { tier: 'T1', sev: SEV.WARN },  // a semgrep finding a nosemgrep comment on its line would have removed; reported under --disable-nosem
+  'secret-suppressed':   { tier: 'T1', sev: SEV.WARN },  // a gitleaks finding a gitleaks:allow comment on its added line would have removed; the range's runs pass --ignore-gitleaks-allow
+  'scan-config-changed': { tier: 'T1', sev: SEV.WARN },  // .gitleaks.toml / .gitleaksignore / .semgrepignore / osv-scanner.toml added or changed in the range
+
   // ---- T1: promotable WARN (secrets / supply chain / IaC) ----
   'argv-secret':       { tier: 'T1', sev: SEV.WARN },  // a -H/--header value expanding a *TOKEN*/*SECRET*/*KEY*/*PASS* variable into a child's argv (argv-secret.mjs)
   'secret-worktree':   { tier: 'T1', sev: SEV.WARN },  // gitleaks --no-git over .env / wp-config in the tree
@@ -215,7 +220,9 @@ export function faultAnnotation(name, reason, level = 'error') {
 // that could have produced a CRITICAL here. Pure, so the selftest can render the worst case it allows
 // and hold it under GitHub's 1 MiB step-summary limit.
 export const ICON = { critical: '❌', warn: '⚠️', info: 'ℹ️', ok: '✅' };
-export const GROUP_ROWS = 15;
+// 13 rows a group (15 until v1.32.0): every emittable id at safe()'s caps must render under 900,000 bytes,
+// and two ids joined then; selftest.mjs holds the worst case.
+export const GROUP_ROWS = 13;
 export function reportBody({ graded, crit, warn, info, faults = [], blind = [], infra = [] }) {
   const lines = [];
   const note = (s = '') => lines.push(s);

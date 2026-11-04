@@ -411,7 +411,9 @@ passed "$n" "a checkout that lacks a range object: the real gitleaks reads nothi
 # ---- 12. each log run first is the scanner's own: argv and env, logged by a git on PATH (v1.20.1) ----
 # A push of two merges, one of a branch dated before event.before and one of an unrelated history,
 # so the walks include one with --since-commit and one to the root. A trufflehog or gitleaks bump that
-# changes how it runs `git log` fails here. trufflehog's git gets GIT_DIR alone: no PATH, no HOME.
+# changes how it runs `git log` fails here. trufflehog's git gets GIT_DIR alone: no PATH, no HOME. gitleaks'
+# git runs in the scan's empty --source directory with GIT_DIR naming the checkout (v1.32.0), so nothing of
+# the checkout's — its .gitleaksignore — is beside it.
 n=$(fails)
 g init -q pin
 (
@@ -441,9 +443,13 @@ const [log, before] = process.argv.slice(2);
 const lines = require('fs').readFileSync(log, 'utf8').split('\n').filter(Boolean);
 const count = (l) => lines.filter((x) => x === l).length;
 const bad = [];
-// gitleaks: its log and the one run for it, the same argv and the same env.
-const gl = lines.filter((l) => l.startsWith('-C . log -p -U0 '));
-if (gl.length !== 2 || gl[0] !== gl[1] || !gl[0].startsWith(`-C . log -p -U0 ${before}..HEAD | env:`)) bad.push(`gitleaks: ${JSON.stringify(gl)}`);
+// gitleaks: its log and the one run for it, the same argv and the same env — from the scan's own empty
+// --source directory (an absolute path, never `.`), with GIT_DIR and GIT_WORK_TREE set (v1.32.0).
+const GL = new RegExp(`^-C (\\S+) log -p -U0 ${before}\\.\\.HEAD \\| env:(.*)$`);
+const gl = lines.filter((l) => / log -p -U0 /.test(l));
+const glm = GL.exec(gl[0] || '');
+if (gl.length !== 2 || gl[0] !== gl[1] || !glm) bad.push(`gitleaks: ${JSON.stringify(gl)}`);
+else if (!glm[1].startsWith('/') || !/ GIT_DIR /.test(` ${glm[2]} `) || !/ GIT_WORK_TREE /.test(` ${glm[2]} `)) bad.push(`gitleaks' git is not run in an absolute --source with GIT_DIR and GIT_WORK_TREE: ${gl[0]}`);
 // trufflehog: each walk's log, and the one run for it: the walk's commits (<tip> ^<since>), or, for a
 // walk to the root, the very same line.
 const TH = /^-C (\S+) log --patch --full-history --date=iso-strict --pretty=fuller --notes (--diff-filter=AM )?([0-9a-f]{40})( \^[0-9a-f]{40})? \| env:(.*)$/;

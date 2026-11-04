@@ -16,12 +16,16 @@ const ids = (re) => Object.keys(CHECKS).filter((k) => re.test(k));
 // by what it could have found (canBeCritical in tiers.mjs): it faults the run only when one of these
 // could have been CRITICAL for this caller. selftest.mjs pins every rule pack's metadata.checkId to
 // its leg, so a pack cannot gain a rule family its leg does not claim.
+// sast-suppressed (v1.32.0): what a nosemgrep comment would have removed from any semgrep leg, reported
+// under --disable-nosem; each semgrep leg can emit it. secret-suppressed (v1.32.0): what a gitleaks:allow
+// comment on an added line would have removed from the range's gitleaks runs (--ignore-gitleaks-allow); the
+// history leg honours the comment, so it never emits it.
 export const LEGS = {
-  community: { name: 'semgrep community SAST', checks: ['sast-critical'] },
-  custom: { name: 'semgrep WP/PHP + Astro/TS rule packs', checks: ids(/^(wp|ts|rn)-|^turnstile-test-key$/).filter((id) => id !== 'wp-rest-gate-case') },
-  gha: { name: 'semgrep GitHub-Actions rule pack', checks: ids(/^gha-/) },
+  community: { name: 'semgrep community SAST', checks: ['sast-critical', 'sast-suppressed'] },
+  custom: { name: 'semgrep WP/PHP + Astro/TS rule packs', checks: [...ids(/^(wp|ts|rn)-|^turnstile-test-key$/).filter((id) => id !== 'wp-rest-gate-case'), 'sast-suppressed'] },
+  gha: { name: 'semgrep GitHub-Actions rule pack', checks: [...ids(/^gha-/), 'sast-suppressed'] },
   // secrets-history: what the diff range found in a commit the base already holds (v1.19.8).
-  gitleaks: { name: 'gitleaks secret scan', checks: ['secret-pattern', 'secrets-history'] },
+  gitleaks: { name: 'gitleaks secret scan', checks: ['secret-pattern', 'secret-suppressed', 'secrets-history'] },
   gitleaksHistory: { name: 'gitleaks full-history baseline', checks: ['secrets-history'] },
   // secrets-history: what a diff-scoped walk found in a commit the base holds (v1.19.7).
   trufflehog: { name: 'trufflehog verified-live secrets', checks: ['secret-verified', 'secrets-history'] },
@@ -32,11 +36,12 @@ export const LEGS = {
   restGateCase: { name: 'wp-rest-gate-case REST route casing', checks: ['wp-rest-gate-case'] },
   workflowHardening: { name: 'workflow-hardening', checks: ids(/^wf-/) },
   vendorPins: { name: 'vendor-pin deps.json record', checks: ['vendor-pin'] },
+  scanConfig: { name: 'scan-config-changed', checks: ['scan-config-changed'] },   // a scanner's own configuration changed in the range (v1.32.0)
 };
 // The changed-file list feeds every diff-scoped leg; a diff that fails leaves all of them grading nothing.
 LEGS.diff = {
   name: 'changed-file list',
-  checks: [...new Set([...LEGS.community.checks, ...LEGS.custom.checks, ...LEGS.hadolint.checks, ...LEGS.argvSecret.checks, ...LEGS.restGateCase.checks])],
+  checks: [...new Set([...LEGS.community.checks, ...LEGS.custom.checks, ...LEGS.hadolint.checks, ...LEGS.argvSecret.checks, ...LEGS.restGateCase.checks, ...LEGS.scanConfig.checks])],
 };
 
 // Every reason below reaches the report through safe(), which strips parentheses and brackets, so

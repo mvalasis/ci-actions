@@ -8,9 +8,11 @@
 #     in security-baseline/action.yml (osv-scanner's in deps-currency/action.yml too); semgrep's
 #     default equals the lock's; every `*-sha256` input defaults to empty, so a moved version can
 #     never borrow the pinned digest; the lock pins every package `==` with hashes and allows
-#     wheels only; and no action.yml or workflow downloads a release binary, pip-installs, pipes
-#     curl into a shell or tar, or npm-installs a package at anything but an exact version, outside
-#     the installer. npm (v1.22.0): no action.yml or workflow runs a local `npm install` (it resolves
+#     wheels only; rules/gitleaks.toml, the configuration every gitleaks run is given (v1.32.0), is
+#     the pinned gitleaks' own: its header names that version and the digest of the upstream file
+#     below its sentinel, and both agree with the pin; and no action.yml or workflow downloads a
+#     release binary, pip-installs, pipes curl into a shell or tar, or npm-installs a package at
+#     anything but an exact version, outside the installer. npm (v1.22.0): no action.yml or workflow runs a local `npm install` (it resolves
 #     ranges; a committed lock goes through `npm ci`); every committed package-lock.json names each
 #     package with a registry tarball and its sha512 integrity, and agrees with its package.json,
 #     whose dependencies are exact versions; a11y-audit installs through scripts/install.sh (`npm
@@ -110,6 +112,24 @@ lock_problems="$(awk '
 	{ hashes += gsub(/--hash=sha256:[0-9a-f]{64}/, "&") }
 	END { done_req(); if (reqs < 2) print "fewer than two requirements: " reqs }' "$lock")"
 check "the lock pins every package == and hashes each${lock_problems:+ ($lock_problems)}" [ -z "$lock_problems" ]
+# gitleaks' configuration is rules/gitleaks.toml, vendored (v1.32.0): scan.mjs passes it as --config on
+# every run, so the scanned commit's own .gitleaks.toml is never read. Its header names the gitleaks it
+# was taken from and the sha256 of the upstream file below the sentinel line; a gitleaks bump that
+# moves the pin and forgets the toml, or a toml edited by hand, fails here.
+gl_toml="$sb/rules/gitleaks.toml"
+gl_header() { awk -v k="# $1:" 'index($0, k) == 1 { sub(/^# [a-z0-9-]+: */, ""); print; exit }' "$gl_toml"; }
+gl_body_sha() {
+	sed '1,/^# --- upstream file follows/d' "$gl_toml" |
+		if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1
+}
+check "rules/gitleaks.toml is vendored whole: the header's sentinel line, then at least 200 [[rules]]" \
+	eval 'grep -q "^# --- upstream file follows" "$gl_toml" && [ "$(grep -c "^\[\[rules\]\]" "$gl_toml")" -ge 200 ]'
+check "rules/gitleaks.toml: its gitleaks-version header ($(gl_header gitleaks-version)) is the pin ($(pin_version gitleaks))" \
+	eval '[ -n "$(gl_header gitleaks-version)" ] && [ "$(gl_header gitleaks-version)" = "$(pin_version gitleaks)" ]'
+check "rules/gitleaks.toml: its source header names that version's config/gitleaks.toml" \
+	has "$(gl_header source)" "/v$(pin_version gitleaks)/config/gitleaks.toml"
+check "rules/gitleaks.toml: the file below the sentinel hashes to the header's sha256" \
+	eval '[ -n "$(gl_header sha256)" ] && [ "$(gl_body_sha)" = "$(gl_header sha256)" ]'
 surfaces=("$root"/*/action.yml "$root"/.github/workflows/*.yml)
 around="$(grep -nE 'releases/download|pip3? install([^a-z]|$)|curl[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba)?sh|curl[^|]*\|[[:space:]]*tar|wget ' "${surfaces[@]}" | sed "s|^$root/||")"
 check "no action.yml or workflow downloads a release, pip-installs or pipes curl into sh/tar outside install-pinned.sh${around:+: $around}" [ -z "$around" ]

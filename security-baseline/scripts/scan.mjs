@@ -102,7 +102,15 @@ function resolveBase() {
   // a multi-commit push: diff the whole pushed range (event.before), not just HEAD~1
   const before = env.GITHUB_EVENT_BEFORE || '';
   if (/^[0-9a-f]{40}$/.test(before) && before !== '0'.repeat(40) && run('git', ['cat-file', '-e', before]).status === 0) return before;
-  return sh(['rev-parse', '--verify', '--quiet', 'HEAD~1']);
+  // HEAD~1 is one commit, not the push: a new branch (event.before all zeros), a force-push whose old tip
+  // the checkout no longer holds, or a local run. Said in the report (v1.32.0), never taken silently.
+  const base = sh(['rev-parse', '--verify', '--quiet', 'HEAD~1']);
+  if (base && SCAN_SCOPE === 'diff') {
+    const why = !before ? 'no event.before' : /^0+$/.test(before) ? 'event.before is the all-zero sha, a new branch'
+      : /^[0-9a-f]{40}$/.test(before) ? `event.before ${before.slice(0, 7)} is not in this checkout, as after a force-push` : 'event.before is not a sha';
+    infra.push(`diff base: HEAD~1, so the range is the tip commit alone — ${why}; set base-ref to widen it`);
+  }
+  return base;
 }
 const BASE = resolveBase();
 const DIFF = SCAN_SCOPE === 'diff' && BASE;
@@ -129,7 +137,9 @@ const byExt = (files, exts) => (files || []).filter((f) => exts.some((e) => f.to
 // finding it did report: a scanner that half-failed has not un-found anything.
 function semgrepRun(leg, configs, targets, { severity } = {}) {
   if (!targets || targets.length === 0) return { results: [] };
-  const args = ['scan', '--json', '--metrics=off', '--disable-version-check', '--quiet', '--no-git-ignore'];
+  // --disable-nosem (v1.32.0): a finding a `nosemgrep` comment on its line covers is reported with
+  // `extra.is_ignored: true` instead of dropped, and emitted as sast-suppressed (collectSemgrep).
+  const args = ['scan', '--json', '--metrics=off', '--disable-version-check', '--quiet', '--no-git-ignore', '--disable-nosem'];
   if (severity) args.push('--severity', severity);
   for (const c of configs) args.push('--config', c);
   args.push(...targets);
@@ -148,6 +158,17 @@ const sgFinding = (r, checkId) => ({
   msg: (r.extra && r.extra.message) || r.check_id || '',
 });
 
+// A finding a `nosemgrep` comment would have removed (v1.32.0): semgrep, run with --disable-nosem, reports it
+// flagged `extra.is_ignored: true`, and it is emitted as `sast-suppressed` (T1 WARN, promotable), never under
+// its own id. So the scanned commit cannot silence a rule by annotating its line: the suppression is a
+// visible finding naming the rule it suppresses, and a caller who wants none promotes the id.
+const isIgnored = (r) => !!(r && r.extra && r.extra.is_ignored === true);
+const suppressed = (r, checkId) => {
+  const f = sgFinding(r, checkId);
+  return { ...f, checkId: 'sast-suppressed', msg: `nosemgrep on this line suppresses ${checkId}${f.rule && f.rule !== checkId ? ` ${f.rule}` : ''} — ${f.msg}` };
+};
+const emit = (out, r, checkId) => out.push(isIgnored(r) ? suppressed(r, checkId) : sgFinding(r, checkId));
+
 function collectSemgrep() {
   const out = [];
   const sastTargets = DIFF ? byExt(CHANGED, ['.php', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.py', '.go', '.rb', '.java']) : ['.'];
@@ -162,13 +183,13 @@ function collectSemgrep() {
   }
   // T0 — community ERROR on the diff (or full tree). This IS today's block, preserved.
   const community = semgrepRun(LEGS.community, [SEMGREP_CONFIG], sastTargets, { severity: (env.SAST_SEVERITY || 'ERROR').trim() });
-  for (const r of community.results) out.push(sgFinding(r, 'sast-critical'));
+  for (const r of community.results) emit(out, r, 'sast-critical');
   // T1/T2 — vendored custom rules (php/ts), diff-scoped (diff: only when code files changed; full:
   // ['.']); emit by metadata.checkId.
   const custom = semgrepRun(LEGS.custom, [path.join(RULES_DIR, 'wp-php.yaml'), path.join(RULES_DIR, 'astro-ts.yaml')], codeTargets);
   for (const r of custom.results) {
     const id = r.extra && r.extra.metadata && r.extra.metadata.checkId;
-    if (id) out.push(sgFinding(r, id));
+    if (id) emit(out, r, id);
   }
   // GitHub Actions supply-chain — always over .github/workflows (small, high value).
   // The rule pack is static YAML and cannot know whose actions these are, so it flags the caller's
@@ -178,7 +199,7 @@ function collectSemgrep() {
   const gha = semgrepRun(LEGS.gha, [path.join(RULES_DIR, 'gha.yaml')], ghaTargets);
   for (const r of filterFirstPartyGha(gha.results, FIRST_PARTY)) {
     const id = r.extra && r.extra.metadata && r.extra.metadata.checkId;
-    if (id) out.push(sgFinding(r, id));
+    if (id) emit(out, r, id);
   }
   return out;
 }
@@ -199,7 +220,7 @@ function collectSemgrep() {
 // A cheaper check is no substitute: `git rev-list --objects <range> | git cat-file --batch-check`
 // passes on two failures that blind both scanners (measured): a blob the range's first patch reads
 // from the base (a file's old side), and a blob whose header inflates but whose body does not.
-const GITLEAKS_LOG = ['-C', '.', 'log', '-p', '-U0'];
+const GITLEAKS_LOG = ['log', '-p', '-U0'];   // run from gitleaksView().source, with its env, as gitleaks runs it
 const TRUFFLEHOG_LOG = ['log', '--patch', '--full-history', '--date=iso-strict', '--pretty=fuller', '--notes'];
 // git as Go starts it: looked up on PATH first (absolute entries), then run with the env it is given.
 const GIT = (() => {
@@ -220,25 +241,87 @@ function logUnread(args, { bin = 'git', env: logEnv } = {}) {
 // The report goes to a directory made for this one run. The old fixed name under the shared tmp
 // (`gl-<hash of the args>.json`, the same on every run with the same base) could hand back a
 // previous run's report, or one planted there, whenever this run wrote none.
-// `ignore`: .gitleaksignore entries of this run's own, read beside the checkout's (collectGitleaks).
-function gitleaksRun(leg, extraArgs, { env: runEnv, ignore = [], what = 'gitleaks' } = {}) {
+// The configuration gitleaks runs with is this action's, never the scanned tree's (v1.32.0). gitleaks 8.30.1
+// reads the tree under test three ways (cmd/root.go, detect/): without --config it loads a `.gitleaks.toml`
+// found in its --source directory; it ALWAYS adds `<source>/.gitleaksignore` to whatever --gitleaks-ignore-path
+// names (the flag's file, then the source's, every entry honoured — the flag replaces nothing); and a
+// `gitleaks:allow` comment on the line removes the finding unless --ignore-gitleaks-allow. So a commit that
+// added a key could add the file, or the comment, that silences it, and the range read as clean (measured on
+// the binary: 2 findings to 0, exit 0, `[]`, with either file — the flag alone left the ignore hole open — and
+// 1 to 0 with the comment). Every run therefore gets `--config`, the vendored copy of gitleaks' default rules
+// (rules/gitleaks.toml, held to gitleaks-version by selftest-pins.sh); `--gitleaks-ignore-path`, a file of
+// this run's: the base's `.gitleaksignore` (baseIgnore) and `ignore`, the run's own entries (collectGitleaks);
+// and `--source`, an EMPTY directory of this run's, with GIT_DIR naming this checkout's repository, so the
+// `git log` gitleaks runs there is this repository's and nothing of the checkout's is beside it (gitleaksView).
+// The range's runs also pass --ignore-gitleaks-allow, and a finding whose line carries the comment is emitted
+// as secret-suppressed, a WARN naming the rule (allowCommented, collectGitleaks); the history leg and a run
+// with no base honour the comment as gitleaks does, as they honour the checkout's own ignore file.
+let glView = null;
+function gitleaksView() {
+  if (glView) return glView;
+  const gitDir = sh(['rev-parse', '--absolute-git-dir']);
+  const source = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-gitleaks-source-'));
+  process.on('exit', () => { try { fs.rmSync(source, { recursive: true, force: true }); } catch { /* best effort */ } });
+  glView = { source, gitDir, env: (e) => ({ ...(e || env), GIT_DIR: gitDir, GIT_WORK_TREE: source }) };
+  return glView;
+}
+function gitleaksRun(leg, extraArgs, { env: runEnv, ignore = [], what = 'gitleaks', allowComments = true } = {}) {
+  const view = gitleaksView();
+  if (!view.gitDir) { couldNotLook(leg, `${what} would read nothing: this checkout's git directory could not be resolved (git rev-parse --absolute-git-dir)`); return []; }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-gitleaks-'));
   try {
     const report = path.join(dir, 'report.json');
-    const args = ['detect', '--redact', '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', '0', ...extraArgs];
-    if (ignore.length) {
-      fs.writeFileSync(path.join(dir, 'merges.gitleaksignore'), `${ignore.join('\n')}\n`);
-      args.push('--gitleaks-ignore-path', path.join(dir, 'merges.gitleaksignore'));
-    }
-    const r = run(BIN.gitleaks, args, { timeout: 300000, ...(runEnv ? { env: runEnv } : {}) });
+    const ignoreFile = path.join(dir, 'base.gitleaksignore');
+    const base = baseIgnore().text;
+    fs.writeFileSync(ignoreFile, `${base}${base && !base.endsWith('\n') ? '\n' : ''}${ignore.map((l) => `${l}\n`).join('')}`);
+    const args = ['detect', '--source', view.source, '--redact', '--no-banner', '--config', path.join(RULES_DIR, 'gitleaks.toml'), '--gitleaks-ignore-path', ignoreFile,
+      ...(allowComments ? [] : ['--ignore-gitleaks-allow']), '--report-format', 'json', '--report-path', report, '--exit-code', '0', ...extraArgs];
+    const glEnv = view.env(runEnv);
+    const r = run(BIN.gitleaks, args, { timeout: 300000, env: glEnv });
     let text = null;
     try { text = fs.readFileSync(report, 'utf8'); } catch { /* never written: gitleaksOutcome says why */ }
     const o = gitleaksOutcome(r, text);
     if (!o.looked) couldNotLook(leg, `${what} ${o.reason}`);
+    if (!allowComments) for (const f of o.results) f.allowComment = allowCommented(f, glEnv);
     return o.results;
   } finally {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
   }
+}
+// Whether the line a finding sits on carries a `gitleaks:allow` comment, read from the commit gitleaks named
+// (its report carries no line text). A line git cannot show is taken as uncommented: the finding stays T0.
+function allowCommented(f, glEnv) {
+  if (!isSha(String(f.Commit || '').toLowerCase()) || !f.File || !(+f.StartLine > 0)) return false;
+  const r = run('git', ['show', `${f.Commit}:${f.File}`], { timeout: 30000, env: glEnv });
+  if (r.status !== 0 || r.error || r.signal) return false;
+  const line = r.stdout.split('\n')[+f.StartLine - 1];
+  return typeof line === 'string' && /gitleaks:allow/.test(line);
+}
+// The `.gitleaksignore` every gitleaks run of this scan honours (v1.32.0): on a diff run the BASE commit's
+// copy, read from its tree — what the base already waived — and never the checkout's, so an entry the range
+// adds or changes is not a suppression yet (it is a scan-config-changed WARN). Under scan-scope: full,
+// which has no base, the checkout's own, as gitleaks itself would read it, and the report says so. `text`
+// is the file as written, for gitleaks; `entries` its lines as gitleaks 8.30.1 reads them (trimmed, `#` a
+// comment, blanks skipped), for pinnedToMerges. A base copy git cannot read honours nothing, and says so.
+let ignoreRead = null;
+function baseIgnore() {
+  if (ignoreRead) return ignoreRead;
+  let text = '', note = '';
+  if (DIFF) {
+    if (run('git', ['cat-file', '-e', `${BASE}:.gitleaksignore`], { timeout: 30000 }).status === 0) {
+      const r = run('git', ['show', `${BASE}:.gitleaksignore`], { timeout: 30000 });
+      if (r.status === 0 && !r.error && !r.signal) text = r.stdout;
+      else note = `gitleaks: the base's .gitleaksignore could not be read, git show exit ${r.status}${errorLine(r.stderr) ? `: ${scrub(errorLine(r.stderr))}` : ''} — no entry of it is honoured`;
+    }
+  } else {
+    try { text = fs.readFileSync('.gitleaksignore', 'utf8'); } catch { /* none: nothing to honour */ }
+    if (text.trim()) note = "gitleaks: scan-scope: full has no base, so the .gitleaksignore honoured is the checkout's own";
+  }
+  const entries = text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  if (note) infra.push(note);
+  else if (DIFF && entries.length) infra.push(`gitleaks: honouring the .gitleaksignore of the base, ${safe(BASE, 60)}, ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} — one the range adds or changes is not a suppression yet`);
+  ignoreRead = { text, entries };
+  return ignoreRead;
 }
 // Where a finding was introduced. gitleaks reads commit patches, so its file:line is the line in
 // THAT commit — under scan-scope: full, often not the tip's (the literal may have moved since).
@@ -263,10 +346,11 @@ function collectGitleaks() {
   // reporting `[]`. The run goes ahead either way: what it did read before git died stands.
   const scoped = DIFF && BASE;
   if (scoped) {
-    const why = logUnread([...GITLEAKS_LOG, `${BASE}..HEAD`]);
+    const why = logUnread(['-C', gitleaksView().source, ...GITLEAKS_LOG, `${BASE}..HEAD`], { env: gitleaksView().env() });
     if (why) couldNotLook(LEGS.gitleaks, `the range could not be read: git log -p -U0 ${safe(BASE, 60)}..HEAD, the log gitleaks reads, failed, ${why}`);
   }
-  const diff = gitleaksRun(LEGS.gitleaks, scoped ? ['--log-opts', `${BASE}..HEAD`] : []);
+  // A `gitleaks:allow` comment is honoured only where there is no base to have added it (allowComments: see gitleaksRun).
+  const diff = gitleaksRun(LEGS.gitleaks, scoped ? ['--log-opts', `${BASE}..HEAD`] : [], { allowComments: !scoped });
   // …and what the range's merges add (mergePass), in a run of its own: each pass commit named with its
   // parent excluded, so the log prints it alone, read from the clone that holds it. gitleaks 8.30.1
   // exits 0 with `[]` when its `git log` dies ("0 commits scanned", said only in its log), so the same
@@ -279,11 +363,11 @@ function collectGitleaks() {
     if (mp.pairs.length) {
       const opts = mp.pairs.flatMap((p) => [p.tip, `^${p.since}`]);
       const passEnv = { ...env, GIT_ALTERNATE_OBJECT_DIRECTORIES: [mp.objects, env.GIT_ALTERNATE_OBJECT_DIRECTORIES].filter(Boolean).join(path.delimiter) };
-      const pre = run('git', ['log', '-p', '-U0', '--format=%H', ...opts], { env: passEnv, timeout: 300000, stdio: ['ignore', 'ignore', 'pipe'] });
+      const pre = run('git', ['-C', gitleaksView().source, 'log', '-p', '-U0', '--format=%H', ...opts], { env: gitleaksView().env(passEnv), timeout: 300000, stdio: ['ignore', 'ignore', 'pipe'] });
       if (pre.status !== 0 || pre.error || pre.signal) couldNotLook(LEGS.gitleaks, `what the range's merges add could not be read by gitleaks: git log of the pass's commits failed, exit ${pre.status}${errorLine(pre.stderr) ? `: ${scrub(errorLine(pre.stderr))}` : ''}`);
       else {
         for (const p of mp.pairs) own.set(p.tip, p.merge);
-        diff.push(...gitleaksRun(LEGS.gitleaks, ['--log-opts', opts.join(' ')], { env: passEnv, ignore: pinnedToMerges(mp.pairs), what: "gitleaks, on what the range's merges add," }));
+        diff.push(...gitleaksRun(LEGS.gitleaks, ['--log-opts', opts.join(' ')], { env: passEnv, ignore: pinnedToMerges(mp.pairs), what: "gitleaks, on what the range's merges add,", allowComments: false }));
       }
     }
   }
@@ -296,7 +380,11 @@ function collectGitleaks() {
     const holds = scoped && isSha(id) ? baseHolds(id) : false;
     if (holds && holds.reason) couldNotLook(LEGS.gitleaks, holds.reason);
     if (holds === true) { past.add(id); pastFindings++; out.push(inHistory({ ...f, Commit: merge || f.Commit })); continue; }
-    out.push({ checkId: 'secret-pattern', tool: 'gitleaks', rule: f.RuleID || 'secret', file: f.File, line: f.StartLine || 0, commit: merge || f.Commit, msg: `${f.RuleID || 'secret'} (${redact(f.Secret)})${merge ? ownChanges(merge) : inCommit(f)}`, cwe: 'CWE-798' });
+    const where = merge ? ownChanges(merge) : inCommit(f), rule = f.RuleID || 'secret';
+    // A `gitleaks:allow` comment on the added line (v1.32.0) is a WARN naming the rule it would have silenced,
+    // never a silence: the range cannot waive its own key; a caller who wants none promotes the id.
+    if (f.allowComment) out.push({ checkId: 'secret-suppressed', tool: 'gitleaks', rule, file: f.File, line: f.StartLine || 0, commit: merge || f.Commit, msg: `gitleaks:allow on this line suppresses secret-pattern ${rule} (${redact(f.Secret)})${where} — a waiver the range adds is a finding, not a silence`, cwe: 'CWE-798' });
+    else out.push({ checkId: 'secret-pattern', tool: 'gitleaks', rule, file: f.File, line: f.StartLine || 0, commit: merge || f.Commit, msg: `${rule} (${redact(f.Secret)})${where}`, cwe: 'CWE-798' });
   }
   if (past.size) infra.push(`gitleaks: its range listed ${past.size === 1 ? 'a commit' : `${past.size} commits`} the base already holds, as git does past a clock skew, so the ${pastFindings === 1 ? 'finding there is' : `${pastFindings} findings there are`} pre-existing: secrets-history, not secret-pattern`);
   // T2 — full-history baseline (WARN; never blocks). Dedup against the diff hits by file+rule.
@@ -607,17 +695,13 @@ function mergePass() {
   return done({ pairs, objects: path.join(c.clone, '.git', 'objects') });
 }
 // gitleaks pins a finding to the commit it read the line in: for a merge's own lines, the pass's
-// commit, never the merge. So an entry of the checkout's .gitleaksignore pinned to one of the range's
-// merges (`<merge>:<file>:<rule-id>:<line>`, the fleet's only form) is pinned again to that commit,
-// read as gitleaks 8.30.1 reads the file: each line trimmed, `#` a comment, four fields a commit's.
+// commit, never the merge. So an entry of the BASE's .gitleaksignore (baseIgnore; never the checkout's,
+// v1.32.0) pinned to one of the range's merges (`<merge>:<file>:<rule-id>:<line>`, the fleet's only form)
+// is pinned again to that commit; four fields are a commit's.
 function pinnedToMerges(pairs) {
-  let text = '';
-  try { text = fs.readFileSync('.gitleaksignore', 'utf8'); } catch { return []; }
   const tipOf = new Map(pairs.map((p) => [p.merge, p.tip]));
   const out = [];
-  for (const raw of text.split('\n')) {
-    const l = raw.trim();
-    if (!l || l.startsWith('#')) continue;
+  for (const l of baseIgnore().entries) {
     const s = l.split(':');
     if (s.length === 4 && tipOf.has(s[0])) out.push([tipOf.get(s[0]), ...s.slice(1)].join(':'));
   }
@@ -847,6 +931,25 @@ function collectRestGateCase() {
   return out;
 }
 
+// ---------- scan-config-changed: a scanner's own configuration, changed in the range (v1.32.0) ----------
+// A diff that adds or edits a `.gitleaks.toml`, `.gitleaksignore`, `.semgrepignore` or `osv-scanner.toml`
+// is changing what the scanners may say about it. gitleaks no longer reads the range's two (gitleaksRun);
+// semgrep and osv-scanner still read theirs from the checkout. Each such file is one WARN naming it, so a
+// suppression is reviewed as one, and a caller promotes the id to refuse one outright. Diff scope only: a
+// full scan has no range. A deleted file is not listed (the changed-file list excludes deletions): fewer
+// suppressions, not more.
+const SCAN_CONFIG = new Set(['.gitleaks.toml', '.gitleaksignore', '.semgrepignore', 'osv-scanner.toml']);
+function collectScanConfig() {
+  const out = [];
+  if (!DIFF) return out;
+  for (const f of CHANGED || []) {
+    const name = path.basename(f);
+    if (!SCAN_CONFIG.has(name)) continue;
+    out.push({ checkId: 'scan-config-changed', tool: 'git diff', rule: name, file: f, line: 0, cwe: 'CWE-693', msg: `${name} changed in this range: a scanner's own configuration, which may silence a finding — review the suppression before merging` });
+  }
+  return out;
+}
+
 // Report lines already echoed to the job log, so the crash path's re-flush echoes only the new ones.
 // The log goes first: when the summary write is what throws, the report is already readable.
 let echoed = 0;
@@ -873,6 +976,7 @@ function flush() {
   const collectors = [
     [collectSemgrep, [LEGS.community, LEGS.custom, LEGS.gha]],
     [collectGitleaks, [LEGS.gitleaks, ...(ENABLE_HISTORY ? [LEGS.gitleaksHistory] : [])]],
+    [collectScanConfig, [LEGS.scanConfig]],
     [collectTrufflehog, VERIFIED_SECRETS === 'off' ? [] : [DIFF && BASE ? LEGS.trufflehog : LEGS.trufflehogHistory]],
     [collectOsv, ENABLE_SCA ? [LEGS.osv] : []],
     [collectHadolint, [LEGS.hadolint]],

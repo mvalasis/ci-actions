@@ -339,13 +339,21 @@ def main():
         elif v == "review":
             review.append((url, code))
 
+    # The report lands inside a ``` fence in the step summary and in the caller's issue body
+    # (action.yml). A URL is content from the crawled site (an href rejects spaces and `${`,
+    # not a backtick), so one carrying ``` would close that fence and the rest of it would
+    # render as markdown in the caller's repository (v1.32.0). `%60` is the same URL,
+    # percent-encoded, and leaves nothing a fence can read.
+    def shown(url):
+        return url.replace("`", "%60")
+
     def show(title, rows):
         print(f"\n{title} ({len(rows)})")
         for url, code in rows:
-            srcs = sorted(targets.get(url, ()))
+            srcs = sorted(shown(s) for s in targets.get(url, ()))
             where = ", ".join((["sitemap"] if url in graded_pages else []) + srcs[:1])
             where += f" (+{len(srcs) - 1} more)" if len(srcs) > 1 else ""
-            print(f"  [{code or 'conn-fail'}] {url}\n      on: {where}")
+            print(f"  [{code or 'conn-fail'}] {shown(url)}\n      on: {where}")
 
     # REVIEW queue: URLs whose CI status can't be trusted (WAF-fronted). Written
     # for the out-of-band browser verifier (residential IP); NON-fatal so the

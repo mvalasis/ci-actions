@@ -859,6 +859,7 @@ def main():
 
     crash_guard_checks()
     crawl_floor_checks()
+    fence_checks(linkcheck)
     issue_body_checks(linkcheck)
     step_summary_checks(linkcheck)
 
@@ -870,6 +871,31 @@ def main():
           "hostile-sitemap refusals, a missing sitemap named by its response, "
           "crash-guard attribution, the crawl-size floor, the "
           "issue-body cap and the step-summary cap hold.")
+
+
+def fence_checks(linkcheck):
+    """No backtick reaches the report (v1.32.0).
+
+    The report is pasted inside a ``` fence in the step summary and the broken-links
+    issue. The href regex refuses spaces and `${` but not a backtick, so a link planted
+    on the crawled site — a review, a comment — whose URL carries ``` closes the fence
+    and the rest of the URL renders as markdown in the caller's own issue. Both places
+    a crawled URL is printed, the row and its `on:` source, are driven through the REAL
+    main() here. (`www.localhost`, as the suite's other fixtures: extract() keeps a link
+    only when its host has a dot, so a bare `localhost` link is never crawled.)
+    """
+    print("\n# the report: a crawled URL carries no backtick (v1.32.0)")
+    hub = "http://www.localhost/hub`page"
+    dead = "http://www.localhost/dead`link"
+    report = _report_of(linkcheck, [hub], lambda u: (200, False, _html([dead])), lambda u: (404, False))
+    check("fixture: the backticked link was crawled and is the FATAL row", "FATAL (broken) (1)" in report
+          and "/dead%60link" in report)
+    check("the row prints the URL with %60, and no backtick anywhere in the report", "`" not in report)
+    check("its `on:` source page is encoded the same way", "on: http://www.localhost/hub%60page" in report)
+    plain = _report_of(linkcheck, ["http://www.localhost/hub"],
+                       lambda u: (200, False, _html(["http://www.localhost/dead"])), lambda u: (404, False))
+    check("a URL with no backtick is printed as it is",
+          "[404] http://www.localhost/dead\n      on: http://www.localhost/hub" in plain)
 
 
 def crash_guard_checks():

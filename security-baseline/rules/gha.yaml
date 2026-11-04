@@ -38,20 +38,26 @@ rules:
           metavariable: $USES
           regex: '^(?!\./)(?!actions/)(?!github/)[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*@(?![0-9a-f]{40}\b)'
 
-  # ---- CWE-94: untrusted github.event.* interpolated into a run: shell block ----
+  # ---- CWE-94: an attacker-controllable github context value interpolated into a run: shell block ----
+  # github.event.* (titles, bodies, refs, names, comments), github.head_ref (the PR branch name, as a
+  # top-level context), every workflow_dispatch input (github.event.inputs.*, typed by whoever may
+  # dispatch) and every repository_dispatch payload field (github.event.client_payload.*, sent by whoever
+  # holds a token for the dispatch; the fleet's content pulls arrive this way). The last three were not
+  # matched until v1.32.0. selftest.mjs applies this regex live to the positive and negative cases.
   - id: gha-script-injection
     languages: [yaml]
     severity: WARNING
     message: >-
-      Attacker-controllable github.event.* (issue/PR title/body, head ref, comment) is
-      interpolated directly into a run: shell block — CI script injection (CWE-94). Pass it
-      through an env: var and reference "$VAR" instead.
+      Attacker-controllable github context (issue/PR title/body, head ref, comment, a
+      workflow_dispatch input, a repository_dispatch client_payload field) is interpolated
+      directly into a run: shell block — CI script injection (CWE-94). Pass it through an
+      env: var and reference "$VAR" instead.
     metadata: { checkId: gha-script-injection, cwe: "CWE-94", tier: T1 }
     patterns:
       - pattern: 'run: $CMD'
       - metavariable-regex:
           metavariable: $CMD
-          regex: '(?s).*\$\{\{\s*github\.event\.[a-zA-Z0-9_.]*(title|body|ref|name|label|email|message|head)'
+          regex: '(?s).*\$\{\{\s*github\.(head_ref\b|event\.(inputs\.|client_payload\.|[a-zA-Z0-9_.]*(title|body|ref|name|label|email|message|head)))'
 
   # ---- CWE-829: the pull_request_target trigger (runs with write token + secrets) ----
   - id: gha-pull-request-target

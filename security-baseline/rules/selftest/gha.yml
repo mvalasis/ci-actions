@@ -34,6 +34,15 @@ jobs:
       - uses: mvalasis/ci-actions/security-baseline@v1
       # ruleid: gha-script-injection
       - run: echo "title is ${{ github.event.issue.title }}"
+      # The three shapes invisible to the rule until v1.32.0.
+      # ruleid: gha-script-injection
+      - run: echo "branch ${{ github.head_ref }}"
+      # ruleid: gha-script-injection
+      - run: echo "version ${{ github.event.inputs.version }}"
+      # ruleid: gha-script-injection
+      - run: echo "sha ${{ github.event.client_payload.sha }}"
+      # ok: gha-script-injection
+      - run: echo "sha ${{ github.sha }} on ${{ github.event_name }}"
       - name: safe
         env:
           TITLE: ${{ github.event.issue.title }}
