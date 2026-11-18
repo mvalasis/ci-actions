@@ -236,7 +236,7 @@ function collectSemgrep() {
 // the same env, output discarded (any size), and a log git cannot finish is could-not-look, never a
 // PASS. As each scanner runs it (measured with a git on PATH that logged argv and env;
 // selftest-pr-shape.sh pins both on the real binaries):
-//   gitleaks    `git -C . log -p -U0 <--log-opts, split on spaces>`, with the scanner's own env.
+//   gitleaks    `git -C . log -p -U0 <--log-opts, split on spaces>` (every pass's opts carry --text), with the scanner's own env.
 //   trufflehog  `git -C <repo> log --patch --full-history --date=iso-strict --pretty=fuller --notes
 //               [--diff-filter=AM] <--branch>`, found on PATH and started with GIT_DIR=<repo>/.git as
 //               its only variable; it reads to the root and stops itself at --since-commit, and adds
@@ -244,7 +244,11 @@ function collectSemgrep() {
 // A cheaper check is no substitute: `git rev-list --objects <range> | git cat-file --batch-check`
 // passes on two failures that blind both scanners (measured): a blob the range's first patch reads
 // from the base (a file's old side), and a blob whose header inflates but whose body does not.
-const GITLEAKS_LOG = ['log', '-p', '-U0'];   // run from gitleaksView().source, with its env, as gitleaks runs it
+// --text: a path .gitattributes marks `binary` (`*.pem binary`) prints "Binary files differ" with no patch
+// text, so a key committed there is never read. Every history pass therefore adds --text to its log options.
+const GITLEAKS_LOG = ['log', '-p', '-U0', '--text'];   // run from gitleaksView().source, with its env, as gitleaks runs it
+// What gitleaks reads when given no --log-opts (--full-history --all), now explicit so --text can ride with it.
+const GITLEAKS_ALL_HISTORY = '--full-history --all --text';
 const TRUFFLEHOG_LOG = ['log', '--patch', '--full-history', '--date=iso-strict', '--pretty=fuller', '--notes'];
 // git as Go starts it: looked up on PATH first (absolute entries), then run with the env it is given.
 const GIT = (() => {
@@ -371,10 +375,10 @@ function collectGitleaks() {
   const scoped = DIFF && BASE;
   if (scoped) {
     const why = logUnread(['-C', gitleaksView().source, ...GITLEAKS_LOG, `${BASE}..HEAD`], { env: gitleaksView().env() });
-    if (why) couldNotLook(LEGS.gitleaks, `the range could not be read: git log -p -U0 ${safe(BASE, 60)}..HEAD, the log gitleaks reads, failed, ${why}`);
+    if (why) couldNotLook(LEGS.gitleaks, `the range could not be read: git log -p -U0 --text ${safe(BASE, 60)}..HEAD, the log gitleaks reads, failed, ${why}`);
   }
   // A `gitleaks:allow` comment is honoured only where there is no base to have added it (allowComments: see gitleaksRun).
-  const diff = gitleaksRun(LEGS.gitleaks, scoped ? ['--log-opts', `${BASE}..HEAD`] : [], { allowComments: !scoped });
+  const diff = gitleaksRun(LEGS.gitleaks, ['--log-opts', scoped ? `--text ${BASE}..HEAD` : GITLEAKS_ALL_HISTORY], { allowComments: !scoped });
   // …and what the range's merges add (mergePass), in a run of its own: each pass commit named with its
   // parent excluded, so the log prints it alone, read from the clone that holds it. gitleaks 8.30.1
   // exits 0 with `[]` when its `git log` dies ("0 commits scanned", said only in its log), so the same
@@ -387,11 +391,11 @@ function collectGitleaks() {
     if (mp.pairs.length) {
       const opts = mp.pairs.flatMap((p) => [p.tip, `^${p.since}`]);
       const passEnv = { ...env, GIT_ALTERNATE_OBJECT_DIRECTORIES: [mp.objects, env.GIT_ALTERNATE_OBJECT_DIRECTORIES].filter(Boolean).join(path.delimiter) };
-      const pre = run('git', ['-C', gitleaksView().source, 'log', '-p', '-U0', '--format=%H', ...opts], { env: gitleaksView().env(passEnv), timeout: 300000, stdio: ['ignore', 'ignore', 'pipe'] });
+      const pre = run('git', ['-C', gitleaksView().source, ...GITLEAKS_LOG, '--format=%H', ...opts], { env: gitleaksView().env(passEnv), timeout: 300000, stdio: ['ignore', 'ignore', 'pipe'] });
       if (pre.status !== 0 || pre.error || pre.signal) couldNotLook(LEGS.gitleaks, `what the range's merges add could not be read by gitleaks: git log of the pass's commits failed, exit ${pre.status}${errorLine(pre.stderr) ? `: ${scrub(errorLine(pre.stderr))}` : ''}`);
       else {
         for (const p of mp.pairs) own.set(p.tip, p.merge);
-        diff.push(...gitleaksRun(LEGS.gitleaks, ['--log-opts', opts.join(' ')], { env: passEnv, ignore: pinnedToMerges(mp.pairs), what: "gitleaks, on what the range's merges add,", allowComments: false }));
+        diff.push(...gitleaksRun(LEGS.gitleaks, ['--log-opts', ['--text', ...opts].join(' ')], { env: passEnv, ignore: pinnedToMerges(mp.pairs), what: "gitleaks, on what the range's merges add,", allowComments: false }));
       }
     }
   }
@@ -414,7 +418,7 @@ function collectGitleaks() {
   // T2 — full-history baseline (WARN; never blocks). Dedup against the diff hits by file+rule.
   if (ENABLE_HISTORY) {
     const seen = new Set(diff.map((f) => `${f.File}:${f.RuleID}`));
-    for (const f of gitleaksRun(LEGS.gitleaksHistory, [])) {
+    for (const f of gitleaksRun(LEGS.gitleaksHistory, ['--log-opts', GITLEAKS_ALL_HISTORY])) {
       const k = `${f.File}:${f.RuleID}`; if (seen.has(k)) continue; seen.add(k);
       out.push(inHistory(f));
     }

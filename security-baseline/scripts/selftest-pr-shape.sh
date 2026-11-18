@@ -399,7 +399,7 @@ rm -f "lost/.git/objects/${blob10:0:2}/${blob10:2}"
 rc=0; ( cd lost && "${GITLEAKS_BIN:-gitleaks}" detect --redact --no-banner --report-format json --report-path "$work/lost-gl.json" --exit-code 0 --log-opts "$base10..HEAD" > "$work/lost-gl.out" 2>&1 ) || rc=$?
 { [ "$rc" = 0 ] && [ "$(tr -d ' \n' < "$work/lost-gl.json")" = '[]' ] && grep -q 'commits scanned' "$work/lost-gl.out"; } \
   || fail "shape 11 control: on a range it cannot read the real gitleaks did not exit 0 with [] (exit $rc), so the shape is not under test"
-lost_line="- ❌ gitleaks secret scan — the range could not be read: git log -p -U0 $base10..HEAD, the log gitleaks reads, failed, exit 128: fatal: unable to read $(short4 "$blob10")"
+lost_line="- ❌ gitleaks secret scan — the range could not be read: git log -p -U0 --text $base10..HEAD, the log gitleaks reads, failed, exit 128: fatal: unable to read $(short4 "$blob10")"
 run_scan "$work/lost" lost VERIFIED_SECRETS=off BASE_REF='' GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE="$base10" PR_HEAD_SHA=''
 reported lost "$lost_line" || fail 'a checkout that lacks a range object: gitleaks read nothing and the leg was not could-not-look, naming its log'
 grep -q '^report-only — 1 scanner leg(s) that could have blocked could not look (gitleaks secret scan)' "$work/lost.log" || fail 'a checkout that lacks a range object: the verdict is not the fault (fail-on-critical: true would not FAULT)'
@@ -445,7 +445,7 @@ const count = (l) => lines.filter((x) => x === l).length;
 const bad = [];
 // gitleaks: its log and the one run for it, the same argv and the same env — from the scan's own empty
 // --source directory (an absolute path, never `.`), with GIT_DIR and GIT_WORK_TREE set (v1.32.0).
-const GL = new RegExp(`^-C (\\S+) log -p -U0 ${before}\\.\\.HEAD \\| env:(.*)$`);
+const GL = new RegExp(`^-C (\\S+) log -p -U0 --text ${before}\\.\\.HEAD \\| env:(.*)$`);
 const gl = lines.filter((l) => / log -p -U0 /.test(l));
 const glm = GL.exec(gl[0] || '');
 if (gl.length !== 2 || gl[0] !== gl[1] || !glm) bad.push(`gitleaks: ${JSON.stringify(gl)}`);
@@ -465,4 +465,36 @@ for (const b of bad) console.log(`::error title=security-baseline self-test::${b
 process.exit(bad.length ? 1 : 0);
 JS
 passed "$n" "each log run first is the scanner's own: gitleaks' argv and env, trufflehog's argv to its stop and its GIT_DIR-only env"
+# ---- 13. a key in a path git attributes mark binary ----
+# `*.pem binary` (.gitattributes, $GIT_DIR/info/attributes) makes `git log -p` print "Binary files differ" and no patch text, so a private key
+# committed there was never read. The key is generated here (never a real one). Both passes must report it:
+# the range's (secret-pattern) and the full-history leg's (secrets-history); the control, a range that adds
+# only a text file, reports no key.
+n=$(fails)
+g init -q bin1
+(
+  cd bin1
+  printf '*.pem binary\n' > .gitattributes; g add .gitattributes; dated 2026-09-20T10:00:00Z attrs
+  printf 'hello\n' > README.md; g add README.md; dated 2026-09-20T11:00:00Z 'control: no key'
+)
+ctl_base=$(git -C bin1 rev-parse HEAD~1)
+ctl_head=$(git -C bin1 rev-parse HEAD)
+(
+  cd bin1
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out deploy.pem 2>/dev/null
+  g add deploy.pem; dated 2026-09-20T12:00:00Z 'a private key in a binary-attributed path'
+)
+git clone -q --no-hardlinks "$work/bin1" "$work/bin2"
+git -C "$work/bin2" reset -q --hard "$ctl_head"
+# The scan reads the log in an empty work tree, where the tree's own .gitattributes is not applied; the same
+# rule in $GIT_DIR/info/attributes (or core.attributesFile) is, and is what blinds a scan without --text.
+mkdir -p "$work/bin1/.git/info" "$work/bin2/.git/info"
+printf '*.pem binary\n' | tee "$work/bin1/.git/info/attributes" > "$work/bin2/.git/info/attributes"
+scan "$work/bin2" bin-ctl BASE_REF='' GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE="$ctl_base" PR_HEAD_SHA='' ENABLE_SECRETS_HISTORY=false
+scan "$work/bin1" bin-key BASE_REF='' GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE="$ctl_head" PR_HEAD_SHA='' ENABLE_SECRETS_HISTORY=true
+reported bin-key 'deploy.pem:1 — private-key' || fail "a key in a .gitattributes-binary path: the range pass did not report deploy.pem"
+! grep -q 'private-key' "$work/bin-ctl.log" || fail "control: a range with no key reported a private-key"
+scan "$work/bin1" bin-hist BASE_REF='' GITHUB_BASE_REF='' GITHUB_EVENT_BEFORE="$(git -C "$work/bin1" rev-parse HEAD)" PR_HEAD_SHA='' ENABLE_SECRETS_HISTORY=true
+grep -q 'deploy.pem:1 — private-key' "$work/bin-hist.log" || fail "a key in a .gitattributes-binary path: the history pass did not report deploy.pem"
+passed "$n" "a key in a path .gitattributes marks binary: reported by the range and the history pass, none in the control"
 [ "$(fails)" -eq 0 ] || { echo "❌ $(fails) check(s) failed"; exit 1; }

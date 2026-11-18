@@ -878,7 +878,7 @@ console.log('\n# scan.mjs end to end — the job log carries the report; secret 
       ].join('\n')),
       GITLEAKS_BIN: stub('gitleaks', [
         `printf '%s\\n' "$*" >> '${argvLog}'`,
-        'case "$*" in *--log-opts*) which=diff ;; *) which=hist ;; esac',
+        'case "$*" in *--log-opts*--full-history*) which=hist ;; *--log-opts*) which=diff ;; *) which=hist ;; esac',
         'out=""',
         'while [ $# -gt 0 ]; do [ "$1" = "--report-path" ] && { shift; out="$1"; }; shift; done',
         `if [ "$which" = diff ]; then sed "s/@HEAD@/$(git rev-parse HEAD)/" > "$out" <<'JSON'\n${JSON.stringify([glFinding('app/config.php', 3, 'generic-api-key', planted.diff, '@HEAD@')])}\nJSON`,
@@ -1765,7 +1765,10 @@ if [ "$n" = 0 ]; then echo '{"Verified":true,"DetectorName":"Github","Raw":"x","
       const logged = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
       return { ...res, glArgvs: logged(glArgv), glIgnores: logged(glIgn), glEnvs: logged(glEnv) };
     };
-    const logOptsOf = (a) => (a.includes('--log-opts') ? a[a.indexOf('--log-opts') + 1] : '');
+    // Every history pass carries --text (a path the attributes mark binary prints no patch otherwise); the
+    // checks below read the opts without it, and the --text pin is its own check.
+    const noText = (o) => (o || '').split(' ').filter((w) => w !== '--text').join(' ');
+    const logOptsOf = (a) => (a.includes('--log-opts') ? noText(a[a.indexOf('--log-opts') + 1]) : '');
     const newKey = (file, k, sha) => `- ❌ ${file}:1 — generic-api-key ${redact(k)} in commit ${sha.slice(0, 7)} _(CWE-798)_`;
     const oldKey = (file, k, sha) => `- ⚠️ ${file}:1 — generic-api-key in history ${redact(k)} in commit ${sha.slice(0, 7)} — rotate at the provider, then scrub history _(CWE-798)_`;
     const heldNote = '\n- gitleaks: its range listed a commit the base already holds, as git does past a clock skew, so the finding there is pre-existing: secrets-history, not secret-pattern\n';
@@ -1830,7 +1833,7 @@ if [ "$n" = 0 ]; then echo '{"Verified":true,"DetectorName":"Github","Raw":"x","
     check('(V-e) scan-scope: full reads history with no range and asks no ancestry: both keys secret-pattern, as before',
       tve.status === 1 && tve.stdout.includes('\nBLOCKED — 2 critical finding(s). ') && tve.stdout.includes(newKey('fork.conf', va.k.fork, va.fork))
       && tve.stdout.includes(newKey('pr.conf', va.k.pr, va.pr)) && !tve.stdout.includes('could not look')
-      && tve.glArgvs.length === 1 && logOptsOf(tve.glArgvs[0]) === '', JSON.stringify({ argvs: tve.glArgvs, verdict: verdict(tve) }));
+      && tve.glArgvs.length === 1 && logOptsOf(tve.glArgvs[0]) === '--full-history --all', JSON.stringify({ argvs: tve.glArgvs, verdict: verdict(tve) }));
 
     // ---- (U) what a merge commit adds (v1.20.0) ----
     // `git log -p` prints no patch for a merge, and both legs read commits through it, so a key only a
@@ -1848,7 +1851,7 @@ if [ "$n" = 0 ]; then echo '{"Verified":true,"DetectorName":"Github","Raw":"x","
       fs.rmSync(glArgv, { force: true });
       const res = walkScan(cwd, env, { GITLEAKS_BIN: glAsMeasured, GL_ARGV: glArgv, TH_EMIT: '1', ENABLE_SECRETS_HISTORY: 'false', ...extra }, bin);
       const glArgvs = fs.existsSync(glArgv) ? fs.readFileSync(glArgv, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
-      return { ...res, glArgvs, logOpts: glArgvs.map((a) => (a.includes('--log-opts') ? a[a.indexOf('--log-opts') + 1] : '')) };
+      return { ...res, glArgvs, logOpts: glArgvs.map((a) => (a.includes('--log-opts') ? noText(a[a.indexOf('--log-opts') + 1]) : '')), logOptsRaw: glArgvs.map((a) => (a.includes('--log-opts') ? a[a.indexOf('--log-opts') + 1] : '')) };
     };
     // The pass commit as specified, computed here in a clone of the fixture (the checkout stays as it
     // was): the merge's tree over git's own merge of its parents (an octopus one head at a time), both
@@ -1896,6 +1899,9 @@ if [ "$n" = 0 ]; then echo '{"Verified":true,"DetectorName":"Github","Raw":"x","
     check("(U-a) control: v1.19.7's gitleaks range, <base>..HEAD, reads topic's key and neither of the merge's",
       maV1197.length === 1 && maV1197[0].Commit === maCtl && maV1197[0].File === 'control.live', JSON.stringify(maV1197.map((f) => [f.File, f.StartLine, f.Commit])));
     const uma = mergeScan(ma, pushEnv(maBefore));
+    check('every gitleaks history pass (range, merge pass, no-range) carries --text, so a path the attributes mark binary is still read',
+      uma.logOptsRaw.length === 2 && uma.logOptsRaw.every((o) => o.split(' ').includes('--text')) && tve.glArgvs.length === 1
+      && tve.glArgvs[0][tve.glArgvs[0].indexOf('--log-opts') + 1].split(' ').includes('--text'), JSON.stringify({ uma: uma.logOptsRaw, tve: tve.glArgvs }));
     const [maTip, maSince] = (uma.logOpts[1] || '').split(' ').map((s) => s.replace(/^\^/, ''));
     check("(U-a) gitleaks reads the range as before, then, in a run of its own, the pass commit with its parent excluded: the merge's tree over git's own merge of its parents",
       uma.logOpts.length === 2 && uma.logOpts[0] === `${maBefore}..HEAD` && uma.logOpts[1] === passOf(ma, maMerge)
@@ -2332,7 +2338,7 @@ if [ "$n" = 0 ]; then echo '{"Verified":true,"DetectorName":"Github","Raw":"x","
     check('(W) control: gitleaks, as measured, reads nothing there, the key included, and exits 0 with []',
       wGl.status === 0 && fs.readFileSync(wRep, 'utf8') === '[]');
     const wa = mergeScan(wr, pushEnv(wBase), { VERIFIED_SECRETS: 'off' });
-    const wRangeFails = `- ❌ gitleaks secret scan — the range could not be read: git log -p -U0 ${wBase}..HEAD, the log gitleaks reads, failed, exit 128: fatal: unable to read ${redact(wBlob)}\n`;
+    const wRangeFails = `- ❌ gitleaks secret scan — the range could not be read: git log -p -U0 --text ${wBase}..HEAD, the log gitleaks reads, failed, exit 128: fatal: unable to read ${redact(wBlob)}\n`;
     check('(W) a checkout that lacks a range object: FAULT on the gitleaks leg, naming the log, never the PASS gitleaks gives; its run still goes ahead',
       wa.status === 1 && wa.stdout.includes(wRangeFails) && wa.stdout.includes('\nFAULT — 1 scanner leg(s) that could have blocked could not look (gitleaks secret scan).')
       && JSON.stringify(wa.logOpts) === JSON.stringify([`${wBase}..HEAD`]), verdict(wa));
