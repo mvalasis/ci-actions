@@ -310,14 +310,25 @@ const PAGES = {
   '/page-routed.html': `<html><body><form data-epn-form="contact" method="post" action="/api/routed-reject"><input type="hidden" name="formType" value="contact"><div class="cf-turnstile" data-sitekey="${REAL_KEY}"></div></form></body></html>`,
   // one client-rendered form fronting two gated endpoints (the lampakia checkout shape)
   '/page-two-endpoints.html': `<html><body><form id="checkout-form"><input type="hidden" name="formType" value="contact"><div id="turnstile-checkout"></div><div id="turnstile-cart-track"></div></form><script>const turnstileSiteKey = "${REAL_KEY}";</script></body></html>`,
+  // a site whose login refuses a cross-site POST (no Origin, or one off its own host) BEFORE the bot gate
+  '/page-same-origin.html': `<html><body><form id="login-form" method="post" action="/api/same-origin-reject"><div class="cf-turnstile" data-sitekey="${REAL_KEY}"></div></form></body></html>`,
   // a test key carrying a planted workflow command: sitekey-real quotes the raw key, newline included
   '/page-hostile.html': '<html><body><form action="/api/reject"><div class="cf-turnstile" data-sitekey="1x00000000000000000000AA&#10;::error title=forged::pwned-key"></div></form></body></html>',
 };
+const ORIGINS_SEEN = [];
 const server = createServer((req, res) => {
   if (req.method === 'GET' && PAGES[req.url]) { res.writeHead(200, { 'content-type': 'text/html' }); res.end(PAGES[req.url]); return; }
   if (req.method === 'POST' && req.url === '/api/reject') { res.writeHead(403, { 'content-type': 'application/json' }); res.end('{"ok":false,"error":"turnstile_failed"}'); return; }
   if (req.method === 'POST' && req.url === '/api/accept') { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); return; }
   if (req.method === 'POST' && req.url === '/api/wrong-layer') { res.writeHead(400, { 'content-type': 'application/json' }); res.end('{"error":"missing_fields"}'); return; }
+  if (req.method === 'POST' && req.url === '/api/same-origin-reject') {
+    // same-origin check first (403 cross_site_refused), bot gate second (403 turnstile_failed)
+    ORIGINS_SEEN.push(req.headers.origin);
+    let host = ''; try { host = new URL(req.headers.origin || '').host; } catch { /* none */ }
+    res.writeHead(403, { 'content-type': 'application/json' });
+    res.end(host && host === req.headers.host ? '{"ok":false,"error":"turnstile_failed"}' : '{"ok":false,"error":"cross_site_refused"}');
+    return;
+  }
   if (req.method === 'POST' && req.url === '/api/routed-reject') {
     // router first (400 unknown_form_type), bot gate second (403 turnstile_failed)
     let body = '';
@@ -429,6 +440,18 @@ function runCli(extraEnv, script = fileURLToPath(new URL('./check.mjs', import.m
     FORM_ENDPOINTS: '#checkout-form => /api/reject mode=json token=turnstileToken expect=turnstile_failed\n#checkout-form => /api/accept mode=json',
   });
   check('e2e skip-verify behind the second entry: exit 1, ACCEPTED reported for that endpoint', r.code === 1 && r.summary.includes(`${BASE}/api/accept (tokenless POST) — endpoint ACCEPTED`), `${r.stderr} ${r.summary}`);
+}
+// a same-origin check ahead of the bot gate: the probe POSTs with the form page's Origin, as a
+// browser does — without it the reject comes from the CSRF layer and misses the gate signature
+{
+  ORIGINS_SEEN.length = 0;
+  const r = await runCli({
+    URLS: `${BASE}/page-same-origin.html`, FAIL_ON_CRITICAL: 'true',
+    FORM_ENDPOINTS: '#login-form => /api/same-origin-reject expect=turnstile_failed',
+  });
+  check('e2e same-origin check: both POSTs pass it and reach the bot gate → exit 0', r.code === 0, `${r.stderr} ${r.summary}`);
+  check('e2e same-origin check: the gate signature is in both rejects', r.summary.split('signature "turnstile_failed" present').length === 3, r.summary);
+  check('e2e same-origin check: each POST carried the page\'s Origin', ORIGINS_SEEN.length === 2 && ORIGINS_SEEN.every((o) => o === BASE), JSON.stringify(ORIGINS_SEEN));
 }
 // submit-probe off → sitekey checks only, skip-verify endpoint NOT probed
 {

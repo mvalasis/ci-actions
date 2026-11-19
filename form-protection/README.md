@@ -29,6 +29,11 @@ mail, or place an order. That fall-through is also why `expect=` matters: it
 distinguishes the bot-gate's reject signature from a later layer's, catching
 skip-verify servers that hide behind a field-validation 400.
 
+Each probe POST carries `Origin: <origin of the page the form is on>` (the
+endpoint's own origin when no page URL parses), as a browser's does, so an
+endpoint that refuses cross-site POSTs before its bot gate (a same-origin check
+on `Origin` / `Sec-Fetch-Site`) still lets the probe reach the gate (v1.32.2).
+
 ## Inputs
 
 Mirrors `seo-aeo`: `urls` / `sitemap-url`, `fail-on-critical` (default
@@ -120,7 +125,8 @@ reject without the signature.
 parsing, epn/lampakia-shaped pages, one form carrying several entries, verdict
 table) plus a local `node:http`
 server e2e that runs the real CLI subprocess against fixture pages and
-reject/accept/wrong-layer endpoints, asserting summaries AND exit codes.
+reject/accept/wrong-layer/same-origin-checked endpoints, asserting summaries AND exit codes
+(and that each probe POST carries the page's `Origin`).
 No external network. CI: `.github/workflows/form-protection-selftest.yml`
 (+ a live report-mode smoke against epn.one).
 

@@ -77,12 +77,21 @@ async function fetchPage(url) {
   catch (e1) { await sleep(1500); try { return await followFetch(url); } catch (e2) { return { error: e2.message || String(e2) }; } }
 }
 
+// The Origin a browser puts on the form's POST: the page the form sits on, else the endpoint's own.
+// Without it a site that refuses a cross-site POST (a same-origin check on Origin/Sec-Fetch-Site that
+// answers 403 before the bot challenge runs) refuses the probe at the wrong layer — a false red
+// whenever the entry sets `expect` (v1.32.2).
+function originFor(page, endpoint) {
+  for (const u of [page, endpoint]) { try { const o = new URL(u).origin; if (o && o !== 'null') return o; } catch { /* next */ } }
+  return '';
+}
+
 // POST probes never follow redirects (a 3xx answer is itself a verdict input).
-async function postProbe(url, { body, contentType }) {
+async function postProbe(url, { body, contentType }, origin = '') {
   const doPost = async () => {
     const r = await fetch(url, {
       method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(25000),
-      headers: headersFor(url, { 'content-type': contentType }),
+      headers: headersFor(url, { 'content-type': contentType, ...(origin ? { origin } : {}) }),
       body,
     });
     return { status: r.status, body: await r.text() };
@@ -220,7 +229,7 @@ function finish(code) {
     for (const surface of byEndpoint.values()) {
       note(`- **${safe(surface.endpoint, 160)}** (${surface.mode}${surface.expect ? `, expect="${safe(surface.expect, 40)}"` : ''}) ← ${safe([...new Set(surface.forms)].join(' · '), 220)}`);
       for (const kind of ['tokenless', 'junk-token']) {
-        const r = await postProbe(surface.endpoint, buildProbeBody(surface, kind));
+        const r = await postProbe(surface.endpoint, buildProbeBody(surface, kind), originFor(surface.page, surface.endpoint));
         if (r.error) { note(`  - ⚠️ ${kind} POST — network error (${safe(r.error, 120)}); probe inconclusive`); warn++; continue; }
         const verdict = judgeProbe({ kind, status: r.status, body: r.body, expect: surface.expect, endpoint: surface.endpoint });
         tally([verdict], surface.endpoint, kind);
