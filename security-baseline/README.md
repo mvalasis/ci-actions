@@ -49,7 +49,7 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }       # diff scope + history secrets need git history
       - uses: mvalasis/ci-actions/security-baseline@v1
         with:

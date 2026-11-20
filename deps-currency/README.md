@@ -103,7 +103,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: mvalasis/ci-actions/deps-currency@v1
         with:
           severity-floor: HIGH           # CRITICAL | HIGH | MODERATE | LOW

@@ -52,7 +52,7 @@ jobs:
   contract:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6        # brings your committed contract manifest
+      - uses: actions/checkout@v7        # brings your committed contract manifest
       - uses: mvalasis/ci-actions/contract-check@v1
         with:
           manifest: contract/wp-rest.json

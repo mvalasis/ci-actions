@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v6      # brings scripts/verify-nav.json
+      - uses: actions/checkout@v7      # brings scripts/verify-nav.json
       - uses: mvalasis/ci-actions/verify-homepage@v1
         with:
           urls: |

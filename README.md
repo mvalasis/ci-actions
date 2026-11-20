@@ -1728,7 +1728,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6        # brings your scripts/linkcheck-allow.txt
+      - uses: actions/checkout@v7        # brings your scripts/linkcheck-allow.txt
       - uses: mvalasis/ci-actions/linkcheck@v1
         with:
           sitemap-url: https://www.example.com/sitemap_index.xml

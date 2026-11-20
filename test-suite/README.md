@@ -98,9 +98,9 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # install deps in a prior step (the action runs the tests, it does not install them):
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: '22' }
       - run: npm ci                     # or: pnpm i --frozen-lockfile / bun install --frozen-lockfile / composer install
       - uses: mvalasis/ci-actions/test-suite@v1
