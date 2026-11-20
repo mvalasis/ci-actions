@@ -32,8 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '22' }
       - name: Offline self-test (stand-in scanners on 127.0.0.1)
         run: node agent-benchmark/scripts/selftest.mjs
@@ -43,7 +43,7 @@ jobs:
     needs: offline-selftest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - id: bench
         uses: ./agent-benchmark
         with:

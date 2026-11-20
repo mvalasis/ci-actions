@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Behavioural self-test
         shell: bash
@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # The private half of this key was deleted the moment it was made, so no commit carries a
       # signature it can verify and the step must refuse whatever tip this run is on.

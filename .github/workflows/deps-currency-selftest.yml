@@ -21,8 +21,8 @@ jobs:
   engine-selftest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '22' }
       - name: Offline engine self-test
         working-directory: deps-currency
@@ -38,8 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '22' }
       # action.yml's default, through the installer the action runs: a default that is not the pin
       # in security-baseline/tool-pins.txt has no digest, so this step fails.
@@ -94,8 +94,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '22' }
       - name: Precondition — no osv-scanner on this runner yet
         shell: bash

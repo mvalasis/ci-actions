@@ -29,8 +29,8 @@ jobs:
   engine-selftest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '22' }
       - name: Offline tier-engine self-test
         working-directory: security-baseline
@@ -39,7 +39,7 @@ jobs:
   rules-selftest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # The semgrep callers run: the hashed lock, through the action's own installer.
       - name: Install semgrep (pinned, every package hash-checked)
         run: bash security-baseline/scripts/install-pinned.sh semgrep
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [engine-selftest, rules-selftest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
       # report-mode self-scan of this repo — proves the full action wires up and never blocks itself.
       # Expect `critical: 0`: the three waivers that keep it there are listed in
@@ -111,7 +111,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Precondition — no semgrep, no /usr/local/bin/gitleaks on this runner yet
         shell: bash
         run: |

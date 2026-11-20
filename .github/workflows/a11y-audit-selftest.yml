@@ -61,7 +61,7 @@ jobs:
             expect_major: '3'
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Assert the interpreter this leg is meant to cover
         shell: bash
@@ -86,7 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install, token scope and verdicts, for real (selftest-install.sh)
         shell: bash
@@ -122,7 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Every advisory counts (floor LOW): pa11y-ci runs on every caller's runner. No issue is opened
       # here; a red run is the signal (README §Notes, "Refreshing the lockfile").
       - name: No known advisory on a package the lock installs (osv.dev)

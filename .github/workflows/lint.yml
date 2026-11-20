@@ -68,8 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '22' }
 
       # The linter's scrubber (comments/strings/regex blanking) fails in the
@@ -85,8 +85,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '22' }
       - name: Every tool pinned, every npm lock hashed, nothing installed around them (offline)
         run: bash security-baseline/scripts/selftest-pins.sh --offline
@@ -95,8 +95,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '22' }
       # As in entrypoint-output: a tokenizer that misreads fails in the PERMISSIVE direction.
       - name: Lint self-test (tokenizer + matcher fixtures)
