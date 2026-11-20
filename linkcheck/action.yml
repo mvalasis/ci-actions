@@ -65,7 +65,7 @@ runs:
     # the report, and re-arms after three good runs.
     - name: Restore the crawl-size baseline
       if: ${{ inputs.manage-baseline == 'true' }}
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         path: .linkcheck-baseline.json
         key: linkcheck-baseline-v1-${{ inputs.host }}-${{ github.run_id }}
@@ -275,7 +275,7 @@ runs:
               && inputs.crawl-floor-fraction != '0'
               && steps.floor.outputs.decision != 'collapsed'
               && (steps.crawl.outputs.verdict == 'clean' || steps.crawl.outputs.verdict == 'broken') }}
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v6
       with:
         path: .linkcheck-baseline.json
         key: linkcheck-baseline-v1-${{ inputs.host }}-${{ github.run_id }}
